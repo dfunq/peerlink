@@ -21,7 +21,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 HOME = os.environ.get("PEERLINK_HOME", os.path.expanduser("~/.peerlink"))
 CONFIG_PATH = os.path.join(HOME, "config.json")
 PID_PATH = os.path.join(HOME, "daemon.pid")
@@ -54,6 +54,9 @@ DEFAULT_CONFIG = {
     "max_hops": 6,
     "rate_limit_per_min": 12,
     "guidance": DEFAULT_GUIDANCE,
+    "roster_in_prompt": True,
+    "auto_summary": True,
+    "summary_model": "haiku",
     "sessions": {},
     "remotes": [],
     "listen_host": "127.0.0.1",
@@ -107,6 +110,9 @@ def client_config(sid):
         "inject_while_busy": config["inject_while_busy"],
         "guidance": config["guidance"],
         "muted": s["muted"],
+        "roster_in_prompt": config["roster_in_prompt"],
+        "auto_summary": config["auto_summary"],
+        "summary_model": config["summary_model"],
     }
 
 
@@ -529,6 +535,9 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 </div>
 <div class="check"><input type="checkbox" name="auto_wake_idle" id="aw"><label for="aw" style="margin:0">Wake idle sessions when a message arrives</label></div>
 <div class="check"><input type="checkbox" name="inject_while_busy" id="ib"><label for="ib" style="margin:0">Deliver into a running turn</label></div>
+<div class="check"><input type="checkbox" name="roster_in_prompt" id="rp"><label for="rp" style="margin:0">Show each session the live peer list when it changes</label></div>
+<div class="check"><input type="checkbox" name="auto_summary" id="as"><label for="as" style="margin:0">Keep session summaries current automatically</label></div>
+<div class="row"><div><label>Summary model</label><input type="text" name="summary_model"></div><div></div></div>
 <label>Guidance given to every session (when to message peers)</label><textarea name="guidance"></textarea>
 <label>Remote daemons (one URL per line, e.g. http://other-mac.local:7899)</label><textarea name="remotes" style="min-height:60px"></textarea>
 <div class="row"><div><label>Listen host (restart daemon to apply; use 0.0.0.0 for remotes)</label><input type="text" name="listen_host"></div>
