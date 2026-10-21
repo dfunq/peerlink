@@ -19,7 +19,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null) {
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.4.0' })
+    if (path === '/api/health') return ok({ ok: true, version: '0.4.1' })
     if (path === '/api/sessions') return ok({ id: body.id, name: body.name, config: { poll_interval_ms: 600000 }, previous })
     if (path === '/api/peers') return ok({ peers })
     return ok({ name: 'web', config: { poll_interval_ms: 600000 }, inbox: [], peer_count: peerCount })
