@@ -1,6 +1,6 @@
 {
   "name": "peerlink",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Lets Claude Code sessions discover and message each other through one lightweight daemon per machine, with a web UI for config.",
   "author": { "name": "Dillon" },
   "license": "MIT"
