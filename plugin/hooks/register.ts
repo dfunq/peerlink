@@ -2,7 +2,9 @@ import type { EngineInterface, Register } from 'claude-code'
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.3.0'
+const DAEMON_VERSION = '0.4.0'
+// Recent work in this folder (Claude Code's own titles, commits) counts this far back.
+const HISTORY_DAYS = 14
 
 type PeerMessage = {
   id: string
@@ -26,13 +28,27 @@ type ClientConfig = {
   summary_model: string
 }
 
+type Previous = { summary: string; name: string; ts: number } | null
+
 const SUMMARY_SYSTEM =
-  'You keep the one-line status other Claude Code sessions see for this session. In at most 200 characters say what it is working on, in which repo or service, and what it could answer questions about. Plain text, no preamble, no quotes. If the current status is still accurate, reply exactly UNCHANGED.'
+  'You keep the one-line status other Claude agents see for this agent. In at most 200 characters say what it is working on, in which repo or service, and what it could answer questions about. Plain text, no preamble, no quotes. If the current status is still accurate, reply exactly UNCHANGED.'
 
 // Summaries cost a model call, and every change is resent to each peer: refresh only this often.
 const SUMMARY_EVERY_TURNS = 3
 const SUMMARY_MIN_GAP_MS = 2 * 60_000
 const MANUAL_SUMMARY_HOLD_MS = 10 * 60_000
+
+const HELP = `peerlink commands:
+  /peerlink web            open the web UI (one-time sign-in link)
+  /peerlink status         daemon, this agent, peers
+  /peerlink peers          list live agents
+  /peerlink name <name>    rename this agent
+  /peerlink summary <text> set what peers see for this agent
+  /peerlink wake on|off|default   whether a message starts a turn here when idle
+  /peerlink mute <agent> | unmute <agent>
+  /peerlink restart        restart the daemon
+  /peerlink rotate-key     new key; signs out every browser
+In a shell: ~/.peerlink/bin/peerlink help`
 
 // Module state: a hot reload starts it over and session.start registers again.
 let sessionId = ''
@@ -49,13 +65,35 @@ let summary = ''
 let turnsSinceSummary = 0
 let hasSummarizedTalk = false
 let peerCount = 0
+let previous: Previous = null
+let home = ''
+let key = ''
 
-async function call($: EngineInterface, method: string, path: string, body?: unknown) {
+async function peerlinkHome($: EngineInterface) {
+  if (!home) home = (await $.env.get('PEERLINK_HOME')) ?? `${(await $.env.get('HOME')) ?? ''}/.peerlink`
+  return home
+}
+
+async function loadKey($: EngineInterface) {
+  try {
+    key = String(await $.fs.read(`${await peerlinkHome($)}/key`)).trim()
+  } catch {
+    key = ''
+  }
+}
+
+async function call($: EngineInterface, method: string, path: string, body?: unknown, retried = false): Promise<{ ok: boolean; status: number; data: any }> {
+  if (!key) await loadKey($)
   const res = await $.http.fetch(DAEMON + path, {
     method,
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-Peerlink-Key': key },
     body: body === undefined ? undefined : JSON.stringify(body),
   })
+  // The key was rotated: read it again once.
+  if (res.status === 401 && !retried) {
+    await loadKey($)
+    return call($, method, path, body, true)
+  }
   let data: any = {}
   try {
     data = JSON.parse(res.text)
@@ -80,7 +118,7 @@ async function daemonVersion($: EngineInterface) {
 }
 
 // Start the daemon, or replace an older one. An older plugin still running in
-// another session may restart its own daemon in the gap, so try a few times.
+// another agent may restart its own daemon in the gap, so try a few times.
 async function ensureDaemon($: EngineInterface) {
   for (let attempt = 0; attempt < 4; attempt++) {
     const version = await daemonVersion($)
@@ -89,32 +127,34 @@ async function ensureDaemon($: EngineInterface) {
       await call($, 'POST', '/api/shutdown', {}).catch(() => {})
       await $.clock.sleep(300)
     }
-    await $.process.run(['python3', `${$.plugin.root}/daemon/peerlinkd.py`, '--detach'], { timeoutMs: 15000 })
+    await $.process.run(['python3', `${$.plugin.root}/daemon/peerlinkd.py`, 'start'], { timeoutMs: 15000 })
+    key = ''
   }
   return (await daemonVersion($)) !== undefined
 }
 
-async function currentBranch($: EngineInterface, cwd: string) {
-  const run = await $.process.run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], { cwd, timeoutMs: 5000 })
+async function git($: EngineInterface, cwd: string, args: string[]) {
+  const run = await $.process.run(['git', ...args], { cwd, timeoutMs: 5000 })
   return run.exitCode === 0 ? run.stdout.trim() : ''
 }
 
 async function announce($: EngineInterface) {
   const cwd = await $.session.cwd()
   const repo = await $.session.repo()
-  const base = cwd.split('/').filter(Boolean).at(-1) ?? 'session'
   const res = await call($, 'POST', '/api/sessions', {
     id: sessionId,
-    name: base,
+    name: cwd.split('/').filter(Boolean).at(-1) ?? 'agent',
     cwd,
     repo: repo?.remote ?? repo?.root ?? '',
-    branch: repo ? await currentBranch($, cwd) : '',
+    branch: repo ? await git($, cwd, ['rev-parse', '--abbrev-ref', 'HEAD']) : '',
     model: await $.session.model(),
     busy,
+    summary: summary || undefined,
   })
   if (res.ok) {
     myName = res.data.name
     cfg = res.data.config
+    previous = res.data.previous ?? null
   }
   return res.ok
 }
@@ -123,6 +163,11 @@ function frame(m: PeerMessage) {
   const from = m.from.includes('@') ? m.from : m.from_name
   const attrs = [`id="${m.id}"`, `from="${from}"`, m.reply_to ? `re="${m.reply_to}"` : '', m.expects_reply ? 'reply="expected"' : '']
   return `<peer-message ${attrs.filter(Boolean).join(' ')}>\n${m.text}\n</peer-message>`
+}
+
+function showStatus($: EngineInterface) {
+  const waiting = pending.length ? ` · ${pending.length} waiting` : ''
+  $.ui.status(myName ? `peerlink: ${myName} · ${peerCount} peer${peerCount === 1 ? '' : 's'}${waiting}` : undefined)
 }
 
 async function deliver($: EngineInterface) {
@@ -137,7 +182,7 @@ async function deliver($: EngineInterface) {
     return
   }
   if (!cfg.auto_wake_idle) {
-    $.ui.status(`peerlink: ${batch.length} message(s) waiting; ask me to check my inbox`)
+    showStatus($)
     return
   }
   pending = []
@@ -172,6 +217,7 @@ async function poll($: EngineInterface) {
   if (!hadPeers && peerCount > 0 && !hasSummarizedTalk && !busy) void summarize($)
   pending.push(...(res.data.inbox as PeerMessage[]))
   if (cfg && before !== cfg.poll_interval_ms) startPolling($)
+  showStatus($)
   await deliver($)
 }
 
@@ -180,7 +226,7 @@ function peerLine(p: any) {
   return `- ${p.name}${p.remote ? '@' + p.host : ''}: ${where} — ${(p.summary || 'no summary yet').slice(0, 140)}`
 }
 
-// The live peers, for the model to read beside the prompt; only when the list changed since it last saw it.
+// The live agents, for the model to read beside the prompt; only when the list changed since it last saw it.
 async function rosterContext($: EngineInterface) {
   if (!cfg || cfg.roster_in_prompt === false || cfg.muted) return undefined
   const res = await call($, 'GET', `/api/peers?exclude=${encodeURIComponent(sessionId)}`)
@@ -190,19 +236,22 @@ async function rosterContext($: EngineInterface) {
   if (roster === lastRoster) return undefined
   lastRoster = roster
   return peers.length
-    ? `Peers now live (send_message to reach one):\n${roster}`
-    : 'peerlink: no other peer sessions are live now.'
+    ? `Peer agents now live (send_message to reach one):\n${roster}`
+    : 'peerlink: no other agents are live now.'
 }
 
-async function postSummary($: EngineInterface, next: string) {
+async function postSummary($: EngineInterface, next: string, kind: 'seed' | 'model' | 'manual') {
   summary = next.slice(0, 300)
-  await call($, 'POST', `/api/sessions/${sessionId}/heartbeat`, { summary })
+  await call($, 'POST', `/api/sessions/${sessionId}/heartbeat`, { summary, summary_kind: kind })
 }
 
-// A first summary with no model call: the project's own description, from its CLAUDE.md or README.
-async function seedSummary($: EngineInterface, cwd: string) {
-  const root = (await $.session.repo())?.root ?? cwd
-  const name = root.split('/').filter(Boolean).at(-1) ?? 'project'
+function clip(text: string, n: number) {
+  const flat = text.replace(/\s+/g, ' ').trim()
+  return flat.length > n ? `${flat.slice(0, n - 1)}…` : flat
+}
+
+// The project's own description, from its CLAUDE.md or README.
+async function projectDescription($: EngineInterface, root: string) {
   for (const file of ['CLAUDE.md', 'README.md', 'readme.md', 'README']) {
     let body = ''
     try {
@@ -214,9 +263,52 @@ async function seedSummary($: EngineInterface, cwd: string) {
       .split('\n')
       .map(l => l.trim())
       .find(l => l.length > 30 && !/^(#|<|!\[|\[!|```|\||-{3})/.test(l))
-    if (line) return `${name}: ${line.replace(/[*_`]/g, '').slice(0, 160)}`
+    if (line) return line.replace(/[*_`]/g, '')
   }
-  return `${name}${cwd !== root ? ` (${cwd.slice(root.length + 1)})` : ''}`
+  return ''
+}
+
+// What the most recent earlier Claude Code session in this folder was about: its own title, kept in its transcript.
+async function lastSessionTitle($: EngineInterface, cwd: string) {
+  const dir = `${(await $.env.get('HOME')) ?? ''}/.claude/projects/${cwd.replace(/[^A-Za-z0-9]/g, '-')}`
+  let entries: any[] = []
+  try {
+    entries = (await $.fs.list(dir)) as any[]
+  } catch {
+    return undefined
+  }
+  const cutoff = (await $.clock.now()) - HISTORY_DAYS * 86_400_000
+  const recent = entries
+    .filter(f => f.name.endsWith('.jsonl') && !f.name.startsWith(sessionId) && f.mtimeMs > cutoff)
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    .slice(0, 3)
+  for (const f of recent) {
+    const found = await $.process.run(['grep', '-h', '"type":"ai-title"', `${dir}/${f.name}`], { timeoutMs: 5000 })
+    const line = found.stdout.trim().split('\n').at(-1)
+    if (!line) continue
+    try {
+      const title = JSON.parse(line).aiTitle
+      if (title) return { title: String(title), mtimeMs: f.mtimeMs as number }
+    } catch {}
+  }
+  return undefined
+}
+
+// A first summary with no model call: what the last agent here did, the project, and its recent commits.
+async function seedSummary($: EngineInterface, cwd: string) {
+  const root = (await $.session.repo())?.root ?? cwd
+  const name = root.split('/').filter(Boolean).at(-1) ?? 'project'
+  const [description, title, commits] = await Promise.all([
+    projectDescription($, root),
+    lastSessionTitle($, cwd),
+    git($, cwd, ['log', '-3', `--since=${HISTORY_DAYS}.days`, '--format=%s']),
+  ])
+  const parts = [description ? `${name}: ${clip(description, 110)}` : name]
+  const prevMs = previous ? previous.ts * 1000 : 0
+  if (previous && prevMs >= (title?.mtimeMs ?? 0)) parts.push(`last agent here: ${clip(previous.summary, 110)}`)
+  else if (title) parts.push(`last session here: ${clip(title.title, 80)}`)
+  if (commits) parts.push(`recent commits: ${clip(commits.split('\n').join('; '), 90)}`)
+  return parts.join(' · ')
 }
 
 async function summarize($: EngineInterface) {
@@ -251,7 +343,7 @@ async function summarize($: EngineInterface) {
     turnsSinceSummary = 0
     hasSummarizedTalk = true
     const next = done.text.trim()
-    if (next && next !== 'UNCHANGED' && next !== summary) await postSummary($, next)
+    if (next && next !== 'UNCHANGED' && next !== summary) await postSummary($, next, 'model')
   } catch {
   } finally {
     summarizing = false
@@ -270,6 +362,92 @@ function text(t: string) {
 
 const daemonDown = () => text('The peerlink daemon is unreachable; it restarts on the next poll, try again shortly.')
 
+async function listPeers($: EngineInterface, withIds: boolean) {
+  const res = await call($, 'GET', `/api/peers?exclude=${encodeURIComponent(sessionId)}`)
+  if (!res.ok) return `Daemon error: ${res.data.error ?? res.status}`
+  const peers = res.data.peers as any[]
+  if (peers.length === 0) return 'No other agents are live right now.'
+  return peers
+    .map(
+      p =>
+        `- ${p.name}${p.remote ? '@' + p.host : ''}${withIds ? ` (id ${p.id})` : ''} — ${p.busy ? 'busy' : 'idle'}${p.muted ? ', muted' : ''}\n  dir: ${p.cwd}${p.branch ? ` [${p.branch}]` : ''}\n  summary: ${p.summary || '(none)'}`,
+    )
+    .join('\n')
+}
+
+async function setAgentConfig($: EngineInterface, id: string, patch: Record<string, unknown>) {
+  const current = await call($, 'GET', '/api/config')
+  const sessions = { ...(current.data.sessions ?? {}) }
+  sessions[id] = { ...(sessions[id] ?? {}), ...patch }
+  return call($, 'PUT', '/api/config', { sessions })
+}
+
+async function findAgent($: EngineInterface, name: string) {
+  const res = await call($, 'GET', '/api/peers?local=1')
+  const want = name.toLowerCase()
+  const hits = ((res.data.peers ?? []) as any[]).filter(p => p.name.toLowerCase() === want || p.id === name)
+  return hits.length === 1 ? hits[0] : undefined
+}
+
+async function runCommand($: EngineInterface, args: string): Promise<string> {
+  const [sub = 'help', ...rest] = args.trim().split(/\s+/).filter(Boolean)
+  const arg = rest.join(' ')
+  if (sub === 'help') return HELP
+  if (!(await ensureDaemon($))) return 'The peerlink daemon is not running and could not start (it needs python3).'
+  switch (sub) {
+    case 'web': {
+      const res = await call($, 'POST', '/api/web/link', {})
+      if (!res.ok) return `Could not make a sign-in link: ${res.data.error ?? res.status}`
+      await $.process.run(['open', res.data.url])
+      return `Opened the web UI with a one-time sign-in link (valid ${res.data.expires_in_s}s).`
+    }
+    case 'status': {
+      const st = (await call($, 'GET', '/api/status')).data
+      return `daemon ${st.version} (pid ${st.pid}) · ${st.sessions} live agents · ${st.queued} queued messages · ${st.browsers} signed-in browsers\nthis agent: ${myName} · wake on message: ${cfg?.auto_wake_idle ? 'on' : 'off'}${cfg?.muted ? ' · muted' : ''}\nsummary: ${summary || '(none yet)'}`
+    }
+    case 'peers':
+      return listPeers($, false)
+    case 'name': {
+      if (!arg) return 'Usage: /peerlink name <name>'
+      await setAgentConfig($, sessionId, { nickname: arg })
+      await poll($)
+      return `This agent is now "${myName}".`
+    }
+    case 'summary': {
+      if (!arg) return `Summary: ${summary || '(none yet)'}`
+      manualSummaryAt = await $.clock.now()
+      await postSummary($, arg, 'manual')
+      return 'Summary updated.'
+    }
+    case 'wake': {
+      const value = arg === 'on' ? true : arg === 'off' ? false : arg === 'default' ? null : undefined
+      if (value === undefined) return 'Usage: /peerlink wake on|off|default'
+      await setAgentConfig($, sessionId, { auto_wake: value })
+      await poll($)
+      return `Wake on message: ${cfg?.auto_wake_idle ? 'on' : 'off'}${value === null ? ' (the default)' : ''}.`
+    }
+    case 'mute':
+    case 'unmute': {
+      const agent = arg && (await findAgent($, arg))
+      if (!agent) return `No single live agent named "${arg}". /peerlink peers lists them.`
+      await setAgentConfig($, agent.id, { muted: sub === 'mute' })
+      return `${agent.name} is ${sub === 'mute' ? 'muted' : 'unmuted'}.`
+    }
+    case 'restart': {
+      await call($, 'POST', '/api/restart', {})
+      await $.clock.sleep(1500)
+      return (await ensureDaemon($)) ? 'The daemon restarted. Agents reconnect by themselves.' : 'The daemon did not come back; see ~/.peerlink/daemon.log.'
+    }
+    case 'rotate-key': {
+      await call($, 'POST', '/api/key/rotate', {})
+      await loadKey($)
+      return 'New key written. Every browser is signed out; agents pick up the new key by themselves.'
+    }
+    default:
+      return `Unknown command "${sub}".\n\n${HELP}`
+  }
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
@@ -277,18 +455,18 @@ export const register: Register = on => {
     await $.tool.register({
       name: 'list_peers',
       description:
-        "List live peer sessions with their folder, branch, current work and whether they're busy. Peers already appear beside the prompt when they change, so call this only for ids or busy state.",
+        "List live peer agents with their folder, branch, current work and whether they're busy. Peers already appear beside the prompt when they change, so call this only for ids or busy state.",
       inputSchema: { type: 'object', properties: {} },
       isDeferred: false,
     })
     await $.tool.register({
       name: 'send_message',
       description:
-        'Message a peer session by name, like messaging a teammate. It arrives in their session at once, waking it if idle. Keep it short, point to file paths rather than pasting, and set reply_to when answering.',
+        'Message a peer agent by name, like messaging a teammate. It arrives at once, starting a turn there if the agent is idle. Keep it short, point to file paths rather than pasting, and set reply_to when answering.',
       inputSchema: {
         type: 'object',
         properties: {
-          to: { type: 'string', description: 'Peer name or id' },
+          to: { type: 'string', description: 'Peer agent name or id' },
           text: { type: 'string', description: 'The message: what you need and why, briefly' },
           expects_reply: { type: 'boolean', description: 'True if you need an answer' },
           reply_to: { type: 'string', description: 'Id of the peer message you are answering' },
@@ -300,7 +478,7 @@ export const register: Register = on => {
     await $.tool.register({
       name: 'set_summary',
       description:
-        'Set the one-line summary peers see for this session (what you are working on and what you can help with). Update it when your focus changes.',
+        'Set the one-line summary peer agents see for you (what you are working on and what you can help with). Update it when your focus changes.',
       inputSchema: {
         type: 'object',
         properties: { summary: { type: 'string' } },
@@ -308,14 +486,21 @@ export const register: Register = on => {
       },
       isDeferred: false,
     })
-    await $.command.register({ name: 'peerlink', description: 'Open the peerlink web UI and show daemon status' })
+    await $.command.register({
+      name: 'peerlink',
+      description: 'peerlink: web UI, status, peers, name, wake, mute, restart, rotate-key',
+      argumentHint: 'web | status | peers | name <name> | wake on|off | mute <agent> | help',
+    })
     if (await ensureDaemon($)) {
       await announce($)
       startPolling($)
+      showStatus($)
       if ((await $.session.turns()) > 0) {
         void poll($).then(() => summarize($))
       } else {
-        void seedSummary($, e.cwd).then(seed => postSummary($, seed)).catch(() => {})
+        void seedSummary($, e.cwd)
+          .then(seed => postSummary($, seed, 'seed'))
+          .catch(() => {})
       }
     } else {
       $.ui.toast('peerlink: could not start the daemon (needs python3)')
@@ -350,10 +535,11 @@ export const register: Register = on => {
   })
 
   on('prompt.submit', async ($, e, next) => {
-    // Until a real summary exists, the first prompt says what this session is for.
+    // Until a real summary exists, the first prompt says what this agent is for.
     if (sessionId && !e.isMeta && !e.command && !hasSummarizedTalk && (await $.session.turns()) === 0 && e.text.trim()) {
-      const task = e.text.trim().replace(/\s+/g, ' ').slice(0, 110)
-      void postSummary($, `${summary.slice(0, 120)}${summary ? ' — ' : ''}now: ${task}`).catch(() => {})
+      const task = clip(e.text, 110)
+      const base = summary.split(' · ')[0] ?? ''
+      void postSummary($, `${base}${base ? ' · ' : ''}now: ${task}`, 'seed').catch(() => {})
     }
     if (!sessionId || e.command) return next(e)
     const roster = await rosterContext($)
@@ -369,26 +555,13 @@ export const register: Register = on => {
         {
           id: 'peerlink:guidance',
           scope: 'session',
-          text: `# Peer sessions\nPeers know you as "${myName}".\n${cfg.guidance}`,
+          text: `# Peer agents\nPeers know you as "${myName}".\n${cfg.guidance}`,
         },
       ],
     }
   })
 
-  on('tool.call', { tool: 'mcp__peerlink__list_peers' }, async $ => {
-    const res = await call($, 'GET', `/api/peers?exclude=${encodeURIComponent(sessionId)}`)
-    if (!res.ok) return text(`Daemon error: ${res.data.error ?? res.status}`)
-    const peers = res.data.peers as any[]
-    if (peers.length === 0) return text('No other live sessions right now.')
-    return text(
-      peers
-        .map(
-          p =>
-            `- ${p.name}${p.remote ? '@' + p.host : ''} (id ${p.id}) — ${p.busy ? 'busy' : 'idle'}${p.muted ? ', muted' : ''}\n  dir: ${p.cwd}${p.branch ? ` [${p.branch}]` : ''}\n  summary: ${p.summary || '(none)'}`,
-        )
-        .join('\n'),
-    )
-  }).catch(daemonDown)
+  on('tool.call', { tool: 'mcp__peerlink__list_peers' }, async $ => text(await listPeers($, true))).catch(daemonDown)
 
   on('tool.call', { tool: 'mcp__peerlink__send_message' }, async ($, e) => {
     const input = e as any
@@ -408,13 +581,9 @@ export const register: Register = on => {
 
   on('tool.call', { tool: 'mcp__peerlink__set_summary' }, async ($, e) => {
     manualSummaryAt = await $.clock.now()
-    await postSummary($, String((e as any).summary ?? ''))
+    await postSummary($, String((e as any).summary ?? ''), 'manual')
     return text('Summary updated.')
   }).catch(daemonDown)
 
-  on('command.run', { command: 'peerlink' }, async $ => {
-    const up = await ensureDaemon($)
-    if (up) await $.process.run(['open', DAEMON + '/'])
-    return { text: up ? `peerlink daemon at ${DAEMON} — you are "${myName}".` : 'peerlink daemon is not running (needs python3).' }
-  })
+  on('command.run', { command: 'peerlink' }, async ($, e) => ({ text: await runCommand($, e.args ?? '') }))
 }
