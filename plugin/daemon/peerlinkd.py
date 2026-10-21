@@ -21,7 +21,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 HOME = os.environ.get("PEERLINK_HOME", os.path.expanduser("~/.peerlink"))
 CONFIG_PATH = os.path.join(HOME, "config.json")
 PID_PATH = os.path.join(HOME, "daemon.pid")
@@ -30,7 +30,7 @@ MESSAGES_PATH = os.path.join(HOME, "messages.jsonl")
 PORT = int(os.environ.get("PEERLINK_PORT", "7899"))
 HOSTNAME = socket.gethostname().split(".")[0]
 
-DEFAULT_GUIDANCE = """\
+OLD_GUIDANCE_V1 = """\
 You can see and message other Claude Code sessions running for this user \
 (your "peers") with the peerlink tools.
 - Call list_peers when a task touches code, services or knowledge that another \
@@ -46,6 +46,20 @@ it if it is reasonable and in scope for your session, then reply once with \
 reply_to set. If it conflicts with what your user asked, say so to the peer.
 - Keep your summary current with set_summary when your focus changes."""
 
+DEFAULT_GUIDANCE = """\
+Other Claude Code sessions for this user are your peers: colleagues working \
+in other repos and folders on the same machine. Talk to them the way you \
+would message a teammate.
+- Reach out when a peer clearly owns what you need (their repo, service or \
+current task) instead of guessing, or when a change of yours affects them.
+- Be brief and direct. You share a filesystem with local peers: point to \
+paths and line numbers instead of pasting code or logs. Put all your \
+questions in one message.
+- Ask for a reply only when you need one, and keep working while you wait.
+- When a peer writes to you, help if it fits your user's goals, answer once \
+and to the point, and skip acknowledgements, thanks and sign-offs.
+- Tell your user about any peer exchange that changes your plan."""
+
 DEFAULT_CONFIG = {
     "poll_interval_ms": 3000,
     "peer_ttl_s": 30,
@@ -53,7 +67,7 @@ DEFAULT_CONFIG = {
     "inject_while_busy": True,
     "max_hops": 6,
     "rate_limit_per_min": 12,
-    "guidance": DEFAULT_GUIDANCE,
+    "guidance": "",
     "roster_in_prompt": True,
     "auto_summary": True,
     "summary_model": "haiku",
@@ -86,6 +100,8 @@ def load_config():
         except (OSError, ValueError) as err:
             log("config unreadable, using defaults:", err)
     merged = {**DEFAULT_CONFIG, **data}
+    if merged.get("guidance") == OLD_GUIDANCE_V1:  # an untouched old default follows the new one
+        merged["guidance"] = ""
     config.clear()
     config.update(merged)
     save_config()
@@ -108,7 +124,7 @@ def client_config(sid):
         "poll_interval_ms": config["poll_interval_ms"],
         "auto_wake_idle": config["auto_wake_idle"] if s["auto_wake"] is None else s["auto_wake"],
         "inject_while_busy": config["inject_while_busy"],
-        "guidance": config["guidance"],
+        "guidance": config["guidance"] or DEFAULT_GUIDANCE,
         "muted": s["muted"],
         "roster_in_prompt": config["roster_in_prompt"],
         "auto_summary": config["auto_summary"],
@@ -119,6 +135,14 @@ def client_config(sid):
 def display_name(rec):
     nick = session_cfg(rec["id"])["nickname"]
     return nick or rec.get("name") or rec["id"]
+
+
+def unique_name(name, sid):
+    taken = {display_name(r).lower() for r in sessions.values() if r["id"] != sid and is_live(r)}
+    candidate, n = name, 2
+    while candidate.lower() in taken:
+        candidate, n = f"{name}-{n}", n + 1
+    return candidate
 
 
 def is_live(rec, now=None):
@@ -346,7 +370,7 @@ class Handler(BaseHTTPRequestHandler):
         rest = parts[1:]
 
         if rest == ["health"]:
-            return self.reply(200, {"ok": True, "version": VERSION, "pid": os.getpid(), "host": HOSTNAME})
+            return self.reply(200, {"ok": True, "version": VERSION, "pid": os.getpid(), "host": HOSTNAME, "default_guidance": DEFAULT_GUIDANCE})
 
         if rest == ["config"]:
             if method == "GET":
@@ -373,7 +397,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(400, {"error": "id required"})
             with lock:
                 rec = sessions.get(sid, {"id": sid, "started": time.time()})
-                for k in ("name", "cwd", "repo", "branch", "summary", "model"):
+                if b.get("name") and not rec.get("name"):
+                    rec["name"] = unique_name(b["name"], sid)
+                for k in ("cwd", "repo", "branch", "summary", "model"):
                     if b.get(k) is not None:
                         rec[k] = b[k]
                 rec["busy"] = bool(b.get("busy", False))
@@ -396,7 +422,8 @@ class Handler(BaseHTTPRequestHandler):
                     rec["summary"] = b["summary"][:500]
                 cfg = client_config(sid)
             inbox = [] if cfg["muted"] else take_inbox(sid)
-            return self.reply(200, {"name": display_name(rec), "config": cfg, "inbox": inbox})
+            others = sum(1 for p in local_peers() if p["id"] != sid) + len(config.get("remotes", []))
+            return self.reply(200, {"name": display_name(rec), "config": cfg, "inbox": inbox, "peer_count": others})
 
         if len(rest) == 2 and rest[0] == "sessions" and method == "DELETE":
             with lock:
@@ -538,7 +565,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <div class="check"><input type="checkbox" name="roster_in_prompt" id="rp"><label for="rp" style="margin:0">Show each session the live peer list when it changes</label></div>
 <div class="check"><input type="checkbox" name="auto_summary" id="as"><label for="as" style="margin:0">Keep session summaries current automatically</label></div>
 <div class="row"><div><label>Summary model</label><input type="text" name="summary_model"></div><div></div></div>
-<label>Guidance given to every session (when to message peers)</label><textarea name="guidance"></textarea>
+<label>Guidance given to every session (when to message peers)</label><textarea name="guidance" id="guidance"></textarea><div class="mut small">Leave empty to use the built-in guidance shown in grey.</div>
 <label>Remote daemons (one URL per line, e.g. http://other-mac.local:7899)</label><textarea name="remotes" style="min-height:60px"></textarea>
 <div class="row"><div><label>Listen host (restart daemon to apply; use 0.0.0.0 for remotes)</label><input type="text" name="listen_host"></div>
 <div><label>Shared token for remote daemons</label><input type="text" name="token"></div></div>
@@ -567,7 +594,8 @@ async function refresh(){
 }
 async function loadCfg(){cfg=await api('/api/config');const f=$('#cfg');
   for(const el of f.elements){if(!el.name)continue;const v=cfg[el.name];
-    if(el.type==='checkbox')el.checked=!!v;else if(el.name==='remotes')el.value=(v||[]).join('\n');else el.value=v??''}}
+    if(el.type==='checkbox')el.checked=!!v;else if(el.name==='remotes')el.value=(v||[]).join('\n');else el.value=v??''}
+  $('#guidance').placeholder=(await api('/api/health')).default_guidance||''}
 $('#cfg').addEventListener('submit',async e=>{e.preventDefault();const f=e.target,b={};
   for(const el of f.elements){if(!el.name)continue;
     b[el.name]=el.type==='checkbox'?el.checked:el.type==='number'?Number(el.value):el.name==='remotes'?el.value.split('\n').map(s=>s.trim()).filter(Boolean):el.value}

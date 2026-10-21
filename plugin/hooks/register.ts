@@ -2,7 +2,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.2.0'
+const DAEMON_VERSION = '0.3.0'
 
 type PeerMessage = {
   id: string
@@ -27,7 +27,12 @@ type ClientConfig = {
 }
 
 const SUMMARY_SYSTEM =
-  'You write the one-line status other Claude Code sessions see for this session. In at most 200 characters say what it is working on, in which repo or service, and what it could answer questions about. Plain text, no preamble, no quotes.'
+  'You keep the one-line status other Claude Code sessions see for this session. In at most 200 characters say what it is working on, in which repo or service, and what it could answer questions about. Plain text, no preamble, no quotes. If the current status is still accurate, reply exactly UNCHANGED.'
+
+// Summaries cost a model call, and every change is resent to each peer: refresh only this often.
+const SUMMARY_EVERY_TURNS = 3
+const SUMMARY_MIN_GAP_MS = 2 * 60_000
+const MANUAL_SUMMARY_HOLD_MS = 10 * 60_000
 
 // Module state: a hot reload starts it over and session.start registers again.
 let sessionId = ''
@@ -40,6 +45,10 @@ let lastRoster = ''
 let manualSummaryAt = -Infinity
 let lastSummaryAt = -Infinity
 let summarizing = false
+let summary = ''
+let turnsSinceSummary = 0
+let hasSummarizedTalk = false
+let peerCount = 0
 
 async function call($: EngineInterface, method: string, path: string, body?: unknown) {
   const res = await $.http.fetch(DAEMON + path, {
@@ -61,19 +70,28 @@ function isOlder(version: string, than: string) {
   return false
 }
 
-async function ensureDaemon($: EngineInterface) {
+async function daemonVersion($: EngineInterface) {
   try {
     const health = await call($, 'GET', '/api/health')
-    if (health.ok && !isOlder(String(health.data.version ?? '0'), DAEMON_VERSION)) return true
-    if (health.ok) {
-      await call($, 'POST', '/api/shutdown', {})
-      await $.clock.sleep(500)
+    return health.ok ? String(health.data.version ?? '0') : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// Start the daemon, or replace an older one. An older plugin still running in
+// another session may restart its own daemon in the gap, so try a few times.
+async function ensureDaemon($: EngineInterface) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const version = await daemonVersion($)
+    if (version !== undefined && !isOlder(version, DAEMON_VERSION)) return true
+    if (version !== undefined) {
+      await call($, 'POST', '/api/shutdown', {}).catch(() => {})
+      await $.clock.sleep(300)
     }
-  } catch {}
-  const run = await $.process.run(['python3', `${$.plugin.root}/daemon/peerlinkd.py`, '--detach'], {
-    timeoutMs: 15000,
-  })
-  return run.exitCode === 0
+    await $.process.run(['python3', `${$.plugin.root}/daemon/peerlinkd.py`, '--detach'], { timeoutMs: 15000 })
+  }
+  return (await daemonVersion($)) !== undefined
 }
 
 async function currentBranch($: EngineInterface, cwd: string) {
@@ -87,7 +105,7 @@ async function announce($: EngineInterface) {
   const base = cwd.split('/').filter(Boolean).at(-1) ?? 'session'
   const res = await call($, 'POST', '/api/sessions', {
     id: sessionId,
-    name: `${base}-${sessionId.slice(0, 4)}`,
+    name: base,
     cwd,
     repo: repo?.remote ?? repo?.root ?? '',
     branch: repo ? await currentBranch($, cwd) : '',
@@ -102,10 +120,9 @@ async function announce($: EngineInterface) {
 }
 
 function frame(m: PeerMessage) {
-  const ask = m.expects_reply
-    ? `They expect a reply: answer with ${'mcp__peerlink__send_message'} (to: "${m.from}", reply_to: "${m.id}").`
-    : `No reply is required unless you need something from them (to: "${m.from}", reply_to: "${m.id}").`
-  return `<peer-message id="${m.id}" from="${m.from_name}" hops="${m.hops}">\n${m.text}\n</peer-message>\n${ask}`
+  const from = m.from.includes('@') ? m.from : m.from_name
+  const attrs = [`id="${m.id}"`, `from="${from}"`, m.reply_to ? `re="${m.reply_to}"` : '', m.expects_reply ? 'reply="expected"' : '']
+  return `<peer-message ${attrs.filter(Boolean).join(' ')}>\n${m.text}\n</peer-message>`
 }
 
 async function deliver($: EngineInterface) {
@@ -114,7 +131,7 @@ async function deliver($: EngineInterface) {
   if (busy) {
     if (!cfg.inject_while_busy) return
     pending = []
-    const text = `Message(s) from peer Claude sessions arrived while you were working:\n\n${batch.map(frame).join('\n\n')}`
+    const text = `Peer message (reply with send_message, reply_to its id):\n${batch.map(frame).join('\n')}`
     const res = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] } })
     if ('deny' in res && res.deny) pending = [...batch, ...pending]
     return
@@ -127,7 +144,7 @@ async function deliver($: EngineInterface) {
   busy = true
   $.ui.toast(`Message from ${batch.map(m => m.from_name).join(', ')}`)
   await $.prompt.submit({
-    text: `You received message(s) from peer Claude sessions. Handle them per the peerlink guidance, then reply if needed.\n\n${batch.map(frame).join('\n\n')}`,
+    text: `Peer message (reply with send_message, reply_to its id):\n${batch.map(frame).join('\n')}`,
   })
 }
 
@@ -149,6 +166,10 @@ async function poll($: EngineInterface) {
   const before = cfg?.poll_interval_ms
   cfg = res.data.config
   myName = res.data.name
+  const hadPeers = peerCount > 0
+  peerCount = Number(res.data.peer_count ?? 0)
+  // The first peer to show up gets a real summary to read.
+  if (!hadPeers && peerCount > 0 && !hasSummarizedTalk && !busy) void summarize($)
   pending.push(...(res.data.inbox as PeerMessage[]))
   if (cfg && before !== cfg.poll_interval_ms) startPolling($)
   await deliver($)
@@ -156,7 +177,7 @@ async function poll($: EngineInterface) {
 
 function peerLine(p: any) {
   const where = p.cwd.replace(/^\/Users\/[^/]+/, '~') + (p.branch ? ` [${p.branch}]` : '')
-  return `- ${p.name}${p.remote ? '@' + p.host : ''}: ${where} — ${(p.summary || 'no summary yet').slice(0, 160)}`
+  return `- ${p.name}${p.remote ? '@' + p.host : ''}: ${where} — ${(p.summary || 'no summary yet').slice(0, 140)}`
 }
 
 // The live peers, for the model to read beside the prompt; only when the list changed since it last saw it.
@@ -169,38 +190,68 @@ async function rosterContext($: EngineInterface) {
   if (roster === lastRoster) return undefined
   lastRoster = roster
   return peers.length
-    ? `Live peer sessions (peerlink). Message one with mcp__peerlink__send_message when it saves real work:\n${roster}`
+    ? `Peers now live (send_message to reach one):\n${roster}`
     : 'peerlink: no other peer sessions are live now.'
+}
+
+async function postSummary($: EngineInterface, next: string) {
+  summary = next.slice(0, 300)
+  await call($, 'POST', `/api/sessions/${sessionId}/heartbeat`, { summary })
+}
+
+// A first summary with no model call: the project's own description, from its CLAUDE.md or README.
+async function seedSummary($: EngineInterface, cwd: string) {
+  const root = (await $.session.repo())?.root ?? cwd
+  const name = root.split('/').filter(Boolean).at(-1) ?? 'project'
+  for (const file of ['CLAUDE.md', 'README.md', 'readme.md', 'README']) {
+    let body = ''
+    try {
+      body = String(await $.fs.read(`${root}/${file}`))
+    } catch {
+      continue
+    }
+    const line = body
+      .split('\n')
+      .map(l => l.trim())
+      .find(l => l.length > 30 && !/^(#|<|!\[|\[!|```|\||-{3})/.test(l))
+    if (line) return `${name}: ${line.replace(/[*_`]/g, '').slice(0, 160)}`
+  }
+  return `${name}${cwd !== root ? ` (${cwd.slice(root.length + 1)})` : ''}`
 }
 
 async function summarize($: EngineInterface) {
   const now = await $.clock.now()
   if (!cfg || cfg.auto_summary === false || summarizing || !sessionId) return
-  if (now - manualSummaryAt < 10 * 60_000 || now - lastSummaryAt < 60_000) return
+  // Nobody to read it: spend nothing.
+  if (peerCount === 0) return
+  if (now - manualSummaryAt < MANUAL_SUMMARY_HOLD_MS) return
+  if (hasSummarizedTalk && (turnsSinceSummary < SUMMARY_EVERY_TURNS || now - lastSummaryAt < SUMMARY_MIN_GAP_MS)) return
   summarizing = true
   try {
     const messages = (await $.session.messages()) as any[]
     const transcript = messages
-      .slice(-12)
+      .slice(-8)
       .map(m => {
         const tools = m.toolUses?.length ? ` [tools: ${m.toolUses.map((t: any) => t.tool).join(', ')}]` : ''
-        return `${m.role}: ${String(m.text).slice(0, 1500)}${tools}`
+        return `${m.role}: ${String(m.text).slice(0, 800)}${tools}`
       })
       .join('\n\n')
-      .slice(-12000)
+      .slice(-6000)
     if (!transcript.trim()) return
     const done = await $.model.complete({
       model: cfg.summary_model || 'haiku',
       system: SUMMARY_SYSTEM,
-      prompt: `Directory: ${await $.session.cwd()}\n\nRecent conversation:\n${transcript}`,
-      maxTokens: 120,
+      prompt: `Directory: ${await $.session.cwd()}\nCurrent status: ${summary || '(none)'}\n\nRecent conversation:\n${transcript}`,
+      maxTokens: 100,
       effort: 'low',
       timeoutMs: 20000,
     })
-    if (done.isAnswered && done.text.trim()) {
-      lastSummaryAt = now
-      await call($, 'POST', `/api/sessions/${sessionId}/heartbeat`, { summary: done.text.trim().slice(0, 300) })
-    }
+    if (!done.isAnswered) return
+    lastSummaryAt = now
+    turnsSinceSummary = 0
+    hasSummarizedTalk = true
+    const next = done.text.trim()
+    if (next && next !== 'UNCHANGED' && next !== summary) await postSummary($, next)
   } catch {
   } finally {
     summarizing = false
@@ -226,21 +277,21 @@ export const register: Register = on => {
     await $.tool.register({
       name: 'list_peers',
       description:
-        'List the other live Claude Code sessions (peers) for this user: name, working directory, repo, branch, what each is working on, and whether it is busy. Use it to find who owns code or knowledge you need before guessing or duplicating work.',
+        "List live peer sessions with their folder, branch, current work and whether they're busy. Peers already appear beside the prompt when they change, so call this only for ids or busy state.",
       inputSchema: { type: 'object', properties: {} },
       isDeferred: false,
     })
     await $.tool.register({
       name: 'send_message',
       description:
-        'Send a message to a peer Claude session by name or id (from list_peers, or the from address on a peer message). It is delivered into their session, waking it if idle. Use for well-scoped requests, hand-offs, or heads-ups that save real work. Set reply_to when answering a peer message.',
+        'Message a peer session by name, like messaging a teammate. It arrives in their session at once, waking it if idle. Keep it short, point to file paths rather than pasting, and set reply_to when answering.',
       inputSchema: {
         type: 'object',
         properties: {
           to: { type: 'string', description: 'Peer name or id' },
-          text: { type: 'string', description: 'Self-contained message: what you need, why, and what a good answer looks like' },
-          expects_reply: { type: 'boolean', description: 'True if you need an answer back' },
-          reply_to: { type: 'string', description: 'The id of the peer message you are answering, if any' },
+          text: { type: 'string', description: 'The message: what you need and why, briefly' },
+          expects_reply: { type: 'boolean', description: 'True if you need an answer' },
+          reply_to: { type: 'string', description: 'Id of the peer message you are answering' },
         },
         required: ['to', 'text'],
       },
@@ -261,6 +312,11 @@ export const register: Register = on => {
     if (await ensureDaemon($)) {
       await announce($)
       startPolling($)
+      if ((await $.session.turns()) > 0) {
+        void poll($).then(() => summarize($))
+      } else {
+        void seedSummary($, e.cwd).then(seed => postSummary($, seed)).catch(() => {})
+      }
     } else {
       $.ui.toast('peerlink: could not start the daemon (needs python3)')
     }
@@ -286,6 +342,7 @@ export const register: Register = on => {
     const done = await next(e)
     if (e.agentId === undefined) {
       busy = false
+      turnsSinceSummary++
       void deliver($)
       void summarize($)
     }
@@ -293,12 +350,10 @@ export const register: Register = on => {
   })
 
   on('prompt.submit', async ($, e, next) => {
-    // Seed a summary from the person's first prompt so peers see something useful.
-    if (sessionId && !e.isMeta && !e.command && (await $.session.turns()) === 0 && e.text.trim()) {
-      void call($, 'POST', `/api/sessions/${sessionId}/heartbeat`, {
-        busy: true,
-        summary: `Started on: ${e.text.trim().slice(0, 160)}`,
-      }).catch(() => {})
+    // Until a real summary exists, the first prompt says what this session is for.
+    if (sessionId && !e.isMeta && !e.command && !hasSummarizedTalk && (await $.session.turns()) === 0 && e.text.trim()) {
+      const task = e.text.trim().replace(/\s+/g, ' ').slice(0, 110)
+      void postSummary($, `${summary.slice(0, 120)}${summary ? ' — ' : ''}now: ${task}`).catch(() => {})
     }
     if (!sessionId || e.command) return next(e)
     const roster = await rosterContext($)
@@ -314,7 +369,7 @@ export const register: Register = on => {
         {
           id: 'peerlink:guidance',
           scope: 'session',
-          text: `# Peer sessions\nYou are "${myName}" (id ${sessionId}).\n${cfg.guidance}`,
+          text: `# Peer sessions\nPeers know you as "${myName}".\n${cfg.guidance}`,
         },
       ],
     }
@@ -352,10 +407,9 @@ export const register: Register = on => {
   }).catch(daemonDown)
 
   on('tool.call', { tool: 'mcp__peerlink__set_summary' }, async ($, e) => {
-    const summary = String((e as any).summary ?? '').slice(0, 500)
     manualSummaryAt = await $.clock.now()
-    const res = await call($, 'POST', `/api/sessions/${sessionId}/heartbeat`, { busy, summary })
-    return text(res.ok ? 'Summary updated.' : `Daemon error: ${res.status}`)
+    await postSummary($, String((e as any).summary ?? ''))
+    return text('Summary updated.')
   }).catch(daemonDown)
 
   on('command.run', { command: 'peerlink' }, async $ => {
