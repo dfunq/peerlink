@@ -9,7 +9,7 @@ async function settle() {
 }
 
 // A daemon in memory: what the plugin posts, and the peers it answers.
-function fakeDaemon(on: any, peerCount = 1, previous: unknown = null) {
+function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unknown[] = []) {
   const posted: { path: string; body: any }[] = []
   const peers = [
     { id: 'p1', name: 'billing-api', host: 'Mac', cwd: '/Users/x/r/billing', branch: 'main', summary: 'Owns the invoice schema', busy: false, muted: false },
@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null) {
     if (path === '/api/health') return ok({ ok: true, version: '0.4.1' })
     if (path === '/api/sessions') return ok({ id: body.id, name: body.name, config: { poll_interval_ms: 600000 }, previous })
     if (path === '/api/peers') return ok({ peers })
-    return ok({ name: 'web', config: { poll_interval_ms: 600000 }, inbox: [], peer_count: peerCount })
+    return ok({ name: 'web', config: { poll_interval_ms: 600000 }, inbox: inbox.splice(0), peer_count: peerCount })
   })
   const summaries = () => posted.filter(p => p.body?.summary).map(p => p.body.summary as string)
   return { posted, peers, summaries }
@@ -164,4 +164,95 @@ test('summaries refresh every few turns, and an unchanged one is not resent', as
   await settle()
   expect(calls.model).toBe(2)
   expect(daemon.summaries()).toEqual([])
+})
+
+const PROMPT =
+  'The peerlink plugin sent a message:\n↘ api · m7 · re m6 · reply expected\nWhich file defines the invoice model?\n\n(Reply with send_message, reply_to the id, only if a reply is needed.)\nThis is how Claude Code surfaces a prompt a plugin submits between turns.'
+
+test('an incoming peer message draws as a chat row, on every surface', async ($, on) => {
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e) as any
+    return <Text>engine</Text>
+  })
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const base = { plugin: 'peerlink', surface, component: 'UserMessage', requestId: 'u1' } as const
+    const ui = await $.ui.mount({ ...base, props: { text: PROMPT, origin: { kind: 'plugin', name: 'peerlink' }, isExpanded: false } } as any)
+    expect((await ui.find({ type: 'Text', text: /↘ api/ }))?.text).toBe('↘ api')
+    expect((await ui.find({ type: 'Text', text: /m7 · re m6 · reply expected/ }))).toBeDefined()
+    expect((await ui.find({ type: 'Text', text: /Which file defines the invoice model\?/ }))).toBeDefined()
+    await ui.unmount()
+
+    const expanded = await $.ui.mount({ ...base, props: { text: PROMPT, origin: { kind: 'plugin', name: 'peerlink' }, isExpanded: true } } as any)
+    expect((await expanded.find({ type: 'Text', text: /engine/ }))).toBeDefined()
+    await expanded.unmount()
+  }
+})
+
+test('a sent message draws as who it went to and what it said', async ($, on) => {
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({
+      plugin: 'peerlink', surface, component: 'ToolUse', requestId: 't1',
+      props: {
+        tool: 'mcp__peerlink__send_message',
+        input: { to: 'api', text: 'Is the API on v2 yet?', expects_reply: true },
+        output: 'Sent to api (m4). Their reply will arrive as a peer message; continue with other work meanwhile.',
+        isRunning: false, isErrored: false, isInterrupted: false, isExpanded: false,
+      },
+    } as any)
+    expect((await ui.find({ type: 'Text', text: /↗ api/ }))?.text).toBe('↗ api')
+    expect((await ui.find({ type: 'Text', text: /m4 · reply expected/ }))).toBeDefined()
+    await ui.unmount()
+
+    const failed = await $.ui.mount({
+      plugin: 'peerlink', surface, component: 'ToolUse', requestId: 't2',
+      props: {
+        tool: 'mcp__peerlink__send_message', input: { to: 'nobody', text: 'hi' },
+        output: "Not sent: no live peer 'nobody'; call list_peers",
+        isRunning: false, isErrored: false, isInterrupted: false, isExpanded: false,
+      },
+    } as any)
+    expect((await failed.find({ type: 'Text', text: /Not sent/ }))).toBeDefined()
+    await failed.unmount()
+  }
+})
+
+test('a message that arrives mid-turn reaches the model and is shown to the person', async ($, on) => {
+  const { clock } = engine(on, { turns: 1 })
+  const session = mock.session(on)
+  const logged: string[] = []
+  on('ui.log', (_: any, e: any) => {
+    logged.push(e.text)
+    return { value: undefined }
+  })
+  on('turn.start', (_: any, e: any) => ({ turnId: e.turnId }))
+  on('model.complete', () => ({ value: { isAnswered: true, text: 'UNCHANGED', usage: {} } }))
+  const inbox: any[] = []
+  const dbg = fakeDaemon(on, 1, null, inbox)
+  await $.session.start(START)
+  await settle()
+
+  await $.turn.start({ text: 'refactor billing', turnId: 't9' } as any)
+  inbox.push({ id: 'm5', from: 'api-id', from_name: 'api', from_host: 'Mac', text: 'Heads up: /invoices now paginates.', expects_reply: false, reply_to: null, hops: 0 })
+  await clock.advance(600000)
+  for (let i = 0; i < 10; i++) await settle()
+
+  const rows = session.appended().map((r: any) => ({ type: r.message.type, text: r.message.content[0].text }))
+  expect(rows.find(r => r.type === 'user')?.text).toContain('↘ api · m5\nHeads up: /invoices now paginates.')
+  expect(logged).toContain('↘ api · m5: Heads up: /invoices now paginates.')
+})
+
+test('a delivered message hides its redundant result line, a failed one keeps it', async ($, on) => {
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e) as any
+    return <Text>engine</Text>
+  })
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const base = { plugin: 'peerlink', surface, component: 'ToolResult', requestId: 'r1' } as const
+    const sent = await $.ui.mount({ ...base, props: { tool: 'mcp__peerlink__send_message', output: 'Sent to api (m4).', isErrored: false } } as any)
+    expect(await sent.find({ type: 'Text', text: /engine|Sent/ })).toBeUndefined()
+    await sent.unmount()
+    const failed = await $.ui.mount({ ...base, props: { tool: 'mcp__peerlink__send_message', output: 'Not sent: muted', isErrored: false } } as any)
+    expect(await failed.find({ type: 'Text', text: /engine/ })).toBeDefined()
+    await failed.unmount()
+  }
 })
