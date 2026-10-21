@@ -1,0 +1,5 @@
+{
+  "name": "peerlink",
+  "owner": { "name": "Dillon" },
+  "plugins": [{ "name": "peerlink", "source": "./plugin" }]
+}
