@@ -27,7 +27,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 HOME = os.environ.get("PEERLINK_HOME", os.path.expanduser("~/.peerlink"))
 CONFIG_PATH = os.path.join(HOME, "config.json")
 PID_PATH = os.path.join(HOME, "daemon.pid")
@@ -366,8 +366,18 @@ def load_messages():
             pass
     messages.extend(list(by_id.values())[-500:])
     for m in messages:
-        if m.get("v") == 2 and m.get("status") == "queued" and time.time() - m["ts"] < 3600:
+        if m.get("status") != "queued":
+            continue
+        if m.get("v") == 2 and time.time() - m["ts"] < 3600:
             inboxes.setdefault(m["to"], []).append(m)
+        else:
+            m["status"] = "expired"
+
+
+def expire(box):
+    for m in box:
+        m["status"] = "expired"
+        append_log({"id": m["id"], "status": "expired"})
 
 
 def send(body):
@@ -474,7 +484,15 @@ def reaper():
         with lock:
             for sid in [s for s, r in sessions.items() if now - r["last_seen"] > config["peer_ttl_s"] * 10]:
                 sessions.pop(sid, None)
-                inboxes.pop(sid, None)
+                expire(inboxes.pop(sid, []))
+            # Messages to an agent that has gone for an hour are not coming back.
+            for sid in [s for s in inboxes if s not in sessions]:
+                kept = [m for m in inboxes[sid] if now - m["ts"] < 3600]
+                expire([m for m in inboxes[sid] if now - m["ts"] >= 3600])
+                if kept:
+                    inboxes[sid] = kept
+                else:
+                    inboxes.pop(sid)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -663,6 +681,7 @@ class Handler(BaseHTTPRequestHandler):
         if len(rest) == 2 and rest[0] == "sessions" and method == "DELETE":
             with lock:
                 sessions.pop(rest[1], None)
+                expire(inboxes.pop(rest[1], []))
             return self.reply(200, {"ok": True})
 
         if rest == ["messages"]:
