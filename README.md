@@ -1,50 +1,92 @@
 # peerlink
 
-Let your Claude Code sessions find each other and message each other to get work done.
+Let your Claude agents find each other and message each other to get work done. Each agent is a Claude Code session; peerlink connects the ones running on your machine.
 
-Each session gets three tools:
+Each agent gets three tools:
 
 | Tool | What it does |
 | --- | --- |
-| `list_peers` | Lists the other live sessions: name, directory, branch, what each is working on, and whether it's busy |
-| `send_message` | Sends a message to a peer by name or id. The message is delivered into a busy turn, or wakes an idle session |
-| `set_summary` | Sets the one-line summary that peers see for this session |
+| `list_peers` | Lists the other live agents: name, folder, branch, what each is working on, and whether it's busy |
+| `send_message` | Sends a message to a peer agent by name. The message is delivered into a turn that's running, or starts a turn in an idle agent |
+| `set_summary` | Sets the one-line summary that peers see for this agent |
 
-Sessions treat each other as teammates. Each one knows who else is live and what they're doing, and messages a peer when that peer clearly owns what it needs. Guidance in the system prompt sets the tone and says when a message is worth sending. You can edit that guidance in the web UI.
+Agents treat each other as teammates. Each one knows who else is live and what they're doing, and messages a peer when that peer clearly owns what it needs. Guidance in the system prompt sets the tone and says when a message is worth sending. You can edit that guidance in the web UI.
 
-## How sessions know about each other
+## How agents know about each other
 
-- **Names.** A session is named after its folder, such as `web` or `billing-api`. A suffix is added only when two live sessions share a folder name.
-- **Summaries.** Each session has a one-line summary that peers can read:
-  - A new session starts with its project's own description, taken from `CLAUDE.md` or the README, with no model call.
-  - The first prompt adds the task the session is working on.
+- **Names.** An agent is named after its folder, such as `web` or `billing-api`. A suffix is added only when two live agents share a folder name. You can rename an agent with `/peerlink name <name>`.
+- **Summaries.** Each agent has a one-line summary that peers can read.
+  - When a new agent starts, it builds a first summary from what's already known about its folder, with no model call:
+    - what the last agent in this folder was doing, which the daemon remembers for 14 days
+    - otherwise, Claude Code's own title for the most recent session in this folder (`ai-title` in `~/.claude/projects/…`)
+    - the project's description from `CLAUDE.md` or the README
+    - the last three commit subjects from the past 14 days
+  - The first prompt adds the task the agent is working on.
   - After that, a low-effort Haiku call rewrites the summary every few turns.
   - A resumed session summarizes its history as soon as it starts.
-- **Peer list.** A short list of live peers is added beside the prompt, but only when that list has changed since the session last saw it.
+- **Peer list.** A short list of live agents is added beside the prompt, but only when that list has changed since the agent last saw it.
 
 ## Keeping token costs down
 
-- The peer list is only sent when it changes, at about one line per peer.
-- A summary is only written when at least one peer is live to read it. It's refreshed at most every 3 turns and 2 minutes, from the last 8 messages. If the model answers `UNCHANGED`, nothing is updated, so peers aren't sent a new peer list for nothing.
+- The peer list is only sent when it changes, at about one line per agent.
+- Startup summaries cost nothing, because they're built from local files and git.
+- A model-written summary is only made when at least one peer is live to read it. It's refreshed at most every 3 turns and 2 minutes, from the last 8 messages. If the model answers `UNCHANGED`, nothing is updated, so peers aren't sent a new peer list for nothing.
 - The guidance is a fixed system-prompt section, so the prompt cache keeps it cheap.
 - Messages are short and point to file paths instead of pasting code or logs, because local peers share the filesystem. Acknowledgements and thanks are discouraged.
 - Message framing is a single tag carrying `id`, `from` and an optional `re` and `reply`.
 
+## Commands
+
+In Claude Code:
+
+| Command | |
+| --- | --- |
+| `/peerlink web` | Open the web UI with a one-time sign-in link |
+| `/peerlink status` | Daemon, this agent, its summary |
+| `/peerlink peers` | List live agents |
+| `/peerlink name <name>` | Rename this agent |
+| `/peerlink summary <text>` | Set what peers see for this agent |
+| `/peerlink wake on\|off\|default` | Whether a message starts a turn in this agent while it's idle |
+| `/peerlink mute <agent>`, `unmute <agent>` | Stop or resume deliveries to an agent |
+| `/peerlink restart` | Restart the daemon. Agents reconnect, and queued messages are kept |
+| `/peerlink rotate-key` | Make a new key, which signs out every browser |
+
+In a shell, the daemon writes a launcher to `~/.peerlink/bin/peerlink`. You can add that folder to your `PATH`.
+
+```
+peerlink web          # open the UI (--print to only print the link)
+peerlink status
+peerlink peers
+peerlink messages     # the last 20
+peerlink mute <agent> / unmute <agent>
+peerlink config [name [value]]
+peerlink start | stop | restart | logs
+peerlink rotate-key | logout
+```
+
+## Security
+
+- The daemon listens on `127.0.0.1` only. Every API call has to carry the key in `~/.peerlink/key`, a 0600 file that's created on first start. Agents send it as `X-Peerlink-Key`.
+- **The browser** gets in through a one-time link from `peerlink web`, signed with the key using HMAC-SHA256. The link is valid for 60 seconds and works once. It sets an `HttpOnly`, `SameSite=Strict` session cookie that lasts 12 hours.
+- **Other web pages** can't drive the daemon. Requests whose `Host` header isn't `127.0.0.1` or `localhost` are refused, which blocks DNS rebinding. Browser writes from another origin are refused too.
+- **Rotating the key** signs out every browser and makes outstanding links useless. Running agents pick up the new key by themselves.
+- **Remote daemons** (optional) only get peer discovery and message delivery, and only with the shared `token`.
+
 ## How it works
 
 ```
- Claude session A ─┐                        ┌─ Claude session B
-   (mod: tools,    │  HTTP 127.0.0.1:7899   │
-    poll, deliver) ├──────► peerlinkd ◄─────┤
- Claude session C ─┘   one per machine      └─ ...
-                       registry · inboxes · policy · web UI
+ Claude agent A ─┐                        ┌─ Claude agent B
+   (mod: tools,  │  HTTP 127.0.0.1:7899   │
+    poll, deliver)├──────► peerlinkd ◄─────┤
+ Claude agent C ─┘   one per machine      └─ ...
+                     registry · inboxes · policy · web UI
 ```
 
-- **One daemon per machine.** `plugin/daemon/peerlinkd.py` is Python stdlib only. Holding the TCP port is the lock, so a second copy exits. The first session that starts launches the daemon (`--detach`), and every session restarts it if it goes away.
-- **Sessions** register on start and send a heartbeat every `poll_interval_ms`. The heartbeat reply carries the session's inbox and its current config, so changes made in the UI apply within a few seconds without a restart.
-- **Delivery.** If a session is mid-turn, the message is appended to the running turn. If the session is idle, the message starts a new turn (set by `auto_wake_idle`).
-- **Loop safety.** Replies carry a hop count (`max_hops`), each session has a rate limit, and you can mute a session from the UI.
-- **Several machines (optional).** List other daemons under `remotes`, set `listen_host` to `0.0.0.0`, and set a shared `token`. Peers on those machines then show up as `name@host`.
+- **One daemon per machine.** `plugin/daemon/peerlinkd.py` is Python stdlib only. Holding the TCP port is the lock, so a second copy exits. The first agent that starts launches the daemon. Every agent restarts it if it goes away, and replaces it if it's an older version.
+- **Agents** register on start and send a heartbeat every `poll_interval_ms`. The heartbeat reply carries the agent's inbox and its current config, so changes made in the UI apply within a few seconds without a restart.
+- **Delivery.** If an agent is mid-turn, the message is appended to the running turn. If the agent is idle, the message starts a new turn (set by `auto_wake_idle`). Messages are logged to `~/.peerlink/messages.jsonl`, and undelivered ones survive a daemon restart.
+- **Loop safety.** Replies carry a hop count (`max_hops`), each agent has a rate limit, and you can mute an agent.
+- **Several machines (optional).** List other daemons under `remotes`, set `listen_host` to `0.0.0.0`, and set a shared `token`. Agents on those machines then show up as `name@host`.
 
 ## Install
 
@@ -72,33 +114,24 @@ claude --plugin-dir ~/Repos/peerlink/plugin
 
 Requires `python3` on your `PATH`.
 
-## Web UI and config
+## Settings
 
-Run `/peerlink` in any session, or open <http://127.0.0.1:7899>. The UI shows live sessions, the message log, and the settings. Settings are stored in `~/.peerlink/config.json`, and the daemon's log is at `~/.peerlink/daemon.log`.
+You can change these in the web UI, with `peerlink config <name> <value>`, or in `~/.peerlink/config.json`. The daemon's log is at `~/.peerlink/daemon.log`.
 
 | Setting | Default | |
 | --- | --- | --- |
 | `poll_interval_ms` | 3000 | Heartbeat and inbox poll interval |
-| `peer_ttl_s` | 30 | A session is shown as gone after this long without a heartbeat |
-| `auto_wake_idle` | true | Start a turn in an idle session when a message arrives |
+| `peer_ttl_s` | 30 | An agent is shown as gone after this long without a heartbeat |
+| `auto_wake_idle` | true | Start a turn in an idle agent when a message arrives |
 | `inject_while_busy` | true | Deliver into a running turn |
 | `max_hops` | 6 | Maximum length of a reply chain |
-| `rate_limit_per_min` | 12 | Messages per session per minute |
-| `roster_in_prompt` | true | Add the live peer list beside the prompt when it changes |
+| `rate_limit_per_min` | 12 | Messages per agent per minute |
+| `roster_in_prompt` | true | Add the live agent list beside the prompt when it changes |
 | `auto_summary` | true | Keep summaries current with a cheap model call |
 | `summary_model` | haiku | Model used for summaries |
-| `guidance` | empty (built-in text) | Text added to every session's system prompt |
-| `sessions` | `{}` | Per-session `nickname`, `muted` and `auto_wake` |
+| `guidance` | empty (built-in text) | Text added to every agent's system prompt |
+| `sessions` | `{}` | Per-agent `nickname`, `muted` and `auto_wake`, keyed by Claude Code session id |
 | `remotes`, `listen_host`, `token` | | Settings for linking daemons across machines |
-
-Daemon CLI:
-
-```
-python3 plugin/daemon/peerlinkd.py            # run in the foreground
-python3 plugin/daemon/peerlinkd.py --detach   # start in the background unless one is already running
-python3 plugin/daemon/peerlinkd.py --status
-python3 plugin/daemon/peerlinkd.py --stop
-```
 
 `PEERLINK_PORT` and `PEERLINK_HOME` override the port and the data directory.
 
@@ -108,6 +141,7 @@ python3 plugin/daemon/peerlinkd.py --stop
 .claude-plugin/marketplace.json   makes this repo installable
 plugin/.claude-plugin/plugin.json
 plugin/hooks/hooks.json           points at the hooks module
-plugin/hooks/register.ts          tools, polling, delivery, system-prompt guidance
-plugin/daemon/peerlinkd.py        daemon and web UI
+plugin/hooks/register.ts          tools, /peerlink, polling, delivery, summaries, guidance
+plugin/hooks/register.test.ts     tests (claude plugin test plugin)
+plugin/daemon/peerlinkd.py        daemon, CLI and web UI
 ```

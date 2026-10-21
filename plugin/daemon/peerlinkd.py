@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
 """peerlink daemon: one per machine.
 
-Keeps the registry of live Claude Code sessions, routes messages between
+Keeps the registry of live Claude agents (Claude Code sessions), routes messages between
 them, applies the policy in config.json, and serves a small web UI.
 Stdlib only. Holding the TCP port is the single-instance lock.
 
-    python3 peerlinkd.py            run in the foreground
-    python3 peerlinkd.py --detach   start in the background unless one is running
-    python3 peerlinkd.py --stop     stop the running daemon
+Every API call needs the key in ~/.peerlink/key (agents send it as
+X-Peerlink-Key). A browser gets in through a one-time link signed with that
+key (HMAC-SHA256, valid 60 s, usable once), which sets a session cookie.
+
+    peerlink [command]   (~/.peerlink/bin/peerlink, or python3 peerlinkd.py)
 """
 
+import hashlib
+import hmac
 import json
+import secrets
+import subprocess
 import os
 import signal
 import socket
@@ -21,12 +27,19 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 HOME = os.environ.get("PEERLINK_HOME", os.path.expanduser("~/.peerlink"))
 CONFIG_PATH = os.path.join(HOME, "config.json")
 PID_PATH = os.path.join(HOME, "daemon.pid")
 LOG_PATH = os.path.join(HOME, "daemon.log")
 MESSAGES_PATH = os.path.join(HOME, "messages.jsonl")
+KEY_PATH = os.path.join(HOME, "key")
+DIRS_PATH = os.path.join(HOME, "dirs.json")
+DIR_MEMORY_S = 14 * 86400
+LAUNCHER_PATH = os.path.join(HOME, "bin", "peerlink")
+LINK_TTL_S = 60
+WEB_SESSION_TTL_S = 12 * 3600
+COOKIE = "peerlink_session"
 PORT = int(os.environ.get("PEERLINK_PORT", "7899"))
 HOSTNAME = socket.gethostname().split(".")[0]
 
@@ -47,9 +60,9 @@ reply_to set. If it conflicts with what your user asked, say so to the peer.
 - Keep your summary current with set_summary when your focus changes."""
 
 DEFAULT_GUIDANCE = """\
-Other Claude Code sessions for this user are your peers: colleagues working \
-in other repos and folders on the same machine. Talk to them the way you \
-would message a teammate.
+Other Claude agents working for this user are your peers: colleagues in \
+other repos and folders on the same machine. Talk to them the way you would \
+message a teammate.
 - Reach out when a peer clearly owns what you need (their repo, service or \
 current task) instead of guessing, or when a change of yours affects them.
 - Be brief and direct. You share a filesystem with local peers: point to \
@@ -84,6 +97,109 @@ messages = []   # recent log, newest last
 sent_times = {} # sender id -> [timestamps]
 next_msg = [1]
 config = {}
+key = [""]
+dir_summaries = {}  # cwd -> {summary, name, ts}: what the last agent there was doing
+used_nonces = {}   # nonce -> expiry
+web_sessions = {}  # cookie -> expiry
+
+
+def read_key():
+    try:
+        with open(KEY_PATH) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def write_key():
+    os.makedirs(HOME, exist_ok=True)
+    fd = os.open(KEY_PATH + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(secrets.token_hex(32))
+    os.replace(KEY_PATH + ".tmp", KEY_PATH)
+    return read_key()
+
+
+def load_key():
+    key[0] = read_key() or write_key()
+
+
+def rotate_key():
+    """A new key: every browser session ends and old links stop working."""
+    with lock:
+        key[0] = write_key()
+        web_sessions.clear()
+        used_nonces.clear()
+
+
+def sign(payload, secret):
+    return hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+
+
+def mint_link(secret, host="127.0.0.1"):
+    nonce = secrets.token_hex(16)
+    exp = int(time.time()) + LINK_TTL_S
+    payload = f"{nonce}.{exp}"
+    return f"http://{host}:{PORT}/login?t={payload}.{sign(payload, secret)}"
+
+
+def redeem(token):
+    """Check a one-time link token; on success open a browser session."""
+    try:
+        nonce, exp, sig = token.split(".")
+        exp = int(exp)
+    except ValueError:
+        return None
+    now = time.time()
+    with lock:
+        for n in [n for n, e in used_nonces.items() if e < now]:
+            used_nonces.pop(n)
+        if exp < now or nonce in used_nonces:
+            return None
+        if not hmac.compare_digest(sign(f"{nonce}.{exp}", key[0]), sig):
+            return None
+        used_nonces[nonce] = exp
+        cookie = secrets.token_urlsafe(32)
+        web_sessions[cookie] = now + WEB_SESSION_TTL_S
+        return cookie
+
+
+def load_dirs():
+    try:
+        with open(DIRS_PATH) as f:
+            dir_summaries.update(json.load(f))
+    except (OSError, ValueError):
+        pass
+
+
+def remember_dir(rec):
+    if not rec.get("cwd") or not rec.get("summary"):
+        return
+    dir_summaries[rec["cwd"]] = {"summary": rec["summary"], "name": display_name(rec), "ts": time.time()}
+    cutoff = time.time() - DIR_MEMORY_S
+    for cwd in [c for c, d in dir_summaries.items() if d["ts"] < cutoff]:
+        dir_summaries.pop(cwd)
+    try:
+        with open(DIRS_PATH + ".tmp", "w") as f:
+            json.dump(dir_summaries, f)
+        os.replace(DIRS_PATH + ".tmp", DIRS_PATH)
+    except OSError:
+        pass
+
+
+def write_launcher():
+    """~/.peerlink/bin/peerlink runs this file, wherever the plugin is installed."""
+    os.makedirs(os.path.dirname(LAUNCHER_PATH), exist_ok=True)
+    script = f'#!/bin/sh\nexec python3 "{os.path.abspath(__file__)}" "$@"\n'
+    try:
+        with open(LAUNCHER_PATH) as f:
+            if f.read() == script:
+                return
+    except OSError:
+        pass
+    with open(LAUNCHER_PATH, "w") as f:
+        f.write(script)
+    os.chmod(LAUNCHER_PATH, 0o755)
 
 
 def log(*parts):
@@ -194,7 +310,7 @@ def remote_peers():
 
 
 def resolve(to):
-    """Find a live local session by id, id prefix, nickname or name."""
+    """Find a live local agent by id, id prefix, nickname or name."""
     to = to.strip().lower()
     with lock:
         live = [r for r in sessions.values() if is_live(r)]
@@ -208,18 +324,50 @@ def resolve(to):
             if len(hits) == 1:
                 return hits[0], None
             if len(hits) > 1:
-                return None, f"'{to}' matches {len(hits)} sessions; use the id"
+                return None, f"'{to}' matches {len(hits)} agents; use the id"
     return None, None
+
+
+def append_log(entry):
+    try:
+        with open(MESSAGES_PATH, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except OSError:
+        pass
 
 
 def record(msg):
     messages.append(msg)
     del messages[:-500]
+    append_log(msg)
+
+
+def load_messages():
+    """Replay the log so ids keep counting and undelivered messages survive a restart."""
     try:
-        with open(MESSAGES_PATH, "a") as f:
-            f.write(json.dumps(msg) + "\n")
+        with open(MESSAGES_PATH) as f:
+            lines = f.readlines()[-5000:]
     except OSError:
-        pass
+        return
+    by_id = {}
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if "text" in entry:
+            by_id[entry["id"]] = entry
+        elif entry.get("id") in by_id:
+            by_id[entry["id"]].update(entry)
+    for m in by_id.values():
+        try:
+            next_msg[0] = max(next_msg[0], int(m["id"][1:]) + 1)
+        except ValueError:
+            pass
+    messages.extend(list(by_id.values())[-500:])
+    for m in messages:
+        if m.get("v") == 2 and m.get("status") == "queued" and time.time() - m["ts"] < 3600:
+            inboxes.setdefault(m["to"], []).append(m)
 
 
 def send(body):
@@ -273,6 +421,7 @@ def send(body):
             "reply_to": body.get("reply_to") or None,
             "hops": hops,
             "status": "queued",
+            "v": 2,  # logs older than this never recorded delivery, so they are not replayed
         }
         next_msg[0] += 1
         inboxes.setdefault(target["id"], []).append(msg)
@@ -314,6 +463,7 @@ def take_inbox(sid):
         for m in box:
             m["status"] = "delivered"
             m["delivered_ts"] = time.time()
+            append_log({"id": m["id"], "status": "delivered", "delivered_ts": m["delivered_ts"]})
         return box
 
 
@@ -333,13 +483,21 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-    def reply(self, code, body, ctype="application/json"):
+    def reply(self, code, body, ctype="application/json", headers=None):
         data = body.encode() if isinstance(body, str) else json.dumps(body).encode()
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Frame-Options", "DENY")
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(data)
+
+    def page(self, code, title, text):
+        html = PAGE_HTML.replace("{title}", title).replace("{text}", text)
+        return self.reply(code, html, "text/html; charset=utf-8")
 
     def body(self):
         n = int(self.headers.get("Content-Length") or 0)
@@ -350,31 +508,103 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return {}
 
-    def allowed(self):
-        if self.client_address[0] in ("127.0.0.1", "::1"):
-            return True
+    def is_local(self):
+        return self.client_address[0] in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+
+    def host_ok(self):
+        # A page on another site that rebinds its DNS to 127.0.0.1 still sends its own Host.
+        return self.headers.get("Host", "") in (f"127.0.0.1:{PORT}", f"localhost:{PORT}", f"[::1]:{PORT}")
+
+    def web_session(self):
+        for part in self.headers.get("Cookie", "").split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == COOKIE:
+                with lock:
+                    exp = web_sessions.get(value)
+                    if exp and exp > time.time():
+                        return value
+        return None
+
+    def key_ok(self):
+        given = self.headers.get("X-Peerlink-Key", "")
+        return bool(given) and hmac.compare_digest(given, key[0])
+
+    def remote_ok(self):
         token = config.get("token", "")
-        return bool(token) and self.headers.get("X-Peerlink-Token") == token
+        return bool(token) and hmac.compare_digest(self.headers.get("X-Peerlink-Token", ""), token)
+
+    def same_origin(self):
+        origin = self.headers.get("Origin")
+        return origin is None or origin == f"http://{self.headers.get('Host', '')}"
 
     def route(self, method):
-        if not self.allowed():
-            return self.reply(403, {"error": "forbidden"})
         url = urlparse(self.path)
         parts = [p for p in url.path.split("/") if p]
         q = parse_qs(url.query)
+        rest = parts[1:] if parts[:1] == ["api"] else None
+
+        if not self.is_local():
+            # Another machine's daemon: only peer discovery and message delivery.
+            if self.remote_ok() and (rest == ["peers"] and method == "GET" or rest == ["messages"] and method == "POST"):
+                pass
+            else:
+                return self.reply(403, {"error": "forbidden"})
+        elif not self.host_ok():
+            return self.reply(403, {"error": "bad host"})
+
+        if rest == ["health"]:
+            return self.reply(200, {"ok": True, "version": VERSION, "pid": os.getpid(), "host": HOSTNAME})
+
+        if method == "GET" and url.path == "/login":
+            cookie = redeem(q.get("t", [""])[0])
+            if not cookie:
+                return self.page(403, "Link expired", "That link has expired or was already used. Run <code>/peerlink web</code> in Claude Code, or <code>peerlink web</code> in a shell, for a new one.")
+            attrs = f"{COOKIE}={cookie}; HttpOnly; SameSite=Strict; Path=/; Max-Age={WEB_SESSION_TTL_S}"
+            return self.reply(302, "", "text/plain", {"Set-Cookie": attrs, "Location": "/"})
+
+        browser = self.is_local() and self.web_session()
+        if self.is_local() and not (self.key_ok() or browser):
+            if method == "GET" and url.path in ("/", "/index.html"):
+                return self.page(401, "Sign in", "Open the web UI with <code>/peerlink web</code> in Claude Code, or <code>peerlink web</code> in a shell. Each link works once.")
+            return self.reply(401, {"error": "missing or wrong key"})
+        if browser and method != "GET" and not self.same_origin():
+            return self.reply(403, {"error": "cross-origin request refused"})
 
         if method == "GET" and url.path in ("/", "/index.html"):
             return self.reply(200, UI_HTML, "text/html; charset=utf-8")
-        if parts[:1] != ["api"]:
+        if rest is None:
             return self.reply(404, {"error": "not found"})
-        rest = parts[1:]
 
-        if rest == ["health"]:
-            return self.reply(200, {"ok": True, "version": VERSION, "pid": os.getpid(), "host": HOSTNAME, "default_guidance": DEFAULT_GUIDANCE})
+        if rest == ["web", "link"] and method == "POST" and self.key_ok():
+            return self.reply(200, {"url": mint_link(key[0]), "expires_in_s": LINK_TTL_S})
+
+        if rest == ["web", "logout"] and method == "POST":
+            with lock:
+                if self.body().get("all"):
+                    web_sessions.clear()
+                elif browser:
+                    web_sessions.pop(browser, None)
+            return self.reply(200, {"ok": True})
+
+        if rest == ["key", "rotate"] and method == "POST":
+            rotate_key()
+            log("key rotated")
+            return self.reply(200, {"ok": True})
+
+        if rest == ["status"] and method == "GET":
+            with lock:
+                live = [r for r in sessions.values() if is_live(r)]
+                queued = sum(len(b) for b in inboxes.values())
+                browsers = sum(1 for e in web_sessions.values() if e > time.time())
+            return self.reply(200, {
+                "version": VERSION, "pid": os.getpid(), "host": HOSTNAME, "port": PORT,
+                "sessions": len(live), "queued": queued, "messages": len(messages),
+                "browsers": browsers, "home": HOME, "launcher": LAUNCHER_PATH,
+            })
 
         if rest == ["config"]:
             if method == "GET":
-                return self.reply(200, config)
+                return self.reply(200, {**config, "default_guidance": DEFAULT_GUIDANCE})
             if method in ("PUT", "POST"):
                 with lock:
                     for k, v in self.body().items():
@@ -405,8 +635,11 @@ class Handler(BaseHTTPRequestHandler):
                 rec["busy"] = bool(b.get("busy", False))
                 rec["last_seen"] = time.time()
                 sessions[sid] = rec
-            log("session", sid, rec.get("name"))
-            return self.reply(200, {"id": sid, "name": display_name(rec), "config": client_config(sid)})
+                previous = dir_summaries.get(rec.get("cwd", ""))
+                if previous and previous["ts"] < time.time() - DIR_MEMORY_S:
+                    previous = None
+            log("agent", sid, rec.get("name"))
+            return self.reply(200, {"id": sid, "name": display_name(rec), "config": client_config(sid), "previous": previous})
 
         if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "heartbeat" and method == "POST":
             sid = rest[1]
@@ -414,12 +647,14 @@ class Handler(BaseHTTPRequestHandler):
             with lock:
                 rec = sessions.get(sid)
                 if rec is None:
-                    return self.reply(404, {"error": "unknown session; register again"})
+                    return self.reply(404, {"error": "unknown agent; register again"})
                 rec["last_seen"] = time.time()
                 if "busy" in b:
                     rec["busy"] = bool(b["busy"])
                 if b.get("summary") is not None:
                     rec["summary"] = b["summary"][:500]
+                    if b.get("summary_kind") in ("model", "manual"):
+                        remember_dir(rec)
                 cfg = client_config(sid)
             inbox = [] if cfg["muted"] else take_inbox(sid)
             others = sum(1 for p in local_peers() if p["id"] != sid) + len(config.get("remotes", []))
@@ -437,6 +672,11 @@ class Handler(BaseHTTPRequestHandler):
             if method == "POST":
                 code, res = send(self.body())
                 return self.reply(code, res)
+
+        if rest == ["restart"] and method == "POST":
+            self.reply(200, {"ok": True})
+            threading.Thread(target=restart_self, args=(self.server,), daemon=True).start()
+            return
 
         if rest == ["shutdown"] and method == "POST":
             self.reply(200, {"ok": True})
@@ -458,10 +698,20 @@ class Handler(BaseHTTPRequestHandler):
         self.route("DELETE")
 
 
+def local_call(method, path, body=None, timeout=3):
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{PORT}{path}",
+        data=None if body is None else json.dumps(body).encode(),
+        method=method,
+        headers={"Content-Type": "application/json", "X-Peerlink-Key": read_key()},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read() or b"{}")
+
+
 def health():
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/api/health", timeout=1) as r:
-            return json.loads(r.read())
+        return local_call("GET", "/api/health", timeout=1)
     except Exception:
         return None
 
@@ -491,8 +741,32 @@ def detach():
     os._exit(0)
 
 
+def restart_self(server):
+    """Hand the port to a fresh copy of this file (it may be a newer version)."""
+    subprocess.Popen([sys.executable, os.path.abspath(__file__), "start", "--after-restart"], start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(0.2)
+    server.shutdown()
+
+
+def cli_start(args):
+    if "--after-restart" in args:
+        for _ in range(50):
+            if not health():
+                break
+            time.sleep(0.1)
+    detach()
+
+
 def serve():
     load_config()
+    load_key()
+    load_messages()
+    load_dirs()
+    try:
+        write_launcher()
+    except OSError as err:
+        log("could not write launcher:", err)
     try:
         server = ThreadingHTTPServer((config["listen_host"], PORT), Handler)
     except OSError as err:
@@ -511,13 +785,174 @@ def serve():
             os.remove(PID_PATH)
 
 
-def stop():
+def ensure_running():
+    if not health():
+        detach_quiet()
+    if not health():
+        sys.exit("peerlink: the daemon did not start; see " + LOG_PATH)
+
+
+def detach_quiet():
+    out = sys.stdout
+    sys.stdout = open(os.devnull, "w")
     try:
-        req = urllib.request.Request(f"http://127.0.0.1:{PORT}/api/shutdown", data=b"{}", method="POST")
-        urllib.request.urlopen(req, timeout=2)
-        print("stopped")
+        detach()
+    finally:
+        sys.stdout = out
+
+
+def open_url(url):
+    opener = "open" if sys.platform == "darwin" else "xdg-open"
+    try:
+        subprocess.run([opener, url], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        pass
+
+
+def cli_web(args):
+    ensure_running()
+    url = local_call("POST", "/api/web/link", {})["url"]
+    if "--print" not in args:
+        open_url(url)
+    print(url)
+    print(f"One-time link, valid {LINK_TTL_S}s.")
+
+
+def cli_status(args):
+    h = health()
+    if not h:
+        print("peerlink: not running")
+        return 1
+    st = local_call("GET", "/api/status")
+    print(f"peerlink {st['version']} on {st['host']}:{st['port']} (pid {st['pid']})")
+    print(f"  {st['sessions']} live agents, {st['queued']} queued messages, {st['browsers']} signed-in browsers")
+    print(f"  data: {st['home']}")
+    return 0
+
+
+def cli_peers(args):
+    ensure_running()
+    peers = local_call("GET", "/api/peers")["peers"]
+    if not peers:
+        print("No live agents.")
+    for p in peers:
+        state = "busy" if p["busy"] else "idle"
+        flags = ", muted" if p.get("muted") else ""
+        print(f"{p['name']:<20} {state}{flags:<8} {p['cwd']}")
+        if p.get("summary"):
+            print(f"{'':<20} {p['summary']}")
+
+
+def cli_messages(args):
+    ensure_running()
+    for m in local_call("GET", "/api/messages?limit=20")["messages"]:
+        when = time.strftime("%H:%M:%S", time.localtime(m["ts"]))
+        print(f"{when} {m['id']:<5} {m['from_name']} -> {m['to_name']} [{m['status']}]: {m['text'][:100]}")
+
+
+def cli_session_flag(args, field, value):
+    if not args:
+        sys.exit(f"usage: peerlink {'mute' if value else 'unmute'} <agent name>")
+    ensure_running()
+    want = args[0].lower()
+    peers = local_call("GET", "/api/peers?local=1")["peers"]
+    hits = [p for p in peers if want in (p["name"].lower(), p["id"].lower())]
+    if len(hits) != 1:
+        sys.exit(f"peerlink: no single live agent named '{args[0]}'")
+    cfg = local_call("GET", "/api/config")
+    sessions_cfg = dict(cfg.get("sessions", {}))
+    sessions_cfg[hits[0]["id"]] = {**sessions_cfg.get(hits[0]["id"], {}), field: value}
+    local_call("PUT", "/api/config", {"sessions": sessions_cfg})
+    print(f"{hits[0]['name']}: {field} = {value}")
+
+
+def cli_config(args):
+    ensure_running()
+    cfg = local_call("GET", "/api/config")
+    cfg.pop("default_guidance", None)
+    if not args:
+        print(json.dumps({k: v for k, v in cfg.items() if k not in ("sessions",)}, indent=2))
+        return
+    name = args[0]
+    if name not in DEFAULT_CONFIG:
+        sys.exit(f"peerlink: unknown setting '{name}'")
+    if len(args) == 1:
+        print(json.dumps(cfg.get(name), indent=2))
+        return
+    raw = " ".join(args[1:])
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        value = raw
+    print(json.dumps(local_call("PUT", "/api/config", {name: value}).get(name)))
+
+
+def cli_stop(args):
+    try:
+        local_call("POST", "/api/shutdown", {})
+        print("stopped (agents start it again when they next need it)")
     except Exception:
         print("not running")
+
+
+def cli_restart(args):
+    before = health()
+    if before:
+        local_call("POST", "/api/restart", {})
+        for _ in range(60):
+            time.sleep(0.1)
+            now = health()
+            if now and now.get("pid") != before.get("pid"):
+                break
+    else:
+        detach_quiet()
+    print("running" if health() else "peerlink: the daemon did not start; see " + LOG_PATH)
+
+
+def cli_rotate(args):
+    ensure_running()
+    local_call("POST", "/api/key/rotate", {})
+    print("New key written. Browsers are signed out; agents pick up the new key on their next call.")
+
+
+def cli_logout(args):
+    ensure_running()
+    local_call("POST", "/api/web/logout", {"all": True})
+    print("All browsers signed out.")
+
+
+def cli_logs(args):
+    try:
+        with open(LOG_PATH) as f:
+            print("".join(f.readlines()[-40:]), end="")
+    except OSError:
+        print("no log yet")
+
+
+COMMANDS = {
+    "web": (cli_web, "open the web UI with a one-time sign-in link (--print to only print it)"),
+    "status": (cli_status, "daemon version, agents, queued messages"),
+    "peers": (cli_peers, "list live agents"),
+    "messages": (cli_messages, "the last 20 messages"),
+    "mute": (lambda a: cli_session_flag(a, "muted", True), "mute an agent by name"),
+    "unmute": (lambda a: cli_session_flag(a, "muted", False), "unmute an agent"),
+    "config": (cli_config, "show settings, or `config <name> [value]` to read or set one"),
+    "start": (cli_start, "start in the background"),
+    "stop": (cli_stop, "stop the daemon"),
+    "restart": (cli_restart, "restart the daemon"),
+    "rotate-key": (cli_rotate, "new key: signs out every browser, invalidates links"),
+    "logout": (cli_logout, "sign out every browser"),
+    "logs": (cli_logs, "the end of the daemon log"),
+    "serve": (lambda a: serve(), "run in the foreground"),
+}
+ALIASES = {"--detach": "start", "--stop": "stop", "--status": "status"}
+
+
+def cli_help():
+    print("usage: peerlink <command>\n")
+    for name, (_, text) in COMMANDS.items():
+        print(f"  {name:<11} {text}")
+    print(f"\nPEERLINK_HOME={HOME}  PEERLINK_PORT={PORT}")
 
 
 UI_HTML = r"""<!doctype html>
@@ -536,6 +971,7 @@ header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}.mut{color:var(
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:var(--ok)}.dot.busy{background:var(--warn)}
 .name{font-weight:600}.small{font-size:12px}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;word-break:break-all}
 input[type=text],input[type=number],textarea{width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font:inherit}
+select{background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px;font:inherit}
 textarea{min-height:180px;font-family:ui-monospace,Menlo,monospace;font-size:12px}
 label{display:block;margin:8px 0 4px;font-size:12px;color:var(--mut)}
 .row{display:flex;gap:12px;flex-wrap:wrap}.row>div{flex:1 1 180px}
@@ -548,7 +984,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 </style></head><body><main>
 <header><h1>Peerlink</h1><span class="mut" id="hostline"></span></header>
 
-<h2>Sessions</h2><div class="grid" id="peers"></div>
+<h2>Agents</h2><div class="grid" id="peers"></div>
 
 <h2>Messages</h2><div class="card tablewrap"><table><thead><tr><th>When</th><th>From → To</th><th>Message</th><th>Status</th></tr></thead><tbody id="msgs"></tbody></table></div>
 
@@ -556,63 +992,101 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <form class="card" id="cfg">
 <div class="row">
 <div><label>Poll interval (ms)</label><input type="number" name="poll_interval_ms" min="500"></div>
-<div><label>Peer timeout (s)</label><input type="number" name="peer_ttl_s" min="5"></div>
+<div><label>Agent timeout (s)</label><input type="number" name="peer_ttl_s" min="5"></div>
 <div><label>Max reply hops</label><input type="number" name="max_hops" min="1"></div>
-<div><label>Messages per minute per session</label><input type="number" name="rate_limit_per_min" min="1"></div>
+<div><label>Messages per minute per agent</label><input type="number" name="rate_limit_per_min" min="1"></div>
 </div>
-<div class="check"><input type="checkbox" name="auto_wake_idle" id="aw"><label for="aw" style="margin:0">Wake idle sessions when a message arrives</label></div>
+<div class="check"><input type="checkbox" name="auto_wake_idle" id="aw"><label for="aw" style="margin:0">Wake idle agents when a message arrives</label></div>
 <div class="check"><input type="checkbox" name="inject_while_busy" id="ib"><label for="ib" style="margin:0">Deliver into a running turn</label></div>
-<div class="check"><input type="checkbox" name="roster_in_prompt" id="rp"><label for="rp" style="margin:0">Show each session the live peer list when it changes</label></div>
-<div class="check"><input type="checkbox" name="auto_summary" id="as"><label for="as" style="margin:0">Keep session summaries current automatically</label></div>
+<div class="check"><input type="checkbox" name="roster_in_prompt" id="rp"><label for="rp" style="margin:0">Show each agent the live agent list when it changes</label></div>
+<div class="check"><input type="checkbox" name="auto_summary" id="as"><label for="as" style="margin:0">Keep agent summaries current automatically</label></div>
 <div class="row"><div><label>Summary model</label><input type="text" name="summary_model"></div><div></div></div>
-<label>Guidance given to every session (when to message peers)</label><textarea name="guidance" id="guidance"></textarea><div class="mut small">Leave empty to use the built-in guidance shown in grey.</div>
+<label>Guidance given to every agent (when to message peers)</label><textarea name="guidance" id="guidance"></textarea><div class="mut small">Leave empty to use the built-in guidance shown in grey.</div>
 <label>Remote daemons (one URL per line, e.g. http://other-mac.local:7899)</label><textarea name="remotes" style="min-height:60px"></textarea>
-<div class="row"><div><label>Listen host (restart daemon to apply; use 0.0.0.0 for remotes)</label><input type="text" name="listen_host"></div>
+<div class="row"><div><label>Listen host (restart the daemon to apply; 0.0.0.0 for remotes)</label><input type="text" name="listen_host"></div>
 <div><label>Shared token for remote daemons</label><input type="text" name="token"></div></div>
 <p><button type="submit">Save</button> <span class="mut small" id="saved"></span></p>
 </form>
+
+<h2>Controls</h2>
+<div class="card">
+<div class="row" style="align-items:center">
+<div><b>Browsers</b><div class="mut small" id="browsers"></div></div>
+<div style="flex:0 0 auto"><button class="ghost" data-act="logout">Sign out here</button> <button class="ghost" data-act="logout-all">Sign out everywhere</button></div>
+</div>
+<div class="row" style="align-items:center;margin-top:12px">
+<div><b>Key</b><div class="mut small">Agents and sign-in links use the key in <span class="mono" id="keypath"></span>. Rotating it signs out every browser.</div></div>
+<div style="flex:0 0 auto"><button class="ghost" data-act="rotate">Rotate key</button></div>
+</div>
+<div class="row" style="align-items:center;margin-top:12px">
+<div><b>Daemon</b><div class="mut small">Agents reconnect by themselves after a restart. Queued messages are kept.</div></div>
+<div style="flex:0 0 auto"><button class="ghost" data-act="restart">Restart daemon</button></div>
+</div>
+<p class="mut small" id="ctlmsg"></p>
+</div>
 </main>
 <script>
 const $=s=>document.querySelector(s);let cfg={};
-const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-async function api(p,o){const r=await fetch(p,o);return r.json()}
-async function setSession(id,patch){const s={...cfg.sessions};s[id]={...(s[id]||{}),...patch};cfg=await api('/api/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessions:s})});refresh()}
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const J={'Content-Type':'application/json'};
+async function api(p,o){const r=await fetch(p,o);if(r.status===401){location.reload();throw new Error('signed out')}return r.json()}
+async function setAgent(id,patch){const s={...cfg.sessions};s[id]={...(s[id]||{}),...patch};cfg=await api('/api/config',{method:'PUT',headers:J,body:JSON.stringify({sessions:s})});refresh()}
+function wakeSel(id){const v=(cfg.sessions?.[id]||{}).auto_wake;const o=(val,t)=>`<option value="${val}" ${String(v??'default')===val?'selected':''}>${t}</option>`;
+  return `<select data-wake="${esc(id)}">${o('default','Wake: default')}${o('true','Wake: on')}${o('false','Wake: off')}</select>`}
 async function refresh(){
-  const [h,p,m]=await Promise.all([api('/api/health'),api('/api/peers'),api('/api/messages?limit=50')]);
-  $('#hostline').textContent=`${h.host} · daemon ${h.version} · pid ${h.pid}`;
+  const [st,p,m]=await Promise.all([api('/api/status'),api('/api/peers'),api('/api/messages?limit=50')]);
+  $('#hostline').textContent=`${st.host} · daemon ${st.version} · pid ${st.pid}`;
+  $('#browsers').textContent=`${st.browsers} signed in · links work once and expire after 60 s`;
+  $('#keypath').textContent=st.home+'/key';
   $('#peers').innerHTML=p.peers.length?p.peers.map(x=>`<div class="card peer">
    <div class="top"><span><span class="dot ${x.busy?'busy':''}"></span><span class="name">${esc(x.name)}</span> <span class="mut small">${x.remote?'@'+esc(x.host):''}</span></span>
    <span class="mut small">${x.busy?'working':'idle'} · ${x.last_seen_s}s</span></div>
    <div class="mono mut" style="margin-top:4px">${esc(x.cwd)}${x.branch?' · '+esc(x.branch):''}</div>
    <div style="margin-top:6px">${esc(x.summary)||'<span class="mut">no summary yet</span>'}</div>
-   ${x.remote?'':`<div class="row" style="margin-top:8px;align-items:center"><div><input type="text" placeholder="nickname" value="${esc((cfg.sessions?.[x.id]||{}).nickname||'')}" onchange="setSession('${x.id}',{nickname:this.value})"></div>
-   <div style="flex:0 0 auto"><button class="ghost" onclick="setSession('${x.id}',{muted:${!x.muted}})">${x.muted?'Unmute':'Mute'}</button></div></div>
-   <div class="mono mut small" style="margin-top:6px">${esc(x.id)}</div>`}</div>`).join(''):'<div class="empty">No live sessions. Start Claude Code with the peerlink plugin.</div>';
+   ${x.remote?'':`<div class="row" style="margin-top:8px;align-items:center"><div><input type="text" placeholder="nickname" value="${esc((cfg.sessions?.[x.id]||{}).nickname||'')}" data-nick="${esc(x.id)}"></div>
+   <div style="flex:0 0 auto">${wakeSel(x.id)} <button class="ghost" data-mute="${esc(x.id)}" data-muted="${x.muted}">${x.muted?'Unmute':'Mute'}</button></div></div>`}</div>`).join(''):'<div class="empty">No live agents. Start Claude Code with the peerlink plugin.</div>';
   $('#msgs').innerHTML=m.messages.slice().reverse().map(x=>`<tr><td class="small mut">${new Date(x.ts*1000).toLocaleTimeString()}</td>
    <td><b>${esc(x.from_name)}</b> → <b>${esc(x.to_name)}</b>${x.reply_to?`<div class="small mut">re ${esc(x.reply_to)}</div>`:''}</td>
    <td><div class="msgtext">${esc(x.text)}</div></td><td class="small">${esc(x.status)} <span class="mut">${esc(x.id)}</span></td></tr>`).join('')||'<tr><td colspan="4" class="empty">No messages yet.</td></tr>';
 }
+document.addEventListener('change',e=>{const t=e.target;
+  if(t.dataset.nick)setAgent(t.dataset.nick,{nickname:t.value});
+  if(t.dataset.wake)setAgent(t.dataset.wake,{auto_wake:t.value==='default'?null:t.value==='true'})});
+document.addEventListener('click',async e=>{const t=e.target.closest('button');if(!t)return;
+  if(t.dataset.mute){setAgent(t.dataset.mute,{muted:t.dataset.muted!=='true'});return}
+  const act=t.dataset.act;if(!act)return;const post=(p,b)=>api(p,{method:'POST',headers:J,body:JSON.stringify(b||{})});
+  if(act==='logout'){await post('/api/web/logout');location.reload()}
+  if(act==='logout-all'&&confirm('Sign out every browser, including this one?')){await post('/api/web/logout',{all:true});location.reload()}
+  if(act==='rotate'&&confirm('Rotate the key? Every browser is signed out; agents pick up the new key by themselves.')){await post('/api/key/rotate');location.reload()}
+  if(act==='restart'){await post('/api/restart');$('#ctlmsg').textContent='Restarting…';setTimeout(()=>location.reload(),2500)}});
 async function loadCfg(){cfg=await api('/api/config');const f=$('#cfg');
   for(const el of f.elements){if(!el.name)continue;const v=cfg[el.name];
     if(el.type==='checkbox')el.checked=!!v;else if(el.name==='remotes')el.value=(v||[]).join('\n');else el.value=v??''}
-  $('#guidance').placeholder=(await api('/api/health')).default_guidance||''}
+  $('#guidance').placeholder=cfg.default_guidance||''}
 $('#cfg').addEventListener('submit',async e=>{e.preventDefault();const f=e.target,b={};
   for(const el of f.elements){if(!el.name)continue;
     b[el.name]=el.type==='checkbox'?el.checked:el.type==='number'?Number(el.value):el.name==='remotes'?el.value.split('\n').map(s=>s.trim()).filter(Boolean):el.value}
-  cfg=await api('/api/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
+  cfg=await api('/api/config',{method:'PUT',headers:J,body:JSON.stringify(b)});
   $('#saved').textContent='Saved '+new Date().toLocaleTimeString()});
 loadCfg().then(refresh);setInterval(refresh,2000);
 </script></body></html>
 """
 
 
+PAGE_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Peerlink</title><style>
+:root{--bg:#faf9f7;--fg:#1f1e1c;--mut:#6b6862;--line:#e4e1db}
+@media (prefers-color-scheme:dark){:root{--bg:#1c1b19;--fg:#ecebe8;--mut:#9b978f;--line:#34322e}}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 ui-sans-serif,system-ui,-apple-system,sans-serif}
+main{max-width:520px;margin:15vh auto;padding:0 16px}h1{font-size:20px}p{color:var(--mut)}
+code{font-family:ui-monospace,Menlo,monospace;font-size:13px;border:1px solid var(--line);border-radius:4px;padding:1px 5px;color:var(--fg)}
+</style></head><body><main><h1>{title}</h1><p>{text}</p></main></body></html>"""
+
+
 if __name__ == "__main__":
-    arg = sys.argv[1] if len(sys.argv) > 1 else ""
-    if arg == "--detach":
-        detach()
-    elif arg == "--stop":
-        stop()
-    elif arg == "--status":
-        print(json.dumps(health() or {"ok": False}))
-    else:
-        serve()
+    argv = sys.argv[1:]
+    name = ALIASES.get(argv[0], argv[0]) if argv else "help"
+    if name in ("help", "-h", "--help") or name not in COMMANDS:
+        cli_help()
+        sys.exit(0 if name in ("help", "-h", "--help") else 2)
+    sys.exit(COMMANDS[name][0](argv[1:]) or 0)
