@@ -26,6 +26,14 @@ Agents treat each other as teammates. Each one knows who else is live and what t
   - A resumed session summarizes its history as soon as it starts.
 - **Peer list.** A short list of live agents is added beside the prompt, but only when that list has changed since the agent last saw it.
 
+## What you see in the chat
+
+Every message between agents shows up in both chats.
+
+- **Messages you send** appear as one row naming who the message went to and what it said, such as `↗ api · m4 · reply expected`. Press ctrl+o to see the full tool call.
+- **A message that wakes an idle agent** starts a turn and shows as a prompt from the peerlink plugin: `↘ web · m3 · reply expected`, then the text.
+- **A message that arrives mid-turn** is passed to the model straight away. It also shows in the chat as a line, `peerlink: ↘ web · m3: …`, which the model doesn't read again.
+
 ## Keeping token costs down
 
 - The peer list is only sent when it changes, at about one line per agent.
@@ -33,7 +41,7 @@ Agents treat each other as teammates. Each one knows who else is live and what t
 - A model-written summary is only made when at least one peer is live to read it. It's refreshed at most every 3 turns and 2 minutes, from the last 8 messages. If the model answers `UNCHANGED`, nothing is updated, so peers aren't sent a new peer list for nothing.
 - The guidance is a fixed system-prompt section, so the prompt cache keeps it cheap.
 - Messages are short and point to file paths instead of pasting code or logs, because local peers share the filesystem. Acknowledgements and thanks are discouraged.
-- Message framing is a single tag carrying `id`, `from` and an optional `re` and `reply`.
+- Each incoming message is framed by a single header line (`↘ from · id · re · reply expected`), which you and the model both read.
 
 ## Commands
 
@@ -141,7 +149,7 @@ You can change these in the web UI, with `peerlink config <name> <value>`, or in
 .claude-plugin/marketplace.json   makes this repo installable
 plugin/.claude-plugin/plugin.json
 plugin/hooks/hooks.json           points at the hooks module
-plugin/hooks/register.ts          tools, /peerlink, polling, delivery, summaries, guidance
-plugin/hooks/register.test.ts     tests (claude plugin test plugin)
+plugin/hooks/register.tsx         tools, /peerlink, polling, delivery, summaries, guidance, chat rows
+plugin/hooks/register.test.tsx    tests (claude plugin test plugin)
 plugin/daemon/peerlinkd.py        daemon, CLI and web UI
 ```

@@ -1,5 +1,9 @@
 import type { EngineInterface, Register } from 'claude-code'
 
+// Incoming peer messages read the same for the model and the person: one header line, then the text.
+const MESSAGE_MARK = '↘ '
+const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply is needed.)'
+
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
 const DAEMON_VERSION = '0.4.1'
@@ -159,38 +163,77 @@ async function announce($: EngineInterface) {
   return res.ok
 }
 
+type Frame = { id: string; from: string; re?: string; reply: boolean; body: string }
+
+// Reads back what frame() wrote, wherever it sits in the row's text.
+function parseFrames(text: string): Frame[] {
+  const frames: Frame[] = []
+  const pattern = /^↘ (\S+) · (m\d+)((?: · [^\n]*)?)\n([\s\S]*?)(?=\n\n↘ |\n\n\(Reply with send_message|$)/gm
+  for (const match of text.matchAll(pattern)) {
+    const tags = match[3]
+    frames.push({ from: match[1], id: match[2], re: tags.match(/re (m\d+)/)?.[1], reply: tags.includes('reply expected'), body: match[4] })
+  }
+  return frames
+}
+
+// One row per message: who it's from and the text, the way a chat shows it.
+function MessageRow(ui: any, arrow: '↘' | '↗', who: string, tags: string[], body: string, key: string) {
+  const { Box, Text } = ui
+  return (
+    <Box key={key} flexDirection="column">
+      <Box flexDirection="row">
+        <Text color="claude" bold>{`${arrow} ${who}`}</Text>
+        {tags.length ? <Text dimColor>{` · ${tags.join(' · ')}`}</Text> : null}
+      </Box>
+      <Box paddingLeft={2}>
+        <Text wrap="wrap">{clip(body, 600)}</Text>
+      </Box>
+    </Box>
+  )
+}
+
+function inboundTags(f: Frame) {
+  return [f.id, f.re ? `re ${f.re}` : '', f.reply ? 'reply expected' : ''].filter(Boolean)
+}
+
 function frame(m: PeerMessage) {
   const from = m.from.includes('@') ? m.from : m.from_name
-  const attrs = [`id="${m.id}"`, `from="${from}"`, m.reply_to ? `re="${m.reply_to}"` : '', m.expects_reply ? 'reply="expected"' : '']
-  return `<peer-message ${attrs.filter(Boolean).join(' ')}>\n${m.text}\n</peer-message>`
+  const tags = [m.id, m.reply_to ? `re ${m.reply_to}` : '', m.expects_reply ? 'reply expected' : ''].filter(Boolean)
+  return `${MESSAGE_MARK}${from} · ${tags.join(' · ')}\n${m.text}`
+}
+
+function framed(batch: PeerMessage[]) {
+  return `${batch.map(frame).join('\n\n')}\n\n${REPLY_HINT}`
 }
 
 function showStatus($: EngineInterface) {
   const waiting = pending.length ? ` · ${pending.length} waiting` : ''
-  $.ui.status(myName ? `peerlink: ${myName} · ${peerCount} peer${peerCount === 1 ? '' : 's'}${waiting}` : undefined)
+  $.ui.status(myName ? `${myName} · ${peerCount} peer${peerCount === 1 ? '' : 's'}${waiting}` : undefined)
 }
 
 async function deliver($: EngineInterface) {
   if (pending.length === 0 || !cfg) return
   const batch = pending
   if (busy) {
-    if (!cfg.inject_while_busy) return
+    if (cfg.inject_while_busy === false) return
     pending = []
-    const text = `Peer message (reply with send_message, reply_to its id):\n${batch.map(frame).join('\n')}`
-    const res = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] } })
-    if ('deny' in res && res.deny) pending = [...batch, ...pending]
+    const res = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: framed(batch) }] } })
+    if ('deny' in res && res.deny) {
+      pending = [...batch, ...pending]
+      return
+    }
+    // The model reads the row above, which the person never sees: show each message as a transcript line too.
+    for (const m of batch) $.ui.log(frame(m).replace('\n', ': '))
     return
   }
-  if (!cfg.auto_wake_idle) {
+  if (cfg.auto_wake_idle === false) {
     showStatus($)
     return
   }
   pending = []
   busy = true
   $.ui.toast(`Message from ${batch.map(m => m.from_name).join(', ')}`)
-  await $.prompt.submit({
-    text: `Peer message (reply with send_message, reply_to its id):\n${batch.map(frame).join('\n')}`,
-  })
+  await $.prompt.submit({ text: framed(batch) })
 }
 
 async function poll($: EngineInterface) {
@@ -403,7 +446,7 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
     }
     case 'status': {
       const st = (await call($, 'GET', '/api/status')).data
-      return `daemon ${st.version} (pid ${st.pid}) · ${st.sessions} live agents · ${st.queued} queued messages · ${st.browsers} signed-in browsers\nthis agent: ${myName} · wake on message: ${cfg?.auto_wake_idle ? 'on' : 'off'}${cfg?.muted ? ' · muted' : ''}\nsummary: ${summary || '(none yet)'}`
+      return `daemon ${st.version} (pid ${st.pid}) · ${st.sessions} live agents · ${st.queued} queued messages · ${st.browsers} signed-in browsers\nthis agent: ${myName} · wake on message: ${cfg?.auto_wake_idle === false ? 'off' : 'on'}${cfg?.muted ? ' · muted' : ''}\nsummary: ${summary || '(none yet)'}`
     }
     case 'peers':
       return listPeers($, false)
@@ -424,7 +467,7 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
       if (value === undefined) return 'Usage: /peerlink wake on|off|default'
       await setAgentConfig($, sessionId, { auto_wake: value })
       await poll($)
-      return `Wake on message: ${cfg?.auto_wake_idle ? 'on' : 'off'}${value === null ? ' (the default)' : ''}.`
+      return `Wake on message: ${cfg?.auto_wake_idle === false ? 'off' : 'on'}${value === null ? ' (the default)' : ''}.`
     }
     case 'mute':
     case 'unmute': {
@@ -586,4 +629,49 @@ export const register: Register = on => {
   }).catch(daemonDown)
 
   on('command.run', { command: 'peerlink' }, async ($, e) => ({ text: await runCommand($, e.args ?? '') }))
+
+  // A peer message that started a turn here: one row per message instead of the raw prompt (ctrl+o shows it whole).
+  on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
+    // Claude Code wraps a plugin's prompt in its own framing; the marker is inside.
+    if (e.props.isExpanded || !e.props.text.includes(REPLY_HINT)) return next(e)
+    const frames = parseFrames(e.props.text)
+    if (!frames.length) return next(e)
+    const ui = $.ui.resolve(e) as any
+    return (
+      <ui.Box flexDirection="column" marginTop={1}>
+        {frames.map(f => MessageRow(ui, '↘', f.from, inboundTags(f), f.body, f.id))}
+      </ui.Box>
+    )
+  })
+
+  // The row above already says it was sent; keep the result line for failures only.
+  on('ui.render', { component: 'ToolResult', props: { tool: 'mcp__peerlink__send_message' } }, async ($, e, next) => {
+    const output = typeof e.props.output === 'string' ? e.props.output : ''
+    if (e.props.isExpanded || e.props.isErrored || !output.startsWith('Sent to')) return next(e)
+    const { Box } = $.ui.resolve(e) as any
+    return <Box />
+  })
+
+  // A message this agent sends: who to and what, instead of the tool call's JSON.
+  on('ui.render', { component: 'ToolUse', props: { tool: 'mcp__peerlink__send_message' } }, async ($, e, next) => {
+    if (e.props.isExpanded) return next(e)
+    const input = (e.props.input ?? {}) as any
+    if (typeof input.to !== 'string' || typeof input.text !== 'string') return next(e)
+    const output = typeof e.props.output === 'string' ? e.props.output : ''
+    const sent = output.match(/^Sent to (.+?) \((m\d+)\)/)
+    const failed = output.startsWith('Not sent') || e.props.isErrored
+    const tags = [
+      sent ? sent[2] : '',
+      input.reply_to ? `re ${input.reply_to}` : '',
+      input.expects_reply ? 'reply expected' : '',
+      e.props.isRunning ? 'sending…' : '',
+    ].filter(Boolean)
+    const ui = $.ui.resolve(e) as any
+    return (
+      <ui.Box flexDirection="column" marginTop={1}>
+        {MessageRow(ui, '↗', sent ? sent[1] : input.to, tags, input.text, 'out')}
+        {failed ? <ui.Text color="error">{`  ${output || 'not sent'}`}</ui.Text> : null}
+      </ui.Box>
+    )
+  })
 }
