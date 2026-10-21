@@ -2,7 +2,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.4.0'
+const DAEMON_VERSION = '0.4.1'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
