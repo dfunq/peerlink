@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.6.13'
+const DAEMON_VERSION = '0.6.14'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -721,7 +721,7 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
   switch (sub) {
     case 'web': {
       const res = await call($, 'POST', '/api/web/link', {})
-      if (!res.ok) return `Could not make a sign-in link: ${res.data.error ?? res.status}`
+      if (!res.ok || !res.data.url) return `Could not make a sign-in link: ${res.data.error ?? res.status}`
       await $.process.run(['open', res.data.url])
       return `Opened the web UI with a one-time sign-in link (valid ${res.data.expires_in_s}s).`
     }
@@ -992,19 +992,19 @@ export const register: Register = on => {
     }))
 
   // A peer message that started a turn here: one row per message instead of the raw prompt (ctrl+o shows it whole).
-  // The hint row under the prompt, then peerlink's line as a link to the web UI. A tail can't be clicked, so the
-  // row is drawn here: the engine's hint as it reads, then the link. Sign-ins last 12 hours and survive daemon
-  // restarts; a signed-out browser is told to run /peerlink web.
+  // Claude Code's hint row as it draws it, then peerlink's line on its own row beneath, the lowest on screen. The
+  // line is a plain Button, not a Link: a click raises it in any terminal, where a Link needs hyperlink support
+  // (without it the terminal prints the URL after the text). The press opens the web UI with a fresh sign-in.
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
     if (!statusLine || surface !== 'terminal') return next(e)
     const ui = $.ui.resolve(e) as any
-    const props = e.props as any
+    const engine = await next(e)
     return (
-      <ui.Box flexDirection="row">
-        <ui.Text dimColor>
-          {props.hint ? `${props.hint}  ` : ''}
-          <ui.Link href={`${DAEMON}/`}>{statusLine}</ui.Link>
-        </ui.Text>
+      <ui.Box flexDirection="column">
+        {engine}
+        <ui.Button key="peerlink-status" plain dimColor onPress={() => void runCommand($, 'web')}>
+          {statusLine}
+        </ui.Button>
       </ui.Box>
     )
   })
