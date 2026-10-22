@@ -20,7 +20,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.5.0' })
+    if (path === '/api/health') return ok({ ok: true, version: '0.6.0' })
     if (path === '/api/sessions') return ok({ id: body.id, name: body.name, config: { poll_interval_ms: 600000, ...config }, previous })
     if (path === '/api/peers') return ok({ peers })
     return ok({ name: 'web', config: { poll_interval_ms: 600000, ...config }, inbox: inbox.splice(0), peer_count: peerCount })
@@ -276,4 +276,52 @@ test('the default space adds nothing to the system prompt', async ($, on) => {
   const composed: any = await $.prompt.compose(COMPOSE)
   const text = composed.sections.find((s: any) => s.id === 'peerlink:guidance').text
   expect(text).toBe('# Peer agents\nPeers know you as "web".\nBe brief.')
+})
+
+test('a lead is told to delegate down and report back up', async ($, on) => {
+  engine(on)
+  fakeDaemon(on, 1, null, [], { space: 'storefront', space_source: 'file', space_from: '/Users/x/r/web/.peerlink', parent: 'acme', guidance: 'Be brief.' })
+  on('prompt.compose', () => ({ sections: [] }))
+  await $.session.start(START)
+  const composed: any = await $.prompt.compose(COMPOSE)
+  const text = composed.sections.find((s: any) => s.id === 'peerlink:guidance').text
+  expect(text).toContain('in the "storefront" space; you only see agents in that space and "acme"')
+  expect(text).toContain('You lead the "storefront" space and speak for it in the "acme" space')
+})
+
+test('a parent space sees its child leads, tagged, and is told to hand them outcomes', async ($, on) => {
+  engine(on)
+  const daemon = fakeDaemon(on, 1, null, [], {
+    space: 'acme', space_source: 'file', space_from: '/Users/x/r/.peerlink',
+    children: [{ name: 'billing-api', space: 'billing' }], guidance: 'Be brief.',
+  })
+  Object.assign(daemon.peers[0], { space: 'billing', parent: 'acme' })
+  on('prompt.compose', () => ({ sections: [] }))
+  await $.session.start(START)
+  const first: any = await $.prompt.submit({ text: 'ship invoices' })
+  expect(first.context?.join('\n')).toContain('billing-api [leads billing]: ~/r/billing')
+  const composed: any = await $.prompt.compose(COMPOSE)
+  const text = composed.sections.find((s: any) => s.id === 'peerlink:guidance').text
+  expect(text).toContain('billing-api (leads "billing")')
+})
+
+test('/peerlink-spaces draws nested spaces as a tree', async ($, on) => {
+  engine(on)
+  const daemon = fakeDaemon(on, 1, null, [], { space: 'billing', space_source: 'file', space_from: '/Users/x/r/web/.peerlink', parent: 'acme' })
+  daemon.peers.splice(0, 1,
+    { id: 'p0', name: 'acme', host: 'Mac', cwd: '/Users/x/r', space: 'acme', parent: '' } as any,
+    { id: 'me-session', name: 'web', host: 'Mac', cwd: '/Users/x/r/web', space: 'billing', parent: 'acme' } as any,
+    { id: 'p1', name: 'api', host: 'Mac', cwd: '/Users/x/r/web/api', space: 'billing', parent: '' } as any,
+  )
+  await $.session.start(START)
+  const { text } = (await $.command.run({ command: 'peerlink-spaces' })) as any
+  expect(text).toContain('acme\n  acme  ~/r\n    └ billing · led by web\n        api  ~/r/web/api\n        web  ~/r/web  ← you')
+})
+
+test('topic commands reject what belongs to another topic', async ($, on) => {
+  engine(on)
+  fakeDaemon(on)
+  await $.session.start(START)
+  const { text } = (await $.command.run({ command: 'peerlink-peers', args: 'rename x' } as any)) as any
+  expect(text).toContain('Usage: /peerlink-peers')
 })

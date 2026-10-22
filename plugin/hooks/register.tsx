@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.5.0'
+const DAEMON_VERSION = '0.6.0'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -25,6 +25,11 @@ type ClientConfig = {
   space: string
   space_source: 'override' | 'file' | 'rule' | 'default'
   space_from: string
+  // Set when this agent leads its space: the space it also sits in and speaks for its own.
+  parent?: string
+  // The agent that leads this agent's space, and the leads of spaces nested inside it.
+  lead?: string
+  children?: { name: string; space: string }[]
   poll_interval_ms: number
   auto_wake_idle: boolean
   inject_while_busy: boolean
@@ -46,19 +51,25 @@ const SUMMARY_MIN_GAP_MS = 2 * 60_000
 const MANUAL_SUMMARY_HOLD_MS = 10 * 60_000
 
 const HELP = `peerlink commands:
+  /peerlink [status]       daemon, this agent, its summary
   /peerlink web            open the web UI (one-time sign-in link)
-  /peerlink status         daemon, this agent, peers
-  /peerlink peers          list live agents
-  /peerlink name <name>    rename this agent
-  /peerlink summary <text> set what peers see for this agent
-  /peerlink wake on|off|default   whether a message starts a turn here when idle
-  /peerlink mute <agent> | unmute <agent>
-  /peerlink space                 this agent's space and where it comes from
-  /peerlink space <name> | clear  override the space for this agent only
-  /peerlink space file <name> | clear   set the space in this project's .peerlink
   /peerlink restart        restart the daemon
   /peerlink rotate-key     new key; signs out every browser
-In a shell: ~/.peerlink/bin/peerlink help`
+
+  /peerlink-spaces                 the space tree, and this agent's place in it
+  /peerlink-spaces <name> | clear  override the space for this agent only
+  /peerlink-spaces file <name> | clear    set the space in this project's .peerlink
+  /peerlink-spaces parent <name> | clear  nest this project's space inside another
+
+  /peerlink-peers                  list live agents
+  /peerlink-peers mute <agent> | unmute <agent>
+
+  /peerlink-agent                  this agent's name, space, wake and summary
+  /peerlink-agent name <name>      rename this agent
+  /peerlink-agent summary <text>   set what peers see for this agent
+  /peerlink-agent wake on|off|default    whether a message starts a turn here when idle
+
+/peerlink <subcommand> runs any of these too, as in /peerlink space file acme.`
 
 // Module state: a hot reload starts it over and session.start registers again.
 let sessionId = ''
@@ -272,7 +283,7 @@ async function poll($: EngineInterface) {
 
 function peerLine(p: any) {
   const where = p.cwd.replace(/^\/Users\/[^/]+/, '~') + (p.branch ? ` [${p.branch}]` : '')
-  return `- ${p.name}${p.remote ? '@' + p.host : ''}: ${where} — ${(p.summary || 'no summary yet').slice(0, 140)}`
+  return `- ${p.name}${p.remote ? '@' + p.host : ''}${spaceTag(p)}: ${where} — ${(p.summary || 'no summary yet').slice(0, 140)}`
 }
 
 // The live agents, for the model to read beside the prompt; only when the list changed since it last saw it.
@@ -419,7 +430,7 @@ async function listPeers($: EngineInterface, withIds: boolean) {
   return peers
     .map(
       p =>
-        `- ${p.name}${p.remote ? '@' + p.host : ''}${withIds ? ` (id ${p.id})` : ''} — ${p.busy ? 'busy' : 'idle'}${p.muted ? ', muted' : ''}\n  dir: ${p.cwd}${p.branch ? ` [${p.branch}]` : ''}\n  summary: ${p.summary || '(none)'}`,
+        `- ${p.name}${p.remote ? '@' + p.host : ''}${withIds ? ` (id ${p.id})` : ''}${spaceTag(p)} — ${p.busy ? 'busy' : 'idle'}${p.muted ? ', muted' : ''}\n  dir: ${p.cwd}${p.branch ? ` [${p.branch}]` : ''}\n  summary: ${p.summary || '(none)'}`,
     )
     .join('\n')
 }
@@ -431,7 +442,32 @@ function spaceLine() {
     : cfg.space_source === 'file' ? `from ${cfg.space_from}`
     : cfg.space_source === 'rule' ? `folder rule ${cfg.space_from}`
     : 'no space set'
-  return `space: ${cfg.space} (${from})`
+  const nest = cfg.parent ? `, leads it inside "${cfg.parent}"` : cfg.lead ? `, led by ${cfg.lead}` : ''
+  return `space: ${cfg.space} (${from}${nest})`
+}
+
+// Where a peer sits relative to this agent: a lead speaks for its space; a peer in another space is the lead's parent.
+function spaceTag(p: any) {
+  if (p.parent) return ` [leads ${p.space}]`
+  return cfg && p.space && p.space !== cfg.space ? ` [${p.space}]` : ''
+}
+
+// What a place in a nested space asks of this agent; the daemon enforces who can reach whom.
+function hierarchyGuidance() {
+  if (!cfg) return ''
+  const lines: string[] = []
+  if (cfg.parent)
+    lines.push(
+      `You lead the "${cfg.space}" space and speak for it in the "${cfg.parent}" space. Agents in "${cfg.parent}" can only reach "${cfg.space}" through you. When one asks for something, decide which agent in "${cfg.space}" owns it, delegate with send_message (or do it yourself if it is yours), and when the work is done report the outcome back to whoever asked, with reply_to their message id.`,
+    )
+  else if (cfg.lead)
+    lines.push(`${cfg.lead} leads the "${cfg.space}" space and relays work from outside it. Report results to ${cfg.lead}, and ask it for anything that lives outside your space.`)
+  const kids = cfg.children ?? []
+  if (kids.length)
+    lines.push(
+      `Some spaces sit inside yours, each spoken for by its lead: ${kids.map(k => `${k.name} (leads "${k.space}")`).join(', ')}. You can't reach their agents directly: give the lead the outcome you want and let it delegate, rather than telling it which agent should do what.`,
+    )
+  return lines.length ? `\n${lines.join('\n')}` : ''
 }
 
 async function setAgentConfig($: EngineInterface, id: string, patch: Record<string, unknown>) {
@@ -446,6 +482,74 @@ async function findAgent($: EngineInterface, name: string) {
   const want = name.toLowerCase()
   const hits = ((res.data.peers ?? []) as any[]).filter(p => p.name.toLowerCase() === want || p.id === name)
   return hits.length === 1 ? hits[0] : undefined
+}
+
+// One command per topic, each with its own hint; `/peerlink <sub>` still runs every subcommand.
+const COMMANDS: { name: string; description: string; argumentHint: string; args: (a: string) => string }[] = [
+  {
+    name: 'peerlink',
+    description: 'peerlink: status, web UI, restart, rotate-key (help lists every command)',
+    argumentHint: '[status | web | restart | rotate-key | help]',
+    args: a => a || 'status',
+  },
+  {
+    name: 'peerlink-spaces',
+    description: "peerlink: the space tree, or set this agent's space, .peerlink file or parent space",
+    argumentHint: '[<name> | clear | file <name> | parent <name>]',
+    args: a => `spaces ${a}`,
+  },
+  {
+    name: 'peerlink-peers',
+    description: 'peerlink: list live agents, or mute and unmute one',
+    argumentHint: '[mute <agent> | unmute <agent>]',
+    args: a => (/^(mute|unmute)\b/.test(a) ? a : a ? 'usage peers' : 'peers'),
+  },
+  {
+    name: 'peerlink-agent',
+    description: "peerlink: this agent's name, summary and wake on message",
+    argumentHint: '[name <name> | summary <text> | wake on|off|default]',
+    args: a => (/^(name|summary|wake)\b/.test(a) ? a : a ? 'usage agent' : 'agent'),
+  },
+]
+
+const USAGE: Record<string, string> = {
+  peers: 'Usage: /peerlink-peers [mute <agent> | unmute <agent>]',
+  agent: 'Usage: /peerlink-agent [name <name> | summary <text> | wake on|off|default]',
+}
+
+// The spaces on this machine as an indented tree: a led space sits under its parent, its members under it.
+async function spaceTree($: EngineInterface) {
+  const res = await call($, 'GET', '/api/peers')
+  if (!res.ok) return `Daemon error: ${res.data.error ?? res.status}`
+  const peers = res.data.peers as any[]
+  const groups: Record<string, any[]> = {}
+  const inside: Record<string, { parent: string; lead: string }> = {}
+  const kids: Record<string, string[]> = {}
+  for (const p of peers) (groups[p.space || 'default'] ??= []).push(p)
+  for (const p of peers)
+    if (p.parent && !inside[p.space]) {
+      inside[p.space] = { parent: p.parent, lead: p.name }
+      ;(kids[p.parent] ??= []).push(p.space)
+      groups[p.parent] ??= []
+    }
+  const order = (a: string, b: string) => (a === 'default' ? 1 : b === 'default' ? -1 : a.localeCompare(b))
+  const seen = new Set<string>()
+  const lines: string[] = []
+  const walk = (space: string, depth: number) => {
+    if (seen.has(space)) return
+    seen.add(space)
+    const pad = '    '.repeat(depth)
+    lines.push(`${pad}${depth ? '└ ' : ''}${space}${inside[space] ? ` · led by ${inside[space]!.lead}` : ''}`)
+    const members = groups[space] ?? []
+    const width = Math.max(0, ...members.map(p => p.name.length))
+    for (const p of members.sort((a, b) => a.name.localeCompare(b.name)))
+      lines.push(`${pad}${depth ? '  ' : ''}  ${p.name.padEnd(width)}  ${p.cwd.replace(/^\/Users\/[^/]+/, '~')}${p.id === sessionId ? '  ← you' : ''}`)
+    for (const child of (kids[space] ?? []).sort()) walk(child, depth + 1)
+  }
+  const roots = Object.keys(groups).filter(n => !inside[n] || !groups[inside[n]!.parent])
+  for (const n of roots.sort(order)) walk(n, 0)
+  for (const n of Object.keys(groups).sort(order)) walk(n, 0)  // spaces caught in a parent loop
+  return lines.length ? lines.join('\n') : 'No live agents.'
 }
 
 async function runCommand($: EngineInterface, args: string): Promise<string> {
@@ -464,10 +568,18 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
       const st = (await call($, 'GET', '/api/status')).data
       return `daemon ${st.version} (pid ${st.pid}) · ${st.sessions} live agents · ${st.queued} queued messages · ${st.browsers} signed-in browsers\nthis agent: ${myName} · ${spaceLine()} · wake on message: ${cfg?.auto_wake_idle === false ? 'off' : 'on'}${cfg?.muted ? ' · muted' : ''}\nsummary: ${summary || '(none yet)'}`
     }
+    case 'usage':
+      return USAGE[arg] ?? HELP
     case 'peers':
       return listPeers($, false)
+    case 'agent':
+      return `this agent: ${myName} · ${spaceLine()} · wake on message: ${cfg?.auto_wake_idle === false ? 'off' : 'on'}${cfg?.muted ? ' · muted' : ''}\nsummary: ${summary || '(none yet)'}`
+    case 'spaces':
+      if (rest[0] === 'help') return HELP
+      if (!rest.length) return `This agent's ${spaceLine()}.\n\n${await spaceTree($)}`
+      return runCommand($, `space ${arg}`)
     case 'name': {
-      if (!arg) return 'Usage: /peerlink name <name>'
+      if (!arg) return 'Usage: /peerlink-agent name <name>'
       await setAgentConfig($, sessionId, { nickname: arg })
       await poll($)
       return `This agent is now "${myName}".`
@@ -480,7 +592,7 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
     }
     case 'wake': {
       const value = arg === 'on' ? true : arg === 'off' ? false : arg === 'default' ? null : undefined
-      if (value === undefined) return 'Usage: /peerlink wake on|off|default'
+      if (value === undefined) return 'Usage: /peerlink-agent wake on|off|default'
       await setAgentConfig($, sessionId, { auto_wake: value })
       await poll($)
       return `Wake on message: ${cfg?.auto_wake_idle === false ? 'off' : 'on'}${value === null ? ' (the default)' : ''}.`
@@ -488,15 +600,22 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
     case 'mute':
     case 'unmute': {
       const agent = arg && (await findAgent($, arg))
-      if (!agent) return `No single live agent named "${arg}". /peerlink peers lists them.`
+      if (!agent) return `No single live agent named "${arg}". /peerlink-peers lists them.`
       await setAgentConfig($, agent.id, { muted: sub === 'mute' })
       return `${agent.name} is ${sub === 'mute' ? 'muted' : 'unmuted'}.`
     }
     case 'space': {
       const [what = '', name = ''] = rest
       if (!what) return `This agent's ${spaceLine()}.`
+      if (what === 'parent') {
+        if (!name) return 'Usage: /peerlink-spaces parent <name> | clear'
+        const res = await call($, 'POST', `/api/sessions/${sessionId}/space-file`, { parent: name === 'clear' ? '' : name })
+        if (!res.ok) return `Could not write .peerlink: ${res.data.error ?? res.status}`
+        await poll($)
+        return `${name === 'clear' ? 'Cleared the parent in' : 'Wrote'} ${res.data.path}. This agent's ${spaceLine()}.`
+      }
       if (what === 'file') {
-        if (!name) return 'Usage: /peerlink space file <name> | clear'
+        if (!name) return 'Usage: /peerlink-spaces file <name> | clear'
         const res = await call($, 'POST', `/api/sessions/${sessionId}/space-file`, { space: name === 'clear' ? '' : name })
         if (!res.ok) return `Could not write .peerlink: ${res.data.error ?? res.status}`
         await poll($)
@@ -559,11 +678,7 @@ export const register: Register = on => {
       },
       isDeferred: false,
     })
-    await $.command.register({
-      name: 'peerlink',
-      description: 'peerlink: web UI, status, peers, name, space, wake, mute, restart, rotate-key',
-      argumentHint: 'web | status | peers | name <name> | space [name] | wake on|off | mute <agent> | help',
-    })
+    for (const { name, description, argumentHint } of COMMANDS) await $.command.register({ name, description, argumentHint })
     if (await ensureDaemon($)) {
       await announce($)
       startPolling($)
@@ -628,7 +743,7 @@ export const register: Register = on => {
         {
           id: 'peerlink:guidance',
           scope: 'session',
-          text: `# Peer agents\nPeers know you as "${myName}"${cfg.space && cfg.space !== 'default' ? ` in the "${cfg.space}" space; you only see agents in that space` : ''}.\n${cfg.guidance}`,
+          text: `# Peer agents\nPeers know you as "${myName}"${cfg.space && cfg.space !== 'default' ? ` in the "${cfg.space}" space; you only see agents in that space${cfg.parent ? ` and "${cfg.parent}"` : ''}` : ''}.${hierarchyGuidance()}\n${cfg.guidance}`,
         },
       ],
     }
@@ -658,7 +773,7 @@ export const register: Register = on => {
     return text('Summary updated.')
   }).catch(daemonDown)
 
-  on('command.run', { command: 'peerlink' }, async ($, e) => ({ text: await runCommand($, e.args ?? '') }))
+  for (const c of COMMANDS) on('command.run', { command: c.name }, async ($, e) => ({ text: await runCommand($, c.args((e.args ?? '').trim())) }))
 
   // A peer message that started a turn here: one row per message instead of the raw prompt (ctrl+o shows it whole).
   on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
