@@ -13,6 +13,7 @@ key (HMAC-SHA256, valid 60 s, usable once), which sets a session cookie.
 """
 
 import hashlib
+import re
 import hmac
 import json
 import secrets
@@ -27,7 +28,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.4.1"
+VERSION = "0.5.0"
 HOME = os.environ.get("PEERLINK_HOME", os.path.expanduser("~/.peerlink"))
 CONFIG_PATH = os.path.join(HOME, "config.json")
 PID_PATH = os.path.join(HOME, "daemon.pid")
@@ -42,6 +43,9 @@ WEB_SESSION_TTL_S = 12 * 3600
 COOKIE = "peerlink_session"
 PORT = int(os.environ.get("PEERLINK_PORT", "7899"))
 HOSTNAME = socket.gethostname().split(".")[0]
+SPACE_FILE = ".peerlink"
+DEFAULT_SPACE = "default"
+SPACE_CACHE_S = 5
 
 OLD_GUIDANCE_V1 = """\
 You can see and message other Claude Code sessions running for this user \
@@ -85,6 +89,7 @@ DEFAULT_CONFIG = {
     "auto_summary": True,
     "summary_model": "haiku",
     "sessions": {},
+    "space_rules": [],
     "remotes": [],
     "listen_host": "127.0.0.1",
     "token": "",
@@ -231,12 +236,17 @@ def save_config():
 
 
 def session_cfg(sid):
-    return {"nickname": "", "muted": False, "auto_wake": None, **config["sessions"].get(sid, {})}
+    return {"nickname": "", "muted": False, "auto_wake": None, "space": "", **config["sessions"].get(sid, {})}
 
 
 def client_config(sid):
     s = session_cfg(sid)
+    rec = sessions.get(sid)
+    space, source, where = space_of(rec) if rec else (DEFAULT_SPACE, "default", "")
     return {
+        "space": space,
+        "space_source": source,
+        "space_from": where,
         "poll_interval_ms": config["poll_interval_ms"],
         "auto_wake_idle": config["auto_wake_idle"] if s["auto_wake"] is None else s["auto_wake"],
         "inject_while_busy": config["inject_while_busy"],
@@ -246,6 +256,103 @@ def client_config(sid):
         "auto_summary": config["auto_summary"],
         "summary_model": config["summary_model"],
     }
+
+
+def clean_space(name):
+    return re.sub(r"[^a-z0-9._-]+", "-", str(name or "").strip().lower()).strip("-")[:40]
+
+
+def find_space_file(cwd):
+    """The nearest .peerlink file at or above cwd. The home folder itself never counts: ~/.peerlink is ours."""
+    home = os.path.expanduser("~")
+    d = os.path.abspath(cwd) if cwd else ""
+    while d and d != home and d != os.path.dirname(d):
+        path = os.path.join(d, SPACE_FILE)
+        if os.path.isfile(path):
+            return path
+        d = os.path.dirname(d)
+    return None
+
+
+def read_space_file(path):
+    try:
+        with open(path) as f:
+            for line in f:
+                k, sep, v = line.partition(":") if ":" in line else line.partition("=")
+                if sep and k.strip().lower() == "space":
+                    return clean_space(v)
+    except OSError:
+        pass
+    return ""
+
+
+def rule_space(cwd):
+    """The space of the most specific folder rule that covers cwd."""
+    best = None
+    for rule in config.get("space_rules") or []:
+        path = os.path.abspath(os.path.expanduser(str(rule.get("path", "")))) if rule.get("path") else ""
+        name = clean_space(rule.get("space"))
+        if name and path and (cwd == path or cwd.startswith(path.rstrip("/") + "/")):
+            if best is None or len(path) > len(best[0]):
+                best = (path, name)
+    return best
+
+
+def space_of(rec):
+    """(space, source, where): this agent's override, else the nearest .peerlink, else a folder rule, else default."""
+    now = time.time()
+    cached = rec.get("_space")
+    if cached and now - cached[0] < SPACE_CACHE_S:
+        return cached[1]
+    cwd = rec.get("cwd", "")
+    found = (DEFAULT_SPACE, "default", "")
+    override = clean_space(session_cfg(rec["id"])["space"])
+    path = find_space_file(cwd)
+    rule = rule_space(cwd)
+    if override:
+        found = (override, "override", "")
+    elif path and read_space_file(path):
+        found = (read_space_file(path), "file", path)
+    elif rule:
+        found = (rule[1], "rule", rule[0])
+    rec["_space"] = (now, found)
+    return found
+
+
+def forget_spaces():
+    with lock:
+        for rec in sessions.values():
+            rec.pop("_space", None)
+
+
+def write_space_file(rec, space):
+    """Set or clear `space:` in the .peerlink that governs this agent's folder (the repo root for a new one)."""
+    cwd = rec.get("cwd", "")
+    path = find_space_file(cwd)
+    if not path:
+        try:
+            root = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"], capture_output=True, text=True, timeout=3).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            root = ""
+        root = root or cwd
+        if not root or os.path.abspath(root) == os.path.expanduser("~"):
+            raise ValueError("no project folder to put .peerlink in; use a folder rule or an override")
+        path = os.path.join(root, SPACE_FILE)
+    lines = []
+    if os.path.exists(path):
+        with open(path) as f:
+            lines = [l for l in f.read().splitlines() if not re.match(r"\s*space\s*[:=]", l, re.I)]
+    elif space:
+        lines = ["# peerlink: agents in this folder only see and message agents in the same space"]
+    if space:
+        lines.append(f"space: {space}")
+    if any(l.strip() and not l.strip().startswith("#") for l in lines):
+        with open(path, "w") as f:
+            f.write("\n".join(lines) + "\n")
+    elif os.path.exists(path):
+        os.remove(path)
+    forget_spaces()
+    return path
 
 
 def display_name(rec):
@@ -266,6 +373,7 @@ def is_live(rec, now=None):
 
 
 def public_peer(rec):
+    space, source, where = space_of(rec)
     return {
         "id": rec["id"],
         "name": display_name(rec),
@@ -274,6 +382,9 @@ def public_peer(rec):
         "repo": rec.get("repo", ""),
         "branch": rec.get("branch", ""),
         "summary": rec.get("summary", ""),
+        "space": space,
+        "space_source": source,
+        "space_from": where,
         "busy": rec.get("busy", False),
         "muted": session_cfg(rec["id"])["muted"],
         "last_seen_s": round(time.time() - rec["last_seen"], 1),
@@ -309,11 +420,11 @@ def remote_peers():
     return found
 
 
-def resolve(to):
-    """Find a live local agent by id, id prefix, nickname or name."""
+def resolve(to, space=None):
+    """Find a live local agent by id, id prefix, nickname or name; only in `space` when given."""
     to = to.strip().lower()
     with lock:
-        live = [r for r in sessions.values() if is_live(r)]
+        live = [r for r in sessions.values() if is_live(r) and (space is None or space_of(r)[0] == space)]
         for match in (
             lambda r: r["id"].lower() == to,
             lambda r: display_name(r).lower() == to,
@@ -404,13 +515,15 @@ def send(body):
                 return 429, {"error": f"rate limit: {config['rate_limit_per_min']} messages/min"}
             sent_times[sender] = recent
 
-        target, err = resolve(to)
+        # Agents only reach their own space. A remote daemon says which space its sender is in.
+        space = space_of(sender_rec)[0] if sender_rec else (clean_space(body.get("space")) or None)
+        target, err = resolve(to, space)
         if err:
             return 409, {"error": err}
 
     if target is None:
         if "@" in to or config.get("remotes"):
-            return forward(body, hops)
+            return forward(body, hops, space)
         return 404, {"error": f"no live peer '{to}'; call list_peers"}
 
     with lock:
@@ -442,11 +555,13 @@ def send(body):
     return 200, {"id": msg["id"], "to": msg["to_name"], "status": "queued"}
 
 
-def forward(body, hops):
+def forward(body, hops, space):
     to = body["to"]
     name, _, host = to.partition("@")
     for p in remote_peers():
         if (host and p["host"].lower() != host.lower()):
+            continue
+        if space is not None and p.get("space", DEFAULT_SPACE) != space:
             continue
         if name.lower() in (p["id"].lower(), p["name"].lower()) or p["id"].lower().startswith(name.lower()):
             sender = sessions.get(body.get("from", ""))
@@ -458,6 +573,7 @@ def forward(body, hops):
                 "from": f"{body.get('from', '')}@{HOSTNAME}",
                 "from_name": f"{display_name(sender) if sender else body.get('from')}@{HOSTNAME}",
                 "from_host": HOSTNAME,
+                "space": space,
             }
             try:
                 res = remote_call(p["remote"], "/api/messages", fwd, timeout=5)
@@ -629,14 +745,20 @@ class Handler(BaseHTTPRequestHandler):
                         if k in DEFAULT_CONFIG:
                             config[k] = v
                     save_config()
+                forget_spaces()
                 return self.reply(200, config)
 
         if rest == ["peers"] and method == "GET":
             peers = local_peers()
             if "local" not in q:
                 peers += remote_peers()
+            # An agent asking (exclude=its id) only sees its own space.
             exclude = q.get("exclude", [""])[0]
-            return self.reply(200, {"host": HOSTNAME, "peers": [p for p in peers if p["id"] != exclude]})
+            with lock:
+                me = sessions.get(exclude)
+                space = space_of(me)[0] if me else None
+            peers = [p for p in peers if p["id"] != exclude and (space is None or p.get("space", DEFAULT_SPACE) == space)]
+            return self.reply(200, {"host": HOSTNAME, "space": space, "peers": peers})
 
         if rest == ["sessions"] and method == "POST":
             b = self.body()
@@ -675,8 +797,21 @@ class Handler(BaseHTTPRequestHandler):
                         remember_dir(rec)
                 cfg = client_config(sid)
             inbox = [] if cfg["muted"] else take_inbox(sid)
-            others = sum(1 for p in local_peers() if p["id"] != sid) + len(config.get("remotes", []))
+            others = sum(1 for p in local_peers() if p["id"] != sid and p["space"] == cfg["space"]) + len(config.get("remotes", []))
             return self.reply(200, {"name": display_name(rec), "config": cfg, "inbox": inbox, "peer_count": others})
+
+        if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "space-file" and method == "POST":
+            with lock:
+                rec = sessions.get(rest[1])
+            if rec is None:
+                return self.reply(404, {"error": "unknown agent"})
+            try:
+                path = write_space_file(rec, clean_space(self.body().get("space")))
+            except (OSError, ValueError) as err:
+                return self.reply(400, {"error": str(err)})
+            log("space file", path)
+            with lock:
+                return self.reply(200, {"path": path, "config": client_config(rec["id"])})
 
         if len(rest) == 2 and rest[0] == "sessions" and method == "DELETE":
             with lock:
@@ -857,7 +992,7 @@ def cli_peers(args):
     for p in peers:
         state = "busy" if p["busy"] else "idle"
         flags = ", muted" if p.get("muted") else ""
-        print(f"{p['name']:<20} {state}{flags:<8} {p['cwd']}")
+        print(f"{p['name']:<20} {state}{flags:<8} {p.get('space', DEFAULT_SPACE):<12} {p['cwd']}")
         if p.get("summary"):
             print(f"{'':<20} {p['summary']}")
 
@@ -978,17 +1113,26 @@ UI_HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Peerlink</title>
 <style>
-:root{--bg:#faf9f7;--fg:#1f1e1c;--mut:#6b6862;--line:#e4e1db;--card:#fff;--acc:#c96442;--ok:#2f7d4f;--warn:#b7791f}
-@media (prefers-color-scheme:dark){:root{--bg:#1c1b19;--fg:#ecebe8;--mut:#9b978f;--line:#34322e;--card:#252421;--acc:#e0805e;--ok:#5cb57f;--warn:#e0b04a}}
+:root{--bg:#faf9f7;--side:#f2f0ec;--fg:#1f1e1c;--mut:#6b6862;--line:#e4e1db;--card:#fff;--acc:#c96442;--ok:#2f7d4f;--warn:#b7791f}
+@media (prefers-color-scheme:dark){:root{--bg:#1c1b19;--side:#161513;--fg:#ecebe8;--mut:#9b978f;--line:#34322e;--card:#252421;--acc:#e0805e;--ok:#5cb57f;--warn:#e0b04a}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,sans-serif}
-main{max-width:1100px;margin:0 auto;padding:20px 16px 60px}
-h1{font-size:20px;margin:0}h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:28px 0 10px}
-header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}.mut{color:var(--mut)}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.app{display:flex;min-height:100vh}
+nav{flex:0 0 210px;background:var(--side);border-right:1px solid var(--line);padding:18px 10px;position:sticky;top:0;height:100vh;display:flex;flex-direction:column;gap:2px}
+nav .brand{font-weight:700;font-size:16px;padding:0 10px 4px}nav .host{font-size:11px;color:var(--mut);padding:0 10px 14px}
+nav a{display:flex;justify-content:space-between;align-items:center;padding:7px 10px;border-radius:6px;color:var(--fg);text-decoration:none}
+nav a:hover{background:var(--line)}nav a.on{background:var(--card);box-shadow:0 0 0 1px var(--line);font-weight:600}
+nav .count{font-size:11px;color:var(--mut);font-weight:400}
+main{flex:1;min-width:0;max-width:1100px;padding:22px 24px 60px}
+section{display:none}section.on{display:block}
+h1{font-size:20px;margin:0 0 4px}.lead{color:var(--mut);margin:0 0 18px}
+h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:22px 0 10px}
+.mut{color:var(--mut)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(300px,100%),1fr));gap:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;overflow-wrap:anywhere;min-width:0}
 .peer .top{display:flex;justify-content:space-between;gap:8px;align-items:center}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:var(--ok)}.dot.busy{background:var(--warn)}
 .name{font-weight:600}.small{font-size:12px}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;word-break:break-all}
+.pill{display:inline-block;font-size:11px;border:1px solid var(--line);border-radius:999px;padding:1px 8px;color:var(--mut)}
 input[type=text],input[type=number],textarea{width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font:inherit}
 select{background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px;font:inherit}
 textarea{min-height:180px;font-family:ui-monospace,Menlo,monospace;font-size:12px}
@@ -996,18 +1140,44 @@ label{display:block;margin:8px 0 4px;font-size:12px;color:var(--mut)}
 .row{display:flex;gap:12px;flex-wrap:wrap}.row>div{flex:1 1 180px}
 button{background:var(--acc);color:#fff;border:0;border-radius:6px;padding:7px 14px;font:inherit;cursor:pointer}
 button.ghost{background:transparent;color:var(--fg);border:1px solid var(--line)}
+details{margin-top:8px}summary{cursor:pointer;font-size:12px;color:var(--mut)}
 table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
 th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap;max-height:6em;overflow:auto}
 .tablewrap{overflow-x:auto}.empty{color:var(--mut);padding:14px 0}
 .check{display:flex;align-items:center;gap:6px;margin-top:8px}
-</style></head><body><main>
-<header><h1>Peerlink</h1><span class="mut" id="hostline"></span></header>
+.err{color:#c0392b}
+@media (max-width:720px){.app{flex-direction:column}
+ nav{position:static;height:auto;flex:none;flex-direction:row;flex-wrap:wrap;border-right:0;border-bottom:1px solid var(--line);padding:10px 12px}
+ nav .brand{padding:6px 8px 6px 4px}nav .host{display:none}nav a{padding:6px 10px}nav .count{margin-left:6px}
+ main{padding:16px}}
+</style></head><body><div class="app">
+<nav>
+<div class="brand">Peerlink</div><div class="host" id="hostline"></div>
+<a href="#agents" data-nav="agents">Agents <span class="count" id="n-agents"></span></a>
+<a href="#spaces" data-nav="spaces">Spaces <span class="count" id="n-spaces"></span></a>
+<a href="#messages" data-nav="messages">Messages <span class="count" id="n-msgs"></span></a>
+<a href="#settings" data-nav="settings">Settings</a>
+<a href="#controls" data-nav="controls">Controls</a>
+</nav>
+<main>
 
-<h2>Agents</h2><div class="grid" id="peers"></div>
+<section id="agents"><h1>Agents</h1><p class="lead">Live Claude Code sessions, grouped by space. An agent only sees and messages agents in its own space.</p><div id="peers"></div></section>
 
-<h2>Messages</h2><div class="card tablewrap"><table><thead><tr><th>When</th><th>From → To</th><th>Message</th><th>Status</th></tr></thead><tbody id="msgs"></tbody></table></div>
+<section id="spaces"><h1>Spaces</h1>
+<p class="lead">Each agent's space comes from, in order: an override for that agent, the nearest <span class="mono">.peerlink</span> file in its folder or above, a folder rule below, or <b>default</b>.</p>
+<div id="spacelist" class="grid"></div>
+<h2>Folder rules</h2>
+<form class="card" id="rules">
+<label>One per line: <span class="mono">folder = space</span>. A rule covers the folder and everything inside it; the most specific rule wins.</label>
+<textarea name="space_rules" style="min-height:120px" placeholder="~/Repos/acme = acme&#10;~/Repos/tools = tools"></textarea>
+<p><button type="submit">Save rules</button> <span class="mut small" id="rulesaved"></span></p>
+</form>
+</section>
 
-<h2>Settings</h2>
+<section id="messages"><h1>Messages</h1><p class="lead">The last 50 messages between agents.</p>
+<div class="card tablewrap"><table><thead><tr><th>When</th><th>From → To</th><th>Message</th><th>Status</th></tr></thead><tbody id="msgs"></tbody></table></div></section>
+
+<section id="settings"><h1>Settings</h1><p class="lead">Changes reach every agent within a few seconds.</p>
 <form class="card" id="cfg">
 <div class="row">
 <div><label>Poll interval (ms)</label><input type="number" name="poll_interval_ms" min="500"></div>
@@ -1025,9 +1195,9 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <div class="row"><div><label>Listen host (restart the daemon to apply; 0.0.0.0 for remotes)</label><input type="text" name="listen_host"></div>
 <div><label>Shared token for remote daemons</label><input type="text" name="token"></div></div>
 <p><button type="submit">Save</button> <span class="mut small" id="saved"></span></p>
-</form>
+</form></section>
 
-<h2>Controls</h2>
+<section id="controls"><h1>Controls</h1><p class="lead">Sign-in, the key, and the daemon.</p>
 <div class="card">
 <div class="row" style="align-items:center">
 <div><b>Browsers</b><div class="mut small" id="browsers"></div></div>
@@ -1042,38 +1212,67 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <div style="flex:0 0 auto"><button class="ghost" data-act="restart">Restart daemon</button></div>
 </div>
 <p class="mut small" id="ctlmsg"></p>
-</div>
-</main>
+</div></section>
+</main></div>
 <script>
-const $=s=>document.querySelector(s);let cfg={};
+const $=s=>document.querySelector(s);let cfg={},editing=false;
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const J={'Content-Type':'application/json'};
+const tilde=p=>String(p||'').replace(/^\/Users\/[^/]+/,'~');
 async function api(p,o){const r=await fetch(p,o);if(r.status===401){location.reload();throw new Error('signed out')}return r.json()}
+const post=(p,b)=>api(p,{method:'POST',headers:J,body:JSON.stringify(b||{})});
+function show(){const id=(location.hash||'#agents').slice(1);
+  document.querySelectorAll('section').forEach(s=>s.classList.toggle('on',s.id===id));
+  document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('on',a.dataset.nav===id))}
+window.addEventListener('hashchange',show);
 async function setAgent(id,patch){const s={...cfg.sessions};s[id]={...(s[id]||{}),...patch};cfg=await api('/api/config',{method:'PUT',headers:J,body:JSON.stringify({sessions:s})});refresh()}
 function wakeSel(id){const v=(cfg.sessions?.[id]||{}).auto_wake;const o=(val,t)=>`<option value="${val}" ${String(v??'default')===val?'selected':''}>${t}</option>`;
   return `<select data-wake="${esc(id)}">${o('default','Wake: default')}${o('true','Wake: on')}${o('false','Wake: off')}</select>`}
-async function refresh(){
-  const [st,p,m]=await Promise.all([api('/api/status'),api('/api/peers'),api('/api/messages?limit=50')]);
-  $('#hostline').textContent=`${st.host} · daemon ${st.version} · pid ${st.pid}`;
-  $('#browsers').textContent=`${st.browsers} signed in · links work once and expire after 60 s`;
-  $('#keypath').textContent=st.home+'/key';
-  $('#peers').innerHTML=p.peers.length?p.peers.map(x=>`<div class="card peer">
+function source(x){if(x.space_source==='override')return 'override for this agent';
+  if(x.space_source==='file')return 'from '+tilde(x.space_from);if(x.space_source==='rule')return 'folder rule '+tilde(x.space_from);return 'no space set'}
+function agentCard(x){const sc=cfg.sessions?.[x.id]||{};const fileSpace=x.space_source==='file'?x.space:'';
+  return `<div class="card peer">
    <div class="top"><span><span class="dot ${x.busy?'busy':''}"></span><span class="name">${esc(x.name)}</span> <span class="mut small">${x.remote?'@'+esc(x.host):''}</span></span>
    <span class="mut small">${x.busy?'working':'idle'} · ${x.last_seen_s}s</span></div>
-   <div class="mono mut" style="margin-top:4px">${esc(x.cwd)}${x.branch?' · '+esc(x.branch):''}</div>
+   <div class="mono mut" style="margin-top:4px">${esc(tilde(x.cwd))}${x.branch?' · '+esc(x.branch):''}</div>
    <div style="margin-top:6px">${esc(x.summary)||'<span class="mut">no summary yet</span>'}</div>
-   ${x.remote?'':`<div class="row" style="margin-top:8px;align-items:center"><div><input type="text" placeholder="nickname" value="${esc((cfg.sessions?.[x.id]||{}).nickname||'')}" data-nick="${esc(x.id)}"></div>
-   <div style="flex:0 0 auto">${wakeSel(x.id)} <button class="ghost" data-mute="${esc(x.id)}" data-muted="${x.muted}">${x.muted?'Unmute':'Mute'}</button></div></div>`}</div>`).join(''):'<div class="empty">No live agents. Start Claude Code with the peerlink plugin.</div>';
+   <div class="small mut" style="margin-top:6px"><span class="pill">${esc(x.space||'default')}</span> ${esc(source(x))}</div>
+   ${x.remote?'':`<details><summary>Manage</summary>
+   <div class="row" style="align-items:end"><div><label>Nickname</label><input type="text" value="${esc(sc.nickname||'')}" data-nick="${esc(x.id)}"></div>
+   <div style="flex:0 0 auto">${wakeSel(x.id)} <button class="ghost" data-mute="${esc(x.id)}" data-muted="${x.muted}">${x.muted?'Unmute':'Mute'}</button></div></div>
+   <div class="row"><div><label>Space for this folder (writes .peerlink)</label><input type="text" placeholder="none" value="${esc(fileSpace)}" data-spacefile="${esc(x.id)}"></div>
+   <div><label>Override for this agent only</label><input type="text" placeholder="none" value="${esc(sc.space||'')}" data-spaceover="${esc(x.id)}"></div></div>
+   <div class="small err" data-err="${esc(x.id)}"></div></details>`}</div>`}
+async function refresh(){
+  if(editing)return;
+  const open=[...document.querySelectorAll('details[open] [data-nick]')].map(e=>e.dataset.nick);
+  const [st,p,m]=await Promise.all([api('/api/status'),api('/api/peers'),api('/api/messages?limit=50')]);
+  $('#hostline').textContent=`${st.host} · daemon ${st.version}`;
+  $('#browsers').textContent=`${st.browsers} signed in · links work once and expire after 60 s`;
+  $('#keypath').textContent=st.home+'/key';
+  const groups={};for(const x of p.peers)(groups[x.space||'default']??=[]).push(x);
+  const names=Object.keys(groups).sort((a,b)=>a==='default'?1:b==='default'?-1:a.localeCompare(b));
+  $('#n-agents').textContent=p.peers.length||'';$('#n-spaces').textContent=names.length||'';$('#n-msgs').textContent=m.messages.length||'';
+  $('#peers').innerHTML=p.peers.length?names.map(n=>`<h2>${esc(n)} · ${groups[n].length}</h2><div class="grid">${groups[n].map(agentCard).join('')}</div>`).join('')
+    :'<div class="empty">No live agents. Start Claude Code with the peerlink plugin.</div>';
+  for(const id of open){const d=document.querySelector(`[data-nick="${CSS.escape(id)}"]`)?.closest('details');if(d)d.open=true}
+  $('#spacelist').innerHTML=names.map(n=>`<div class="card"><div class="name">${esc(n)}</div>
+    <div class="small mut" style="margin-top:4px">${groups[n].map(x=>esc(x.name)).join(', ')}</div></div>`).join('')||'<div class="empty">No live agents.</div>';
   $('#msgs').innerHTML=m.messages.slice().reverse().map(x=>`<tr><td class="small mut">${new Date(x.ts*1000).toLocaleTimeString()}</td>
    <td><b>${esc(x.from_name)}</b> → <b>${esc(x.to_name)}</b>${x.reply_to?`<div class="small mut">re ${esc(x.reply_to)}</div>`:''}</td>
    <td><div class="msgtext">${esc(x.text)}</div></td><td class="small">${esc(x.status)} <span class="mut">${esc(x.id)}</span></td></tr>`).join('')||'<tr><td colspan="4" class="empty">No messages yet.</td></tr>';
 }
-document.addEventListener('change',e=>{const t=e.target;
+document.addEventListener('focusin',e=>{if(e.target.matches('#peers input'))editing=true});
+document.addEventListener('focusout',e=>{if(e.target.matches('#peers input'))editing=false});
+document.addEventListener('change',async e=>{const t=e.target;editing=false;
   if(t.dataset.nick)setAgent(t.dataset.nick,{nickname:t.value});
-  if(t.dataset.wake)setAgent(t.dataset.wake,{auto_wake:t.value==='default'?null:t.value==='true'})});
+  if(t.dataset.wake)setAgent(t.dataset.wake,{auto_wake:t.value==='default'?null:t.value==='true'});
+  if(t.dataset.spaceover)setAgent(t.dataset.spaceover,{space:t.value.trim()});
+  if(t.dataset.spacefile){const r=await post(`/api/sessions/${encodeURIComponent(t.dataset.spacefile)}/space-file`,{space:t.value.trim()});
+    if(r.error){const el=document.querySelector(`[data-err="${CSS.escape(t.dataset.spacefile)}"]`);if(el)el.textContent=r.error}else refresh()}});
 document.addEventListener('click',async e=>{const t=e.target.closest('button');if(!t)return;
   if(t.dataset.mute){setAgent(t.dataset.mute,{muted:t.dataset.muted!=='true'});return}
-  const act=t.dataset.act;if(!act)return;const post=(p,b)=>api(p,{method:'POST',headers:J,body:JSON.stringify(b||{})});
+  const act=t.dataset.act;if(!act)return;
   if(act==='logout'){await post('/api/web/logout');location.reload()}
   if(act==='logout-all'&&confirm('Sign out every browser, including this one?')){await post('/api/web/logout',{all:true});location.reload()}
   if(act==='rotate'&&confirm('Rotate the key? Every browser is signed out; agents pick up the new key by themselves.')){await post('/api/key/rotate');location.reload()}
@@ -1081,13 +1280,18 @@ document.addEventListener('click',async e=>{const t=e.target.closest('button');i
 async function loadCfg(){cfg=await api('/api/config');const f=$('#cfg');
   for(const el of f.elements){if(!el.name)continue;const v=cfg[el.name];
     if(el.type==='checkbox')el.checked=!!v;else if(el.name==='remotes')el.value=(v||[]).join('\n');else el.value=v??''}
-  $('#guidance').placeholder=cfg.default_guidance||''}
+  $('#guidance').placeholder=cfg.default_guidance||'';
+  $('#rules [name=space_rules]').value=(cfg.space_rules||[]).map(r=>`${r.path} = ${r.space}`).join('\n')}
 $('#cfg').addEventListener('submit',async e=>{e.preventDefault();const f=e.target,b={};
   for(const el of f.elements){if(!el.name)continue;
     b[el.name]=el.type==='checkbox'?el.checked:el.type==='number'?Number(el.value):el.name==='remotes'?el.value.split('\n').map(s=>s.trim()).filter(Boolean):el.value}
   cfg=await api('/api/config',{method:'PUT',headers:J,body:JSON.stringify(b)});
   $('#saved').textContent='Saved '+new Date().toLocaleTimeString()});
-loadCfg().then(refresh);setInterval(refresh,2000);
+$('#rules').addEventListener('submit',async e=>{e.preventDefault();
+  const rules=e.target.space_rules.value.split('\n').map(l=>l.split('=')).filter(p=>p.length===2&&p[0].trim()&&p[1].trim()).map(([a,b])=>({path:a.trim(),space:b.trim()}));
+  cfg=await api('/api/config',{method:'PUT',headers:J,body:JSON.stringify({space_rules:rules})});
+  $('#rulesaved').textContent='Saved '+new Date().toLocaleTimeString();refresh()});
+show();loadCfg().then(refresh);setInterval(refresh,2000);
 </script></body></html>
 """
 
