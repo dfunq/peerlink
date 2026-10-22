@@ -28,7 +28,10 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.6.0"
+VERSION = "0.6.1"
+# A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
+with open(os.path.abspath(__file__), "rb") as _f:
+    CODE = hashlib.sha256(_f.read()).hexdigest()[:16]
 HOME = os.environ.get("PEERLINK_HOME", os.path.expanduser("~/.peerlink"))
 CONFIG_PATH = os.path.join(HOME, "config.json")
 PID_PATH = os.path.join(HOME, "daemon.pid")
@@ -734,7 +737,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(403, {"error": "bad host"})
 
         if rest == ["health"]:
-            return self.reply(200, {"ok": True, "version": VERSION, "pid": os.getpid(), "host": HOSTNAME})
+            return self.reply(200, {"ok": True, "version": VERSION, "code": CODE, "pid": os.getpid(), "host": HOSTNAME})
 
         if method == "GET" and url.path == "/login":
             cookie = redeem(q.get("t", [""])[0])
@@ -856,9 +859,9 @@ class Handler(BaseHTTPRequestHandler):
             if rec is None:
                 return self.reply(404, {"error": "unknown agent"})
             b = self.body()
-            key = "parent" if "parent" in b else "space"
+            field = "parent" if "parent" in b else "space"
             try:
-                path = write_space_file(rec, clean_space(b.get(key)), key)
+                path = write_space_file(rec, clean_space(b.get(field)), field)
             except (OSError, ValueError) as err:
                 return self.reply(400, {"error": str(err)})
             log("space file", path)
@@ -1150,6 +1153,7 @@ COMMANDS = {
     "logout": (cli_logout, "sign out every browser"),
     "logs": (cli_logs, "the end of the daemon log"),
     "serve": (lambda a: serve(), "run in the foreground"),
+    "fingerprint": (lambda a: print(CODE), "the fingerprint of this daemon's code"),
 }
 ALIASES = {"--detach": "start", "--stop": "stop", "--status": "status"}
 
