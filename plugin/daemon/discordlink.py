@@ -56,12 +56,24 @@ def hint(token):
 
 # -- REST --------------------------------------------------------------------
 
-def call(token, method, path, body=None, retried=False):
+def call(token, method, path, body=None, retried=False, files=None):
+    """A REST call; with `files` ([(name, bytes)]) the body goes as multipart, as uploads must."""
+    if files:
+        boundary = "peerlink" + os.urandom(8).hex()
+        parts = [f'--{boundary}\r\nContent-Disposition: form-data; name="payload_json"\r\nContent-Type: application/json\r\n\r\n'.encode()
+                 + json.dumps(body or {}).encode() + b"\r\n"]
+        for i, (name, data) in enumerate(files):
+            safe = name.replace('"', "'").replace("\r", "").replace("\n", "")
+            parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="files[{i}]"; filename="{safe}"\r\n'
+                         f"Content-Type: application/octet-stream\r\n\r\n".encode() + data + b"\r\n")
+        data, ctype = b"".join(parts) + f"--{boundary}--\r\n".encode(), f"multipart/form-data; boundary={boundary}"
+    else:
+        data, ctype = (None if body is None else json.dumps(body).encode()), "application/json"
     req = urllib.request.Request(
         API + path,
-        data=None if body is None else json.dumps(body).encode(),
+        data=data,
         method=method,
-        headers={"Authorization": f"Bot {token}", "Content-Type": "application/json",
+        headers={"Authorization": f"Bot {token}", "Content-Type": ctype,
                  "User-Agent": "DiscordBot (https://github.com/dfunq/peerlink, 1)"},
     )
     try:
@@ -78,7 +90,7 @@ def call(token, method, path, body=None, retried=False):
                 wait = 1.0
             if wait <= 5:
                 time.sleep(wait + 0.05)
-                return call(token, method, path, body, True)
+                return call(token, method, path, body, True, files)
             raise DiscordError(f"Discord is rate limiting this bot; try again in {wait:.0f}s")
         if err.code == 401:
             raise DiscordError("Discord rejected that token. Copy it again from the Bot page of your application "
@@ -148,15 +160,43 @@ def chunks(text, limit=LIMIT - 50):
     return out
 
 
-def post(token, channel_id, text, reply_to=None):
-    """Post text to a channel, split as needed; the first part replies to `reply_to` when given."""
+def buttons(options, prefix):
+    """Options as Discord buttons, five to a row, at most 25; each button's id is `prefix:<index>`."""
+    rows = []
+    for i, label in enumerate(options[:25]):
+        if i % 5 == 0:
+            rows.append({"type": 1, "components": []})
+        rows[-1]["components"].append({"type": 2, "style": 1, "label": str(label)[:80], "custom_id": f"{prefix}:{i}"})
+    return rows
+
+
+def post(token, channel_id, text, reply_to=None, components=None, files=None):
+    """Post text to a channel, split as needed; the first part replies to `reply_to`, the last carries the
+    buttons and the files, so they sit under the whole message."""
     sent = []
-    for i, part in enumerate(chunks(text)):
+    parts = chunks(text)
+    for i, part in enumerate(parts):
         body = {"content": part, "allowed_mentions": {"parse": []}}
         if i == 0 and reply_to:
             body["message_reference"] = {"message_id": reply_to, "fail_if_not_exists": False}
-        sent.append(call(token, "POST", f"/channels/{channel_id}/messages", body))
+        last = i == len(parts) - 1
+        if last and components:
+            body["components"] = components
+        sent.append(call(token, "POST", f"/channels/{channel_id}/messages", body, files=files if last else None))
     return sent
+
+
+def answer_interaction(interaction_id, interaction_token, kind, data=None):
+    """Acknowledge a button press within Discord's three seconds: 7 rewrites the message it was on."""
+    call("", "POST", f"/interactions/{interaction_id}/{interaction_token}/callback", {"type": kind, **({"data": data} if data else {})})
+
+
+def download(url, limit):
+    """An attachment's bytes, up to `limit`; None when it's bigger. Discord's CDN links need no token."""
+    req = urllib.request.Request(url, headers={"User-Agent": "DiscordBot (https://github.com/dfunq/peerlink, 1)"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        data = r.read(limit + 1)
+    return None if len(data) > limit else data
 
 
 def react(token, channel_id, message_id, emoji):
@@ -272,9 +312,10 @@ class Bot:
     author_id, text, dm, mentioned}. Everything outward (posting, reacting) is plain REST from any thread.
     """
 
-    def __init__(self, token, on_message, log):
+    def __init__(self, token, on_message, log, on_press=None):
         self.token = token
         self.on_message = on_message
+        self.on_press = on_press or (lambda press: None)
         self.log = log
         self.state = "connecting"
         self.error = ""
@@ -392,13 +433,30 @@ class Bot:
             for tag in (f"<@{self.user_id}>", f"<@!{self.user_id}>"):
                 text = text.replace(tag, "")
             text = text.strip()
-            if not text:
+            files = [{"url": a.get("url"), "filename": a.get("filename", "file"), "size": a.get("size", 0)}
+                     for a in d.get("attachments", []) if a.get("url")]
+            if not text and not files:
                 return
             try:
                 self.on_message({
                     "channel_id": str(d["channel_id"]), "message_id": str(d["id"]),
                     "guild_id": str(d.get("guild_id") or ""), "author": author.get("global_name") or author.get("username", "you"),
                     "author_id": str(author["id"]), "text": text, "dm": not d.get("guild_id"), "mentioned": mentioned,
+                    "files": files,
                 })
             except Exception as err:  # one bad message must not drop the connection
                 self.log("discord", "message handler failed:", err)
+        elif kind == "INTERACTION_CREATE" and d.get("type") == 3:
+            user = (d.get("member") or {}).get("user") or d.get("user") or {}
+            if str(user.get("id")) not in self.owner_ids:
+                # Only the owner's press counts; anyone else is told so, privately (flag 64).
+                answer_interaction(d["id"], d["token"], 4, {"content": "Only the bot's owner can answer this.", "flags": 64})
+                return
+            try:
+                self.on_press({
+                    "id": d["id"], "token": d["token"], "custom_id": (d.get("data") or {}).get("custom_id", ""),
+                    "channel_id": str(d.get("channel_id")), "message": d.get("message") or {},
+                    "author": user.get("global_name") or user.get("username", "you"),
+                })
+            except Exception as err:
+                self.log("discord", "button handler failed:", err)

@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.7.2'
+const DAEMON_VERSION = '0.7.3'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -590,7 +590,8 @@ function hierarchyGuidance() {
         chans.length
           ? `To tell them something first, send_message to "discord"${chans.length > 1 ? ` plus the channel, like "discord${chans[0]!.channel}"` : ''}.`
           : '',
-        'They read it on a phone: lead with the answer, keep it short, use plain markdown, no tables.',
+        'They read it on a phone: lead with the answer, keep it short, use plain markdown, no tables. Links work, as [text](url).',
+        'To offer choices, pass options: they become buttons, and the pick comes back as a reply. To share a file, pass its absolute path in files. Files they attach arrive as paths you can read.',
       ]
         .filter(Boolean)
         .join(' '),
@@ -872,6 +873,16 @@ export const register: Register = on => {
           text: { type: 'string', description: 'The message: what you need and why, briefly' },
           expects_reply: { type: 'boolean', description: 'True if you need an answer' },
           reply_to: { type: 'string', description: 'Id of the peer message you are answering; the reply goes to its sender' },
+          options: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Choices to offer, short labels. On Discord they are buttons and the pick comes back as a reply; to a peer, a numbered list',
+          },
+          files: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Absolute paths of files to attach. On Discord they are uploaded; to a peer, the paths are listed',
+          },
         },
         required: ['text'],
       },
@@ -1011,6 +1022,8 @@ export const register: Register = on => {
       text: input.text,
       expects_reply: !!input.expects_reply,
       reply_to: input.reply_to,
+      options: Array.isArray(input.options) ? input.options : undefined,
+      files: Array.isArray(input.files) ? input.files : undefined,
     })
     if (!res.ok) return text(`Not sent: ${res.data.error ?? res.status}`)
     return text(
