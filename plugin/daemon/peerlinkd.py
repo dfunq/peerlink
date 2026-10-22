@@ -28,7 +28,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.6.4"
+VERSION = "0.6.5"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 with open(os.path.abspath(__file__), "rb") as _f:
     CODE = hashlib.sha256(_f.read()).hexdigest()[:16]
@@ -1383,6 +1383,7 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)
 .facts .k{color:var(--mut)}.panel form{margin-top:12px;border-top:1px solid var(--line);padding-top:12px;display:flex;flex-direction:column;gap:12px}
 .panel label{display:flex;flex-direction:column;gap:4px;font-size:13px;font-weight:500}.panel label .hint{font-weight:400;font-size:12px;color:var(--mut)}
 .panel label.check{flex-direction:row;align-items:center;gap:8px}.ok{color:var(--ok)}
+#offline{display:none;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin-bottom:14px;color:var(--mut)}
 #signedout{display:none;background:var(--card);border:1px solid var(--warn);border-radius:10px;padding:10px 14px;margin-bottom:14px}
 .msgbar{display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap}.msgbar select{width:auto}
 .mlist{display:flex;flex-direction:column;gap:8px}
@@ -1439,7 +1440,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <a href="#settings" data-nav="settings">Settings</a>
 <a href="#controls" data-nav="controls">Controls</a>
 </nav>
-<main><div id="signedout">This page is signed out. Run <span class="mono">/peerlink web</span> in any agent to open it again.</div>
+<main><div id="offline">Can't reach the peerlink daemon. It restarts when an agent next needs it; this page reconnects by itself.</div><div id="signedout">This page is signed out. Run <span class="mono">/peerlink web</span> in any agent to open it again.</div>
 
 <section id="agents"><h1>Agents</h1><p class="lead">Live Claude Code sessions as an org chart. Each box is a space; a lead (outlined) sits in its parent's box with its team beneath it. An agent only sees and messages agents in its own space, and a lead also its parent's. Click an agent to see and change its settings.</p><div class="orgwrap"><div id="peers"></div><div id="detail"></div></div></section>
 
@@ -1652,7 +1653,13 @@ $('#rules').addEventListener('submit',async e=>{e.preventDefault();
   const rules=e.target.space_rules.value.split('\n').map(l=>l.split('=')).filter(p=>p.length===2&&p[0].trim()&&p[1].trim()).map(([a,b])=>({path:a.trim(),space:b.trim()}));
   cfg=await api('/api/config',{method:'PUT',headers:J,body:JSON.stringify({space_rules:rules})});
   $('#rulesaved').textContent='Saved '+new Date().toLocaleTimeString();refresh()});
-show();loadCfg().then(()=>refresh(true));setInterval(()=>refresh().catch(()=>{}),2000);
+// Poll every 2 s; while the daemon is unreachable say so, back off to 10 s, and pick up again once it's back.
+let misses=0;
+async function tick(){
+  try{await refresh();if(misses){misses=0;$('#offline').style.display='none';await loadCfg();await refresh(true)}}
+  catch(e){if(!signedOut){misses++;$('#offline').style.display='block'}}
+  if(!signedOut)setTimeout(tick,misses?10000:2000)}
+show();loadCfg().then(()=>refresh(true)).catch(()=>{misses=1;$('#offline').style.display='block'}).finally(()=>setTimeout(tick,2000));
 </script></body></html>
 """
 
