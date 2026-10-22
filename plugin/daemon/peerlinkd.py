@@ -28,7 +28,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.6.2"
+VERSION = "0.6.3"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 with open(os.path.abspath(__file__), "rb") as _f:
     CODE = hashlib.sha256(_f.read()).hexdigest()[:16]
@@ -1458,13 +1458,16 @@ async function refresh(){
   const names=Object.keys(groups).sort((a,b)=>a==='default'?1:b==='default'?-1:a.localeCompare(b));
   // An org chart. A space is a box of its own agents; the lead of a space inside it sits in that box too, with
   // its team's box hanging beneath it. Charts with teams in them come first, so the top of the org is at the top.
-  const inside={},kids={};for(const x of p.peers)if(x.parent&&!inside[x.space]){inside[x.space]={parent:x.parent,lead:x.name,peer:x};(kids[x.parent]??=[]).push(x.space)}
+  // Two sessions open in a lead's folder are both leads: all sit in the parent's box, the team under the first.
+  const inside={},kids={},leads={};for(const x of p.peers)if(x.parent){(leads[x.space]??=[]).push(x);if(!inside[x.space]){inside[x.space]={parent:x.parent,lead:x.name,peer:x};(kids[x.parent]??=[]).push(x.space)}}
+  for(const n in inside)inside[n].lead=leads[n].map(x=>x.name).join(', ');
   for(const n of Object.keys(kids))if(!groups[n])groups[n]=[];
   const size=(n,seen=new Set())=>{if(seen.has(n))return 0;seen.add(n);return (groups[n]||[]).length+(kids[n]||[]).reduce((t,c)=>t+size(c,seen),0)};
   const order=(a,b)=>a==='default'?1:b==='default'?-1:((kids[b]||[]).length>0)-((kids[a]||[]).length>0)||size(b)-size(a)||a.localeCompare(b);
   const roots=Object.keys(groups).filter(n=>!inside[n]||n===inside[n].parent).sort(order);
   // A space's box: its members, then the leads of the spaces under it.
-  const members=n=>[...groups[n].filter(x=>!(inside[n]&&x.id===inside[n].peer.id)).sort((a,b)=>a.name.localeCompare(b.name)),
+  const isLead=(x,n)=>!!(inside[n]&&inside[n].parent!==n&&x.parent&&x.space===n);
+  const members=n=>[...groups[n].filter(x=>!isLead(x,n)).sort((a,b)=>a.name.localeCompare(b.name)),
     ...(kids[n]||[]).filter(c=>c!==n).sort().map(c=>inside[c].peer)];
   const short=d=>{const t=tilde(d).split('/');return t.length>3?'…/'+t.slice(-2).join('/'):t.join('/')};
   const node=x=>`<button class="node${x.parent?' is-lead':''}${x.id===sel?' sel':''}" data-sel="${esc(x.id)}">
@@ -1472,13 +1475,14 @@ async function refresh(){
     <div class="dir">${esc(short(x.cwd))}</div><div class="sum">${esc(x.summary)||'no summary yet'}</div></button>`;
   const unit=(n,seen)=>{if(seen.has(n))return '';seen.add(n);
     const list=members(n),branches=list.some(x=>x.parent&&x.space!==n);
+    const count=list.reduce((t,x)=>t+(x.parent&&x.space!==n?leads[x.space].length:1),0);
     const cols=list.map(x=>x.parent&&x.space!==n&&!seen.has(x.space)
-      ?`<div class="ocol">${node(x)}<div class="down"></div>${unit(x.space,seen)}</div>`:`<div class="ocol">${node(x)}</div>`);
+      ?`<div class="ocol"><div class="orow stack">${leads[x.space].map(node).join('')}</div><div class="down"></div>${unit(x.space,seen)}</div>`:`<div class="ocol">${node(x)}</div>`);
     // A team with no teams under it stacks, so each lead's column stays one card wide.
     const stack=inside[n]&&inside[n].parent!==n&&!branches;
-    return `<div class="unit"><div class="unit-h">${esc(n)}${inside[n]&&inside[n].parent!==n?' team':''} · ${list.length}</div><div class="orow${stack?' stack':''}">${cols.join('')||'<span class="mut small">no live agents</span>'}</div></div>`};
+    return `<div class="unit"><div class="unit-h">${esc(n)}${inside[n]&&inside[n].parent!==n?' team':''} · ${count}</div><div class="orow${stack?' stack':''}">${cols.join('')||'<span class="mut small">no live agents</span>'}</div></div>`};
   const sunit=(n,seen)=>{if(seen.has(n))return '';seen.add(n);
-    const own=groups[n].filter(x=>!(inside[n]&&x.id===inside[n].peer.id)).map(x=>esc(x.name));
+    const own=groups[n].filter(x=>!isLead(x,n)).map(x=>esc(x.name));
     const ch=(kids[n]||[]).filter(c=>c!==n&&!seen.has(c)).sort();
     return `<div class="ocol"><div class="sbox${inside[n]?' led':''}"><div class="name">${esc(n)}</div>
       ${inside[n]?`<div class="small" style="color:var(--acc)">led by ${esc(inside[n].lead)}${inside[n].parent!==n?' · inside '+esc(inside[n].parent):''}</div>`:''}
