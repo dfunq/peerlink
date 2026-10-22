@@ -28,7 +28,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.6.3"
+VERSION = "0.6.4"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 with open(os.path.abspath(__file__), "rb") as _f:
     CODE = hashlib.sha256(_f.read()).hexdigest()[:16]
@@ -100,6 +100,7 @@ DEFAULT_CONFIG = {
     "summary_model": "haiku",
     "sessions": {},
     "space_rules": [],
+    "folder_names": {},
     "remotes": [],
     "listen_host": "127.0.0.1",
     "token": "",
@@ -115,7 +116,28 @@ config = {}
 key = [""]
 dir_summaries = {}  # cwd -> {summary, name, ts}: what the last agent there was doing
 used_nonces = {}   # nonce -> expiry
-web_sessions = {}  # cookie -> expiry
+web_sessions = {}  # cookie -> expiry; kept on disk, so a daemon restart doesn't sign browsers out
+WEB_SESSIONS_PATH = os.path.join(HOME, "web_sessions.json")
+
+
+def save_web_sessions():
+    now = time.time()
+    live = {c: e for c, e in web_sessions.items() if e > now}
+    try:
+        fd = os.open(WEB_SESSIONS_PATH + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(live, f)
+        os.replace(WEB_SESSIONS_PATH + ".tmp", WEB_SESSIONS_PATH)
+    except OSError:
+        pass
+
+
+def load_web_sessions():
+    try:
+        with open(WEB_SESSIONS_PATH) as f:
+            web_sessions.update({c: float(e) for c, e in json.load(f).items() if float(e) > time.time()})
+    except (OSError, ValueError, AttributeError):
+        pass
 
 
 def read_key():
@@ -145,6 +167,7 @@ def rotate_key():
         key[0] = write_key()
         web_sessions.clear()
         used_nonces.clear()
+        save_web_sessions()
 
 
 def sign(payload, secret):
@@ -176,6 +199,7 @@ def redeem(token):
         used_nonces[nonce] = exp
         cookie = secrets.token_urlsafe(32)
         web_sessions[cookie] = now + WEB_SESSION_TTL_S
+        save_web_sessions()
         return cookie
 
 
@@ -440,6 +464,7 @@ def public_peer(rec):
         "space_source": source,
         "space_from": where,
         "parent": parent_of(rec),
+        "file_parent": read_space_file(where, "parent") if source == "file" else "",
         "reach": sorted(reach(rec)),
         "busy": rec.get("busy", False),
         "muted": session_cfg(rec["id"])["muted"],
@@ -556,8 +581,8 @@ def send(body):
     sender = body.get("from", "")
     text = (body.get("text") or "").strip()
     to = body.get("to", "")
-    if not text or not to:
-        return 400, {"error": "to and text are required"}
+    if not text or not (to or body.get("reply_to")):
+        return 400, {"error": "text, and to or reply_to, are required"}
     now = time.time()
     with lock:
         sender_rec = sessions.get(sender)
@@ -582,10 +607,17 @@ def send(body):
         else:
             spaces = {clean_space(s) for s in body.get("spaces") or [body.get("space")]} - {""} or None
         target, err = None, None
-        if parent and parent.get("to") == sender and to.strip().lower() in (parent["from"].lower(), str(parent.get("from_name", "")).lower()):
+        # A reply goes to whoever sent the message it answers, whatever name the model wrote: with two
+        # similar names in view it may guess the wrong one, and reply_to already says who.
+        if parent and parent.get("to") == sender and "@" not in str(parent.get("from", "")):
             back = sessions.get(parent["from"])
-            target = back if back and is_live(back) else None
-        if target is None:
+            if back and is_live(back):
+                target = back
+            else:
+                err = f"{parent.get('from_name') or 'the sender'} of {parent['id']} is no longer live; its conversation may have moved to another session, so call list_peers"
+        elif not to:
+            err = "to is required unless reply_to names a message sent to you"
+        if target is None and err is None:
             target, err = resolve(to, spaces)
         if err:
             return 409, {"error": err}
@@ -862,6 +894,7 @@ class Handler(BaseHTTPRequestHandler):
                     web_sessions.clear()
                 elif browser:
                     web_sessions.pop(browser, None)
+                save_web_sessions()
             return self.reply(200, {"ok": True})
 
         if rest == ["key", "rotate"] and method == "POST":
@@ -913,7 +946,9 @@ class Handler(BaseHTTPRequestHandler):
             with lock:
                 rec = sessions.get(sid, {"id": sid, "started": time.time()})
                 if b.get("name") and not rec.get("name"):
-                    rec["name"] = unique_name(b["name"], sid)
+                    # A folder keeps the name it was given: a new session there (a restart, a resume) is still "vault".
+                    given = (config.get("folder_names") or {}).get(b.get("cwd") or "")
+                    rec["name"] = unique_name(given or b["name"], sid)
                 for k in ("cwd", "repo", "branch", "summary", "model"):
                     if b.get(k) is not None:
                         rec[k] = b[k]
@@ -946,6 +981,28 @@ class Handler(BaseHTTPRequestHandler):
                 mine = reach(rec)
             others = sum(1 for p in local_peers() if p["id"] != sid and peer_reach(p) & mine) + len(config.get("remotes", []))
             return self.reply(200, {"name": display_name(rec), "config": cfg, "inbox": inbox, "peer_count": others})
+
+        if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "config" and method == "POST":
+            # One agent's settings, merged here: a page or plugin holding an old copy of every agent's
+            # settings must not overwrite changes made since.
+            sid = rest[1]
+            b = self.body()
+            with lock:
+                cur = config["sessions"].setdefault(sid, {})
+                for k in ("nickname", "muted", "auto_wake", "space"):
+                    if k in b:
+                        cur[k] = b[k]
+                rec = sessions.get(sid)
+                if rec and rec.get("cwd") and "nickname" in b:
+                    names = config.setdefault("folder_names", {})
+                    if b["nickname"]:
+                        names[rec["cwd"]] = b["nickname"]
+                    else:
+                        names.pop(rec["cwd"], None)
+                save_config()
+            forget_spaces()
+            with lock:
+                return self.reply(200, {"config": client_config(sid), "sessions": config["sessions"]})
 
         if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "space-file" and method == "POST":
             with lock:
@@ -1076,6 +1133,7 @@ def cli_start(args):
 def serve():
     load_config()
     load_key()
+    load_web_sessions()
     load_messages()
     load_dirs()
     file_pending_issues()
@@ -1285,7 +1343,7 @@ def cli_help():
 
 UI_HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Peerlink</title>
+<title>Peerlink</title><link rel="icon" href="data:,">
 <style>
 :root{--bg:#faf9f7;--side:#f2f0ec;--fg:#1f1e1c;--mut:#6b6862;--line:#e4e1db;--card:#fff;--acc:#c96442;--ok:#2f7d4f;--warn:#b7791f}
 @media (prefers-color-scheme:dark){:root{--bg:#1c1b19;--side:#161513;--fg:#ecebe8;--mut:#9b978f;--line:#34322e;--card:#252421;--acc:#e0805e;--ok:#5cb57f;--warn:#e0b04a}}
@@ -1317,7 +1375,25 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)
 .node .sum{font-size:12px;color:var(--mut);margin-top:4px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .sbox{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 12px;min-width:160px;max-width:260px;text-align:center}
 .sbox.led{border-color:var(--acc)}.sbox .small{margin-top:2px}
-#detail{max-width:560px;margin-top:6px}
+#detail:empty{display:none}
+#detail{position:fixed;top:0;right:0;bottom:0;width:380px;max-width:100%;overflow-y:auto;background:var(--bg);border-left:1px solid var(--line);box-shadow:-8px 0 24px rgba(0,0,0,.08);padding:16px;z-index:10}
+#detail .panel{border:0;padding:0;background:transparent}
+.panel .top{display:flex;justify-content:space-between;align-items:center;gap:8px}.panel .name{font-size:16px}
+.panel .x{padding:2px 8px;font-size:13px}.facts{display:grid;grid-template-columns:auto 1fr;gap:4px 10px;margin:10px 0 4px;font-size:13px}
+.facts .k{color:var(--mut)}.panel form{margin-top:12px;border-top:1px solid var(--line);padding-top:12px;display:flex;flex-direction:column;gap:12px}
+.panel label{display:flex;flex-direction:column;gap:4px;font-size:13px;font-weight:500}.panel label .hint{font-weight:400;font-size:12px;color:var(--mut)}
+.panel label.check{flex-direction:row;align-items:center;gap:8px}.ok{color:var(--ok)}
+#signedout{display:none;background:var(--card);border:1px solid var(--warn);border-radius:10px;padding:10px 14px;margin-bottom:14px}
+.msgbar{display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap}.msgbar select{width:auto}
+.mlist{display:flex;flex-direction:column;gap:8px}
+.msg{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px;cursor:pointer}
+.msg .mh{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;font-size:13px}.msg .mh .when{margin-left:auto;color:var(--mut);font-size:12px}
+.msg .mt{margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.msg.open .mt{display:block}.msg .chip{font-size:11px;border-radius:999px;padding:1px 8px;border:1px solid var(--line);color:var(--mut)}
+.chip.queued{border-color:var(--warn);color:var(--warn)}.chip.expired{border-color:#c0392b;color:#c0392b}.chip.reply{color:var(--acc);border-color:var(--acc)}
+.msg.inthread{margin-left:22px;border-left:3px solid var(--acc)}
+@media (min-width:721px){body.drawer main{padding-right:404px}}
+@media (max-width:720px){#detail{width:100%;border-left:0}}
 .branch{display:flex;align-items:flex-start;justify-content:center}
 .branch>.ocol{position:relative;padding:14px 6px 0}
 .branch>.ocol::before{content:"";position:absolute;top:0;left:0;right:0;border-top:2px solid var(--acc)}
@@ -1363,9 +1439,9 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <a href="#settings" data-nav="settings">Settings</a>
 <a href="#controls" data-nav="controls">Controls</a>
 </nav>
-<main>
+<main><div id="signedout">This page is signed out. Run <span class="mono">/peerlink web</span> in any agent to open it again.</div>
 
-<section id="agents"><h1>Agents</h1><p class="lead">Live Claude Code sessions as an org chart. Each box is a space; a lead (outlined) sits in its parent's box with its team beneath it. An agent only sees and messages agents in its own space, and a lead also its parent's. Click an agent for its details.</p><div id="peers"></div><div id="detail"></div></section>
+<section id="agents"><h1>Agents</h1><p class="lead">Live Claude Code sessions as an org chart. Each box is a space; a lead (outlined) sits in its parent's box with its team beneath it. An agent only sees and messages agents in its own space, and a lead also its parent's. Click an agent to see and change its settings.</p><div class="orgwrap"><div id="peers"></div><div id="detail"></div></div></section>
 
 <section id="spaces"><h1>Spaces</h1>
 <p class="lead">Each agent's space comes from, in order: an override for that agent, the nearest <span class="mono">.peerlink</span> file in its folder or above, a folder rule below, or <b>default</b>. A <span class="mono">.peerlink</span> with <span class="mono">parent: &lt;space&gt;</span> nests its space inside that one: the agent in that file's folder leads it and also sits in the parent.</p>
@@ -1378,8 +1454,9 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 </form>
 </section>
 
-<section id="messages"><h1>Messages</h1><p class="lead">The last 50 messages between agents.</p>
-<div class="card tablewrap"><table><thead><tr><th>When</th><th>From → To</th><th>Message</th><th>Status</th></tr></thead><tbody id="msgs"></tbody></table></div></section>
+<section id="messages"><h1>Messages</h1><p class="lead">The latest messages between agents, newest first. A reply sits under the message it answers. Click a message to read all of it.</p>
+<div class="msgbar"><label class="small mut" for="msgagent">Agent</label><select id="msgagent"><option value="">Everyone</option></select></div>
+<div class="mlist" id="msgs"></div></section>
 
 <section id="settings"><h1>Settings</h1><p class="lead">Changes reach every agent within a few seconds.</p>
 <form class="card" id="cfg">
@@ -1423,34 +1500,67 @@ const $=s=>document.querySelector(s);let cfg={},editing=false,sel='';
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const J={'Content-Type':'application/json'};
 const tilde=p=>String(p||'').replace(/^\/Users\/[^/]+/,'~');
-async function api(p,o){const r=await fetch(p,o);if(r.status===401){location.reload();throw new Error('signed out')}return r.json()}
+// Signed out (the cookie expired, or every browser was signed out): say so and stop polling, rather than reload.
+let signedOut=false;
+async function api(p,o){const r=await fetch(p,o);if(r.status===401){signedOut=true;$('#signedout').style.display='block';throw new Error('signed out')}return r.json()}
 const post=(p,b)=>api(p,{method:'POST',headers:J,body:JSON.stringify(b||{})});
 function show(){const id=(location.hash||'#agents').slice(1);
   document.querySelectorAll('section').forEach(s=>s.classList.toggle('on',s.id===id));
   document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('on',a.dataset.nav===id))}
-window.addEventListener('hashchange',show);
-async function setAgent(id,patch){const s={...cfg.sessions};s[id]={...(s[id]||{}),...patch};cfg=await api('/api/config',{method:'PUT',headers:J,body:JSON.stringify({sessions:s})});refresh()}
-function wakeSel(id){const v=(cfg.sessions?.[id]||{}).auto_wake;const o=(val,t)=>`<option value="${val}" ${String(v??'default')===val?'selected':''}>${t}</option>`;
-  return `<select data-wake="${esc(id)}">${o('default','Wake: default')}${o('true','Wake: on')}${o('false','Wake: off')}</select>`}
-function source(x){if(x.space_source==='override')return 'override for this agent';
-  if(x.space_source==='file')return 'from '+tilde(x.space_from);if(x.space_source==='rule')return 'folder rule '+tilde(x.space_from);return 'no space set'}
-function agentCard(x){const sc=cfg.sessions?.[x.id]||{};const fileSpace=x.space_source==='file'?x.space:'';
-  return `<div class="card peer${x.parent?' is-lead':''}">
-   <div class="top"><span><span class="dot ${x.busy?'busy':''}"></span><span class="name">${esc(x.name)}</span> <span class="mut small">${x.remote?'@'+esc(x.host):''}</span></span>
-   <span class="mut small">${x.busy?'working':'idle'} · ${x.last_seen_s}s</span></div>
+// Leaving Agents, or Escape, closes the agent panel: it should never linger over another page.
+const closePanel=()=>{if(!sel)return;sel='';editing=false;refresh(true)};
+window.addEventListener('hashchange',()=>{show();closePanel()});
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closePanel()});
+function agentPanel(x){const sc=cfg.sessions?.[x.id]||{};const fileSpace=x.space_source==='file'?x.space:'';
+  const wake=sc.auto_wake===true?'on':sc.auto_wake===false?'off':'default';
+  const why=x.space_source==='override'?'set for this agent only':x.space_source==='file'?'from '+tilde(x.space_from):x.space_source==='rule'?'folder rule '+tilde(x.space_from):'no space set';
+  const role=x.parent?`Leads the <b>${esc(x.space)}</b> team inside <b>${esc(x.parent)}</b>`:'Member';
+  const opt=(v,t)=>`<option value="${v}" ${wake===v?'selected':''}>${t}</option>`;
+  return `<div class="card panel${x.parent?' is-lead':''}">
+   <div class="top"><span><span class="dot ${x.busy?'busy':''}"></span><span class="name">${esc(x.name)}</span>${x.remote?` <span class="mut small">@${esc(x.host)}</span>`:''}</span><button class="ghost x" data-close title="Close">✕</button></div>
    <div class="mono mut" style="margin-top:4px">${esc(tilde(x.cwd))}${x.branch?' · '+esc(x.branch):''}</div>
-   <div style="margin-top:6px">${esc(x.summary)||'<span class="mut">no summary yet</span>'}</div>
-   <div class="small mut" style="margin-top:6px"><span class="pill">${esc(x.space||'default')}</span> ${esc(source(x))}${x.parent?` · <b>leads the ${esc(x.space)} team</b> inside <span class="pill">${esc(x.parent)}</span>`:''}</div>
-   ${x.remote?'':`<details><summary>Manage</summary>
-   <div class="row" style="align-items:end"><div><label>Nickname</label><input type="text" value="${esc(sc.nickname||'')}" data-nick="${esc(x.id)}"></div>
-   <div style="flex:0 0 auto">${wakeSel(x.id)} <button class="ghost" data-mute="${esc(x.id)}" data-muted="${x.muted}">${x.muted?'Unmute':'Mute'}</button></div></div>
-   <div class="row"><div><label>Space for this folder (writes .peerlink)</label><input type="text" placeholder="none" value="${esc(fileSpace)}" data-spacefile="${esc(x.id)}"></div>
-   <div><label>Override for this agent only</label><input type="text" placeholder="none" value="${esc(sc.space||'')}" data-spaceover="${esc(x.id)}"></div></div>
-   <div class="small err" data-err="${esc(x.id)}"></div></details>`}</div>`}
-async function refresh(){
-  if(editing)return;
-  const open=[...document.querySelectorAll('details[open] [data-nick]')].map(e=>e.dataset.nick);
-  const [st,p,m]=await Promise.all([api('/api/status'),api('/api/peers'),api('/api/messages?limit=50')]);
+   <div style="margin-top:8px">${esc(x.summary)||'<span class="mut">no summary yet</span>'}</div>
+   <div class="facts"><span class="k">Status</span><span>${x.busy?'working':'idle'}${x.muted?' · muted':''}</span>
+    <span class="k">Space</span><span><span class="pill">${esc(x.space||'default')}</span> <span class="mut">${esc(why)}</span></span>
+    <span class="k">Role</span><span>${role}</span></div>
+   ${x.remote?'<div class="small mut">This agent runs on another machine; change it there.</div>':`<form id="agentform" data-id="${esc(x.id)}" data-nick="${esc(sc.nickname||'')}" data-spacefile="${esc(fileSpace)}" data-parent="${esc(x.file_parent||'')}" data-override="${esc(sc.space||'')}" data-wake="${wake}" data-muted="${x.muted?'1':''}">
+    <label>Name<input name="nickname" type="text" value="${esc(sc.nickname||'')}" placeholder="${esc(x.name)}"><span class="hint">What peers call this agent. It stays with this folder.</span></label>
+    <label>Space for this folder<input name="spacefile" type="text" value="${esc(fileSpace)}" placeholder="none"><span class="hint">Saved in this repo's .peerlink. Every agent in the folder joins it.</span></label>
+    <label>Inside space<input name="parent" type="text" value="${esc(x.file_parent||'')}" placeholder="none (top level)"><span class="hint">Where the whole ${esc(x.space||'default')} space sits. Changing it moves every agent in that space; the agent in the .peerlink's folder leads it.</span></label>
+    <label>Space for this agent only<input name="override" type="text" value="${esc(sc.space||'')}" placeholder="none"><span class="hint">Overrides the folder's space. An agent with its own space never leads a team.</span></label>
+    <label>When a message arrives<select name="wake">${opt('default','Use the default')}${opt('on','Start a turn')}${opt('off','Wait for the next prompt')}</select></label>
+    <label class="check"><input name="muted" type="checkbox" ${x.muted?'checked':''}> Mute: hold every message for this agent</label>
+    <div><button type="submit">Save</button> <span id="agentmsg" class="small"></span></div></form>`}</div>`}
+// Messages as a conversation: newest first, each reply under the message it answers.
+let msgFilter='';
+function renderMessages(list){
+  const names=[...new Set(list.flatMap(x=>[x.from_name,x.to_name]))].sort();
+  const selEl=$('#msgagent');const keep=selEl.value;
+  selEl.innerHTML='<option value="">Everyone</option>'+names.map(n=>`<option ${n===keep?'selected':''}>${esc(n)}</option>`).join('');
+  const shown=list.filter(x=>!msgFilter||x.from_name===msgFilter||x.to_name===msgFilter);
+  const byId=Object.fromEntries(shown.map(x=>[x.id,x]));const kids={};
+  for(const x of shown)if(x.reply_to&&byId[x.reply_to])(kids[x.reply_to]??=[]).push(x);
+  const card=(x,inthread)=>{const st=x.status==='delivered'?'':`<span class="chip ${esc(x.status)}">${esc(x.status)}</span>`;
+    return `<div class="msg${inthread?' inthread':''}" data-msg="${esc(x.id)}"><div class="mh"><b>${esc(x.from_name)}</b><span class="mut">→</span><b>${esc(x.to_name)}</b>
+      ${x.expects_reply?'<span class="chip">reply expected</span>':''}${x.reply_to?`<span class="chip reply">re ${esc(x.reply_to)}</span>`:''}${st}
+      <span class="when">${new Date(x.ts*1000).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})} · ${esc(x.id)}</span></div>
+      <div class="mt">${esc(x.text)}</div></div>`};
+  const thread=(x,depth)=>card(x,depth>0)+(kids[x.id]||[]).sort((a,b)=>a.ts-b.ts).map(k=>thread(k,depth+1)).join('');
+  const tops=shown.filter(x=>!(x.reply_to&&byId[x.reply_to])).sort((a,b)=>b.ts-a.ts);
+  $('#msgs').innerHTML=tops.map(x=>thread(x,0)).join('')||'<div class="empty">No messages yet.</div>';
+  for(const id of openMsgs)document.querySelector(`[data-msg="${CSS.escape(id)}"]`)?.classList.add('open');
+}
+const openMsgs=new Set();let lastMsgs=[];
+document.addEventListener('click',e=>{const m=e.target.closest('.msg');if(!m)return;m.classList.toggle('open');
+  m.classList.contains('open')?openMsgs.add(m.dataset.msg):openMsgs.delete(m.dataset.msg)});
+document.addEventListener('change',e=>{if(e.target.id==='msgagent'){msgFilter=e.target.value;renderMessages(lastMsgs)}});
+// What a render shows; the page is redrawn only when this changes, so it never flickers or loses your place.
+let lastView='',lastPanel='';
+async function refresh(force){
+  if(signedOut)return;
+  const [st,p,m]=await Promise.all([api('/api/status'),api('/api/peers'),api('/api/messages?limit=100')]);
+  const view=JSON.stringify([p.peers.map(({last_seen_s,...x})=>x),m.messages.map(x=>[x.id,x.status]),sel,cfg.sessions]);
+  if(view===lastView&&!force)return;lastView=view;
   $('#hostline').textContent=`${st.host} · daemon ${st.version}`;
   $('#browsers').textContent=`${st.browsers} signed in · links work once and expire after 60 s`;
   $('#keypath').textContent=st.home+'/key';
@@ -1493,25 +1603,36 @@ async function refresh(){
   const all=(fn)=>{const seen=new Set();let out=roots.map(n=>fn(n,seen)).join('');for(const n of Object.keys(groups).sort())if(!seen.has(n))out+=fn(n,seen);return out};
   $('#peers').innerHTML=p.peers.length?all((n,seen)=>{const u=unit(n,seen);return u?`<div class="chart">${u}</div>`:''})
     :'<div class="empty">No live agents. Start Claude Code with the peerlink plugin.</div>';
-  for(const id of open){const d=document.querySelector(`[data-nick="${CSS.escape(id)}"]`)?.closest('details');if(d)d.open=true}
   const picked=p.peers.find(x=>x.id===sel);
-  $('#detail').innerHTML=picked?agentCard(picked):'';
-  $('#spacelist').innerHTML=all((n,seen)=>{const u=sunit(n,seen);return u?`<div class="chart"><div class="orow" style="justify-content:flex-start">${u}</div></div>`:''})||'<div class="empty">No live agents.</div>';
-  $('#msgs').innerHTML=m.messages.slice().reverse().map(x=>`<tr><td class="small mut">${new Date(x.ts*1000).toLocaleTimeString()}</td>
-   <td><b>${esc(x.from_name)}</b> → <b>${esc(x.to_name)}</b>${x.reply_to?`<div class="small mut">re ${esc(x.reply_to)}</div>`:''}</td>
-   <td><div class="msgtext">${esc(x.text)}</div></td><td class="small">${esc(x.status)} <span class="mut">${esc(x.id)}</span></td></tr>`).join('')||'<tr><td colspan="4" class="empty">No messages yet.</td></tr>';
+  const panel=picked?agentPanel(picked):'';
+  // Never redraw the panel under someone editing it.
+  if(panel!==lastPanel&&!(editing&&picked&&$('#agentform')?.dataset.id===picked.id)){$('#detail').innerHTML=panel;lastPanel=panel}
+  // The open panel takes room beside the chart rather than covering part of it.
+  document.body.classList.toggle('drawer',!!picked);
+  // The default space is always listed: it's where every agent with no space set lands.
+  const dflt=groups.default?'':`<div class="chart"><div class="orow" style="justify-content:flex-start"><div class="ocol"><div class="sbox"><div class="name">default</div><div class="small mut">agents with no space set · none live</div></div></div></div></div>`;
+  $('#spacelist').innerHTML=all((n,seen)=>{const u=sunit(n,seen);return u?`<div class="chart"><div class="orow" style="justify-content:flex-start">${u}</div></div>`:''})+dflt;
+  lastMsgs=m.messages;renderMessages(lastMsgs);
 }
-document.addEventListener('focusin',e=>{if(e.target.matches('#peers input'))editing=true});
-document.addEventListener('focusout',e=>{if(e.target.matches('#peers input'))editing=false});
-document.addEventListener('change',async e=>{const t=e.target;editing=false;
-  if(t.dataset.nick)setAgent(t.dataset.nick,{nickname:t.value});
-  if(t.dataset.wake)setAgent(t.dataset.wake,{auto_wake:t.value==='default'?null:t.value==='true'});
-  if(t.dataset.spaceover)setAgent(t.dataset.spaceover,{space:t.value.trim()});
-  if(t.dataset.spacefile){const r=await post(`/api/sessions/${encodeURIComponent(t.dataset.spacefile)}/space-file`,{space:t.value.trim()});
-    if(r.error){const el=document.querySelector(`[data-err="${CSS.escape(t.dataset.spacefile)}"]`);if(el)el.textContent=r.error}else refresh()}});
+document.addEventListener('input',e=>{if(e.target.closest('#agentform'))editing=true});
+document.addEventListener('change',e=>{if(e.target.closest('#agentform'))editing=true});
+// Save applies only what changed, in one go, and says what happened.
+document.addEventListener('submit',async e=>{if(e.target.id!=='agentform')return;e.preventDefault();
+  const f=e.target,d=f.dataset,id=d.id,msg=$('#agentmsg'),v=n=>f.elements[n].value.trim();
+  const patch={},errs=[];
+  if(v('nickname')!==d.nick)patch.nickname=v('nickname');
+  if(v('override')!==d.override)patch.space=v('override');
+  if(f.elements.wake.value!==d.wake)patch.auto_wake=f.elements.wake.value==='default'?null:f.elements.wake.value==='on';
+  if(f.elements.muted.checked!==!!d.muted)patch.muted=f.elements.muted.checked;
+  msg.className='small';msg.textContent='Saving…';
+  if(Object.keys(patch).length){const r=await post(`/api/sessions/${encodeURIComponent(id)}/config`,patch);if(r.error)errs.push(r.error);else cfg.sessions=r.sessions}
+  for(const [field,key] of [['spacefile','space'],['parent','parent']])if(v(field)!==d[field]){
+    const r=await post(`/api/sessions/${encodeURIComponent(id)}/space-file`,{[key]:v(field)});if(r.error)errs.push(r.error)}
+  editing=false;lastPanel='';await refresh(true);
+  const m2=$('#agentmsg');if(m2){m2.className='small '+(errs.length?'err':'ok');m2.textContent=errs.length?errs.join(' '):'Saved'}});
 document.addEventListener('click',async e=>{const t=e.target.closest('button');if(!t)return;
-  if(t.dataset.sel!==undefined){sel=sel===t.dataset.sel?'':t.dataset.sel;refresh();return}
-  if(t.dataset.mute){setAgent(t.dataset.mute,{muted:t.dataset.muted!=='true'});return}
+  if(t.dataset.sel!==undefined){sel=sel===t.dataset.sel?'':t.dataset.sel;editing=false;refresh(true);return}
+  if(t.dataset.close!==undefined){sel='';editing=false;refresh(true);return}
   const act=t.dataset.act;if(!act)return;
   if(act==='logout'){await post('/api/web/logout');location.reload()}
   if(act==='logout-all'&&confirm('Sign out every browser, including this one?')){await post('/api/web/logout',{all:true});location.reload()}
@@ -1531,13 +1652,13 @@ $('#rules').addEventListener('submit',async e=>{e.preventDefault();
   const rules=e.target.space_rules.value.split('\n').map(l=>l.split('=')).filter(p=>p.length===2&&p[0].trim()&&p[1].trim()).map(([a,b])=>({path:a.trim(),space:b.trim()}));
   cfg=await api('/api/config',{method:'PUT',headers:J,body:JSON.stringify({space_rules:rules})});
   $('#rulesaved').textContent='Saved '+new Date().toLocaleTimeString();refresh()});
-show();loadCfg().then(refresh);setInterval(refresh,2000);
+show();loadCfg().then(()=>refresh(true));setInterval(()=>refresh().catch(()=>{}),2000);
 </script></body></html>
 """
 
 
 PAGE_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Peerlink</title><style>
+<title>Peerlink</title><link rel="icon" href="data:,"><style>
 :root{--bg:#faf9f7;--fg:#1f1e1c;--mut:#6b6862;--line:#e4e1db}
 @media (prefers-color-scheme:dark){:root{--bg:#1c1b19;--fg:#ecebe8;--mut:#9b978f;--line:#34322e}}
 body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 ui-sans-serif,system-ui,-apple-system,sans-serif}
