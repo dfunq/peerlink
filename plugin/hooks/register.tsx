@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.6.14'
+const DAEMON_VERSION = '0.7.0'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -31,6 +31,8 @@ type ClientConfig = {
   // The agent that leads this agent's space, and the leads of spaces nested inside it.
   lead?: string
   children?: { name: string; space: string }[]
+  // The Discord channels this agent's folder is mapped into, and which ones it's the master of.
+  discord?: { channel_id: string; channel: string; master: boolean }[]
   poll_interval_ms: number
   auto_wake_idle: boolean
   inject_while_busy: boolean
@@ -77,6 +79,8 @@ const HELP = `peerlink commands:
 
 // Module state: a hot reload starts it over and session.start registers again.
 let sessionId = ''
+// What the main agent is doing, for the reaction on a Discord message it's answering: 🤔 thinking, 🛠️ tools, ❓ asking.
+let activity: 'thinking' | 'tools' | 'asking' = 'thinking'
 let myName = ''
 let busy = false
 let cfg: ClientConfig | undefined
@@ -359,7 +363,7 @@ async function poll($: EngineInterface) {
   }
   let res
   try {
-    res = await call($, 'POST', `/api/sessions/${sessionId}/heartbeat`, { busy, context: await contextPercent($) })
+    res = await call($, 'POST', `/api/sessions/${sessionId}/heartbeat`, { busy, activity: busy ? activity : undefined, context: await contextPercent($) })
   } catch {
     await ensureDaemon($)
     await announce($)
@@ -571,6 +575,27 @@ function spaceTag(p: any) {
 function hierarchyGuidance() {
   if (!cfg) return ''
   const lines: string[] = []
+  const chans = (cfg.discord ?? []).filter(c => c.channel_id !== 'dm')
+  const dm = (cfg.discord ?? []).some(c => c.channel_id === 'dm')
+  if (chans.length || dm) {
+    const masters = chans.filter(c => c.master).map(c => c.channel)
+    const members = chans.filter(c => !c.master).map(c => c.channel)
+    lines.push(
+      [
+        'Your user can reach you on Discord.',
+        masters.length ? `You're the channel master of ${masters.join(', ')}: their messages there come to you.` : '',
+        members.length ? `You're also in ${members.join(', ')}, where they reach you by starting a message with your name.` : '',
+        dm ? 'Their direct messages to the bot come to you.' : '',
+        'A message from Discord reads "<name> on Discord": answer it with send_message and reply_to, and the answer is posted there.',
+        chans.length
+          ? `To tell them something first, send_message to "discord"${chans.length > 1 ? ` plus the channel, like "discord${chans[0]!.channel}"` : ''}.`
+          : '',
+        'They read it on a phone: lead with the answer, keep it short, use plain markdown, no tables.',
+      ]
+        .filter(Boolean)
+        .join(' '),
+    )
+  }
   if (cfg.parent)
     lines.push(
       `You lead the "${cfg.space}" space and speak for it in the "${cfg.parent}" space. Agents in "${cfg.parent}" can only reach "${cfg.space}" through you. When one asks for something, decide which agent in "${cfg.space}" owns it, delegate with send_message (or do it yourself if it is yours), and when the work is done report the outcome back to whoever asked, with reply_to their message id.`,
@@ -910,8 +935,23 @@ export const register: Register = on => {
   })
 
   on('turn.start', async ($, e, next) => {
-    if (e.agentId === undefined) busy = true
+    if (e.agentId === undefined) {
+      busy = true
+      activity = 'thinking'
+    }
     return next(e)
+  })
+
+  // Any tool the main agent calls: the reaction moves to 🛠️ (or ❓ for a question to you) until it returns.
+  on('tool.call', async ($, e, next) => {
+    if ((e as any).agentId !== undefined) return next(e)
+    const tool = String((e as any).tool ?? '')
+    activity = tool === 'AskUserQuestion' ? 'asking' : 'tools'
+    try {
+      return await next(e)
+    } finally {
+      activity = 'thinking'
+    }
   })
 
   on('turn.complete', async ($, e, next) => {

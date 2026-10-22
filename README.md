@@ -72,6 +72,22 @@ Every message between agents shows up in both chats.
 - **Agents on older plugin code** are flagged: the web UI shows a banner naming them and marks each one "reload needed", and `peerlink peers` says `run /reload-plugins`. They keep working meanwhile.
 - **The daemon** gets a line at each session start, giving the plugin version, the daemon version and this agent's space. Starting or replacing the daemon shows as a line and a toast, such as `replaced daemon 0.6.1 → 0.6.2`. The status line ends with the daemon version.
 
+## Discord
+
+Talk to your agents from Discord. Open **Discord** in the web UI and follow the three steps:
+
+1. **Create the bot and paste its token.** On the Developer Portal: New Application, then Bot, then Reset Token. peerlink asks Discord who the bot is and builds the invite link itself. Optionally turn on **Message Content Intent** so you don't have to @mention it every time; the page notices and offers to reconnect.
+2. **Invite it to your server.** This step completes on its own.
+3. **Map channels to agents.** Each channel has a **master**, which gets your messages, and any **members**. Start a message with a member's name and a colon (`storefront: how's the build?`) to reach it instead. One agent can be in several channels. Direct messages to the bot go to the agent you pick. Agents are kept by folder, so the mapping survives restarts and `/clear`.
+
+- **Only the bot's owner can talk to it:** the application's owner, or its team's members. Anyone else is ignored.
+- **Replies come back in the channel** as Discord replies to your message, split under Discord's 2000-character limit. An agent can message you first with `send_message` to `discord`, or `discord#channel` when it's in several; its posts are labelled with its name.
+- **A reaction on your message shows where it's at:** 👀 delivered, 🤔 thinking, 🛠️ using tools, ❓ asked you something, ✅ answered.
+- **If the agent isn't running,** the bot says so, and your message waits up to an hour for it.
+- **The token** is kept in `~/.peerlink/discord.json` (0600) and never sent back to the browser.
+
+It's standard-library Python like the rest of the daemon, with no `py-cord` to install. The design follows a reference bot.
+
 ## What you see at a glance
 
 - **At the bottom of the screen**, on its own row under Claude Code's hint row: `⇄ peerlink · <this agent> · <space> (in <parent>) · N peers · <version>`. Click it to open the web UI, signed in. It's a button rather than a link, so it works in terminals without hyperlink support. The desktop app shows it as the plugin's status instead.
