@@ -74,7 +74,7 @@ Every message between agents shows up in both chats.
 
 ## Discord
 
-Talk to your agents from Discord. Open **Discord** in the web UI and follow the three steps:
+Talk to your agents from Discord. Open **Channels** in the web UI and follow the three steps:
 
 1. **Create the bot and paste its token.** On the Developer Portal: New Application, then Bot, then Reset Token. peerlink asks Discord who the bot is and builds the invite link itself. Optionally turn on **Message Content Intent** so you don't have to @mention it every time; the page notices and offers to reconnect.
 2. **Invite it to your server.** This step completes on its own.
