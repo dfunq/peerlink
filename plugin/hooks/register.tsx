@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.6.1'
+const DAEMON_VERSION = '0.6.2'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -53,6 +53,7 @@ const MANUAL_SUMMARY_HOLD_MS = 10 * 60_000
 const HELP = `peerlink commands:
   /peerlink [status]       daemon, this agent, its summary
   /peerlink web            open the web UI (one-time sign-in link)
+  /peerlink issues         the last problems agents reported with peerlink
   /peerlink restart        restart the daemon
   /peerlink rotate-key     new key; signs out every browser
 
@@ -129,6 +130,9 @@ function isOlder(version: string, than: string) {
   return false
 }
 
+// The version of the daemon this agent last reached; '' until it has.
+let daemonVer = ''
+
 async function daemonHealth($: EngineInterface) {
   try {
     const health = await call($, 'GET', '/api/health')
@@ -151,11 +155,23 @@ async function shippedCode($: EngineInterface) {
 // daemon in the gap, so try a few times.
 async function ensureDaemon($: EngineInterface, fresh = false) {
   const mine = fresh ? await shippedCode($) : ''
+  let replaced = ''
   for (let attempt = 0; attempt < 4; attempt++) {
     const health = await daemonHealth($)
     const stale = !!health && (isOlder(health.version, DAEMON_VERSION) || (health.version === DAEMON_VERSION && !!mine && health.code !== mine))
-    if (health && !stale) return true
+    if (health && !stale) {
+      const changed = daemonVer !== '' && daemonVer !== health.version
+      // Starting or replacing the daemon is worth seeing: it's when peers reconnect, and the version says what code runs.
+      if (attempt > 0 || changed) {
+        const what = replaced ? `replaced daemon ${replaced} → ${health.version}` : `started daemon ${health.version}`
+        $.ui.toast(`peerlink: ${what}`)
+        $.ui.log(`peerlink: ${what}`)
+      }
+      daemonVer = health.version
+      return true
+    }
     if (health) {
+      replaced ||= health.version === DAEMON_VERSION ? `${health.version} (other code)` : health.version
       await call($, 'POST', '/api/shutdown', {}).catch(() => {})
       await $.clock.sleep(300)
     }
@@ -236,8 +252,10 @@ function framed(batch: PeerMessage[]) {
 
 function showStatus($: EngineInterface) {
   const waiting = pending.length ? ` · ${pending.length} waiting` : ''
-  $.ui.status(myName ? `${myName} · ${peerCount} peer${peerCount === 1 ? '' : 's'}${waiting}` : undefined)
+  $.ui.status(myName ? `${myName} · ${peerCount} peer${peerCount === 1 ? '' : 's'}${waiting}${daemonVer ? ` · peerlink ${daemonVer}` : ''}` : undefined)
 }
+
+const shownWaiting = new Set<string>()
 
 async function deliver($: EngineInterface) {
   if (pending.length === 0 || !cfg) return
@@ -252,9 +270,16 @@ async function deliver($: EngineInterface) {
     }
     // The model reads the row above, which the person never sees: show each message as a transcript line too.
     for (const m of batch) $.ui.log(frame(m).replace('\n', ': '))
+    $.ui.toast(`Message from ${batch.map(m => m.from_name).join(', ')}`)
     return
   }
   if (cfg.auto_wake_idle === false) {
+    // Not starting a turn is no reason to hide it: each message shows once, and is read with the next prompt.
+    for (const m of batch.filter(m => !shownWaiting.has(m.id))) {
+      shownWaiting.add(m.id)
+      $.ui.log(`${frame(m).replace('\n', ': ')}  (wake is off: read with your next prompt)`)
+      $.ui.toast(`Message from ${m.from_name}, waiting for your next prompt`)
+    }
     showStatus($)
     return
   }
@@ -499,8 +524,8 @@ async function findAgent($: EngineInterface, name: string) {
 const COMMANDS: { name: string; description: string; argumentHint: string; args: (a: string) => string }[] = [
   {
     name: 'peerlink',
-    description: 'peerlink: status, web UI, restart, rotate-key (help lists every command)',
-    argumentHint: '[status | web | restart | rotate-key | help]',
+    description: 'peerlink: status, web UI, reported issues, restart, rotate-key (help lists every command)',
+    argumentHint: '[status | web | issues | restart | rotate-key | help]',
     args: a => a || 'status',
   },
   {
@@ -528,39 +553,65 @@ const USAGE: Record<string, string> = {
   agent: 'Usage: /peerlink-agent [name <name> | summary <text> | wake on|off|default]',
 }
 
-// The spaces on this machine as an indented tree: a led space sits under its parent, its members under it.
+// The spaces on this machine as an org chart: a space lists its own agents and the leads of the spaces under it,
+// each lead's team indented beneath it. Spaces with teams come first, so the top of the org is at the top.
 async function spaceTree($: EngineInterface) {
   const res = await call($, 'GET', '/api/peers')
   if (!res.ok) return `Daemon error: ${res.data.error ?? res.status}`
   const peers = res.data.peers as any[]
   const groups: Record<string, any[]> = {}
-  const inside: Record<string, { parent: string; lead: string }> = {}
+  const lead: Record<string, any> = {}
   const kids: Record<string, string[]> = {}
   for (const p of peers) (groups[p.space || 'default'] ??= []).push(p)
   for (const p of peers)
-    if (p.parent && !inside[p.space]) {
-      inside[p.space] = { parent: p.parent, lead: p.name }
+    if (p.parent && !lead[p.space]) {
+      lead[p.space] = p
       ;(kids[p.parent] ??= []).push(p.space)
       groups[p.parent] ??= []
     }
-  const order = (a: string, b: string) => (a === 'default' ? 1 : b === 'default' ? -1 : a.localeCompare(b))
+  const size = (n: string, seen = new Set<string>()): number =>
+    seen.has(n) ? 0 : (seen.add(n), (groups[n]?.length ?? 0) + (kids[n] ?? []).reduce((t, c) => t + size(c, seen), 0))
+  const order = (a: string, b: string) =>
+    a === 'default' ? 1 : b === 'default' ? -1 : Number(!!kids[b]?.length) - Number(!!kids[a]?.length) || size(b) - size(a) || a.localeCompare(b)
   const seen = new Set<string>()
   const lines: string[] = []
-  const walk = (space: string, depth: number) => {
-    if (seen.has(space)) return
+  const tier = (space: string, pad: string) => {
     seen.add(space)
-    const pad = '    '.repeat(depth)
-    lines.push(`${pad}${depth ? '└ ' : ''}${space}${inside[space] ? ` · led by ${inside[space]!.lead}` : ''}`)
-    const members = groups[space] ?? []
-    const width = Math.max(0, ...members.map(p => p.name.length))
-    for (const p of members.sort((a, b) => a.name.localeCompare(b.name)))
-      lines.push(`${pad}${depth ? '  ' : ''}  ${p.name.padEnd(width)}  ${p.cwd.replace(/^\/Users\/[^/]+/, '~')}${p.id === sessionId ? '  ← you' : ''}`)
-    for (const child of (kids[space] ?? []).sort()) walk(child, depth + 1)
+    const own = (groups[space] ?? []).filter(p => p !== lead[space]).sort((a, b) => a.name.localeCompare(b.name))
+    const leads = (kids[space] ?? []).filter(c => c !== space).sort().map(c => lead[c])
+    const all = [...own, ...leads]
+    const width = Math.max(0, ...all.map(p => p.name.length))
+    for (const p of all) {
+      const tag = p.parent && p.space !== space ? `  leads ${p.space}` : ''
+      lines.push(`${pad}${p.name.padEnd(width)}  ${p.cwd.replace(/^\/Users\/[^/]+/, '~')}${tag}${p.id === sessionId ? '  ← you' : ''}`)
+      if (tag && !seen.has(p.space)) {
+        lines.push(`${pad}  └ ${p.space} team`)
+        tier(p.space, `${pad}      `)
+      }
+    }
   }
-  const roots = Object.keys(groups).filter(n => !inside[n] || !groups[inside[n]!.parent])
-  for (const n of roots.sort(order)) walk(n, 0)
-  for (const n of Object.keys(groups).sort(order)) walk(n, 0)  // spaces caught in a parent loop
+  const roots = Object.keys(groups).filter(n => !lead[n] || lead[n].parent === n).sort(order)
+  for (const n of [...roots, ...Object.keys(groups).sort(order)]) {
+    if (seen.has(n)) continue  // a space caught in a parent loop shows at the top level, after the rest
+    lines.push(n)
+    tier(n, '  ')
+  }
   return lines.length ? lines.join('\n') : 'No live agents.'
+}
+
+// A report reaches the daemon if it can be started; otherwise it waits in a file the daemon files when it next starts.
+async function reportIssue($: EngineInterface, what: string, details: string) {
+  if (!what.trim()) return 'Not reported: say what went wrong.'
+  const context = `agent ${myName}, ${spaceLine()}, cwd ${await $.session.cwd()}`
+  const body = { from: sessionId, from_name: myName, text: details ? `${what}\n\n${details}` : what, context, plugin: DAEMON_VERSION, space: cfg?.space ?? '' }
+  if (await ensureDaemon($).catch(() => false)) {
+    const res = await call($, 'POST', '/api/issues', body).catch(() => undefined)
+    if (res?.ok) return `Reported as ${res.data.id}${res.data.sent_to ? ` and sent to ${res.data.sent_to}` : ''}. Logged in ${res.data.logged}.`
+  }
+  const now = await $.clock.now()
+  const path = `${await peerlinkHome($)}/issues-pending/${now}-${sessionId.slice(0, 8)}.json`
+  await $.fs.write(path, JSON.stringify({ ...body, ts: now / 1000 }))
+  return `The daemon is down, so the report was saved to ${path}; it is filed when the daemon next starts.`
 }
 
 async function runCommand($: EngineInterface, args: string): Promise<string> {
@@ -578,6 +629,13 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
     case 'status': {
       const st = (await call($, 'GET', '/api/status')).data
       return `daemon ${st.version} (pid ${st.pid}) · ${st.sessions} live agents · ${st.queued} queued messages · ${st.browsers} signed-in browsers\nthis agent: ${myName} · ${spaceLine()} · wake on message: ${cfg?.auto_wake_idle === false ? 'off' : 'on'}${cfg?.muted ? ' · muted' : ''}\nsummary: ${summary || '(none yet)'}`
+    }
+    case 'issues': {
+      const res = await call($, 'GET', '/api/issues?limit=10')
+      if (!res.ok) return `Daemon error: ${res.data.error ?? res.status}`
+      const list = res.data.issues as any[]
+      if (!list.length) return `No issues reported. (${res.data.path})`
+      return list.map(i => `${i.id}  ${i.from_name || '?'} (${i.space || '?'}): ${clip(i.text, 140)}`).join('\n') + `\n\nAll reports: ${res.data.path}`
     }
     case 'usage':
       return USAGE[arg] ?? HELP
@@ -679,6 +737,20 @@ export const register: Register = on => {
       isDeferred: false,
     })
     await $.tool.register({
+      name: 'report_issue',
+      description:
+        "Report a problem with peerlink itself: a message that never arrived or reached the wrong agent, a peer you expected that isn't listed, an error from these tools. It's logged for the people fixing peerlink and sent to the agent working on peerlink when one is live. Not for problems with your own task or a peer's work.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          what: { type: 'string', description: 'What went wrong and what you expected, briefly' },
+          details: { type: 'string', description: 'Message ids, agent names, exact error text' },
+        },
+        required: ['what'],
+      },
+      isDeferred: false,
+    })
+    await $.tool.register({
       name: 'set_summary',
       description:
         'Set the one-line summary peer agents see for you (what you are working on and what you can help with). Update it when your focus changes.',
@@ -692,6 +764,7 @@ export const register: Register = on => {
     for (const { name, description, argumentHint } of COMMANDS) await $.command.register({ name, description, argumentHint })
     if (await ensureDaemon($, true)) {
       await announce($)
+      $.ui.log(`peerlink ${DAEMON_VERSION} · daemon ${daemonVer} · ${myName} · ${spaceLine()}`)
       startPolling($)
       showStatus($)
       if ((await $.session.turns()) > 0) {
@@ -777,6 +850,8 @@ export const register: Register = on => {
       `Sent to ${res.data.to} (${res.data.id}).${input.expects_reply ? ' Their reply will arrive as a peer message; continue with other work meanwhile.' : ''}`,
     )
   }).catch(daemonDown)
+
+  on('tool.call', { tool: 'mcp__peerlink__report_issue' }, async ($, e) => text(await reportIssue($, String((e as any).what ?? ''), String((e as any).details ?? ''))))
 
   on('tool.call', { tool: 'mcp__peerlink__set_summary' }, async ($, e) => {
     manualSummaryAt = await $.clock.now()
