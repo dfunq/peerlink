@@ -28,7 +28,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.6.1"
+VERSION = "0.6.2"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 with open(os.path.abspath(__file__), "rb") as _f:
     CODE = hashlib.sha256(_f.read()).hexdigest()[:16]
@@ -37,6 +37,9 @@ CONFIG_PATH = os.path.join(HOME, "config.json")
 PID_PATH = os.path.join(HOME, "daemon.pid")
 LOG_PATH = os.path.join(HOME, "daemon.log")
 MESSAGES_PATH = os.path.join(HOME, "messages.jsonl")
+ISSUES_PATH = os.path.join(HOME, "issues.jsonl")
+# Reports an agent wrote while the daemon was down; the daemon files them when it starts.
+PENDING_ISSUES_DIR = os.path.join(HOME, "issues-pending")
 KEY_PATH = os.path.join(HOME, "key")
 DIRS_PATH = os.path.join(HOME, "dirs.json")
 DIR_MEMORY_S = 14 * 86400
@@ -78,7 +81,10 @@ questions in one message.
 - Ask for a reply only when you need one, and keep working while you wait.
 - When a peer writes to you, help if it fits your user's goals, answer once \
 and to the point, and skip acknowledgements, thanks and sign-offs.
-- Tell your user about any peer exchange that changes your plan."""
+- Tell your user about any peer exchange that changes your plan.
+- If peerlink itself misbehaves (a reply that never comes, a message that \
+reached the wrong agent, an error from these tools), call report_issue with \
+the message ids and agent names, then carry on with your task."""
 
 DEFAULT_CONFIG = {
     "poll_interval_ms": 3000,
@@ -88,6 +94,7 @@ DEFAULT_CONFIG = {
     "max_hops": 6,
     "rate_limit_per_min": 12,
     "guidance": "",
+    "issue_agent": "peerlink",
     "roster_in_prompt": True,
     "auto_summary": True,
     "summary_model": "haiku",
@@ -369,16 +376,20 @@ def forget_spaces():
 def write_space_file(rec, space, key="space"):
     """Set or clear `space:` (or `parent:`) in the .peerlink that governs this agent's folder (the repo root for a new one)."""
     cwd = rec.get("cwd", "")
+    try:
+        root = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"], capture_output=True, text=True, timeout=3).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        root = ""
+    root = os.path.abspath(root or cwd) if (root or cwd) else ""
     path = find_space_file(cwd)
+    if path and root and os.path.dirname(path) != root and not os.path.dirname(path).startswith(root + "/"):
+        if key != "space" or not space:
+            raise ValueError(f"this folder's space comes from {path}, above this repo; change it there, or use an override")
+        path = None  # the repo gets its own .peerlink
     if not path and key != "space":
         raise ValueError("this folder has no .peerlink space to give a parent; set its space first")
     if not path:
-        try:
-            root = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"], capture_output=True, text=True, timeout=3).stdout.strip()
-        except (OSError, subprocess.SubprocessError):
-            root = ""
-        root = root or cwd
-        if not root or os.path.abspath(root) == os.path.expanduser("~"):
+        if not root or root == os.path.expanduser("~"):
             raise ValueError("no project folder to put .peerlink in; use a folder rule or an override")
         path = os.path.join(root, SPACE_FILE)
     lines = []
@@ -466,21 +477,26 @@ def remote_peers():
 
 
 def resolve(to, spaces=None):
-    """Find a live local agent by id, id prefix, nickname or name; only one that shares one of `spaces` when given."""
+    """Find a live local agent by id, name or id prefix; only one that shares one of `spaces` when given.
+
+    A name is what the agent is shown as (its nickname once it has one), never the folder it was named after,
+    so a renamed agent's old name can't land on someone else. A match outside `spaces` is an error, not a miss."""
     to = to.strip().lower()
     with lock:
-        live = [r for r in sessions.values() if is_live(r) and (spaces is None or reach(r) & spaces)]
+        live = [r for r in sessions.values() if is_live(r)]
         for match in (
             lambda r: r["id"].lower() == to,
             lambda r: display_name(r).lower() == to,
             lambda r: r["id"].lower().startswith(to),
-            lambda r: (r.get("name") or "").lower() == to,
         ):
-            hits = [r for r in live if match(r)]
+            found = [r for r in live if match(r)]
+            hits = [r for r in found if spaces is None or reach(r) & spaces]
             if len(hits) == 1:
                 return hits[0], None
             if len(hits) > 1:
                 return None, f"'{to}' matches {len(hits)} agents; use the id"
+            if found:
+                return None, f"{display_name(found[0])} is in the '{space_of(found[0])[0]}' space, which you can't reach"
     return None, None
 
 
@@ -565,7 +581,12 @@ def send(body):
             spaces = reach(sender_rec)
         else:
             spaces = {clean_space(s) for s in body.get("spaces") or [body.get("space")]} - {""} or None
-        target, err = resolve(to, spaces)
+        target, err = None, None
+        if parent and parent.get("to") == sender and to.strip().lower() in (parent["from"].lower(), str(parent.get("from_name", "")).lower()):
+            back = sessions.get(parent["from"])
+            target = back if back and is_live(back) else None
+        if target is None:
+            target, err = resolve(to, spaces)
         if err:
             return 409, {"error": err}
 
@@ -601,6 +622,79 @@ def send(body):
         record(msg)
     log("msg", msg["id"], msg["from_name"], "->", msg["to_name"])
     return 200, {"id": msg["id"], "to": msg["to_name"], "status": "queued"}
+
+
+def report_issue(body):
+    """Log a problem with peerlink itself, and pass it to the agent that maintains peerlink when one is live.
+
+    The maintainer is reached whatever its space: a report about broken routing must not depend on routing."""
+    text = (body.get("text") or "").strip()
+    if not text:
+        return 400, {"error": "text is required"}
+    with lock:
+        sender = sessions.get(body.get("from", ""))
+        try:
+            with open(ISSUES_PATH) as f:
+                n = sum(1 for _ in f) + 1
+        except OSError:
+            n = 1
+        issue = {
+            "id": f"i{n}",
+            "ts": body.get("ts") or time.time(),
+            "from": body.get("from", ""),
+            "from_name": body.get("from_name") or (display_name(sender) if sender else ""),
+            "space": space_of(sender)[0] if sender else body.get("space", ""),
+            "daemon": VERSION,
+            "plugin": body.get("plugin", ""),
+            "text": text[:20000],
+            "context": str(body.get("context") or "")[:5000],
+        }
+        try:
+            with open(ISSUES_PATH, "a") as f:
+                f.write(json.dumps(issue) + "\n")
+        except OSError as err:
+            return 500, {"error": f"could not write {ISSUES_PATH}: {err}"}
+        want = clean_space(config.get("issue_agent")) if config.get("issue_agent") else ""
+        agent = next((r for r in sessions.values() if want and is_live(r) and r["id"] != issue["from"] and display_name(r).lower() == want), None)
+        if agent:
+            msg = {
+                "id": f"m{next_msg[0]}",
+                "ts": time.time(),
+                "from": issue["from"],
+                "from_name": issue["from_name"] or "peerlink",
+                "from_host": HOSTNAME,
+                "to": agent["id"],
+                "to_name": display_name(agent),
+                "text": f"peerlink issue {issue['id']} from {issue['from_name'] or 'an agent'} (space {issue['space'] or '?'}, plugin {issue['plugin'] or '?'}, daemon {VERSION}):\n{text}"
+                + (f"\n\ncontext: {issue['context']}" if issue["context"] else "")
+                + f"\n\nLogged in {ISSUES_PATH}.",
+                "expects_reply": False,
+                "reply_to": None,
+                "hops": 0,
+                "status": "queued",
+                "v": 2,
+            }
+            next_msg[0] += 1
+            inboxes.setdefault(agent["id"], []).append(msg)
+            record(msg)
+    log("issue", issue["id"], issue["from_name"], "->", display_name(agent) if agent else "log only")
+    return 200, {"id": issue["id"], "logged": ISSUES_PATH, "sent_to": display_name(agent) if agent else None}
+
+
+def file_pending_issues():
+    try:
+        names = sorted(os.listdir(PENDING_ISSUES_DIR))
+    except OSError:
+        return
+    for name in names:
+        path = os.path.join(PENDING_ISSUES_DIR, name)
+        try:
+            with open(path) as f:
+                body = json.load(f)
+            report_issue({**body, "context": f"(written while the daemon was down) {body.get('context') or ''}".strip()})
+            os.remove(path)
+        except (OSError, ValueError) as err:
+            log("pending issue", name, "unreadable:", err)
 
 
 def forward(body, hops, spaces):
@@ -882,6 +976,18 @@ class Handler(BaseHTTPRequestHandler):
                 code, res = send(self.body())
                 return self.reply(code, res)
 
+        if rest == ["issues"]:
+            if method == "GET":
+                try:
+                    with open(ISSUES_PATH) as f:
+                        lines = f.readlines()[-int(q.get("limit", ["50"])[0]):]
+                except OSError:
+                    lines = []
+                return self.reply(200, {"issues": [json.loads(l) for l in lines if l.strip()], "path": ISSUES_PATH})
+            if method == "POST":
+                code, res = report_issue(self.body())
+                return self.reply(code, res)
+
         if rest == ["restart"] and method == "POST":
             self.reply(200, {"ok": True})
             threading.Thread(target=restart_self, args=(self.server,), daemon=True).start()
@@ -972,6 +1078,7 @@ def serve():
     load_key()
     load_messages()
     load_dirs()
+    file_pending_issues()
     try:
         write_launcher()
     except OSError as err:
@@ -1036,6 +1143,16 @@ def cli_status(args):
     print(f"peerlink {st['version']} on {st['host']}:{st['port']} (pid {st['pid']})")
     print(f"  {st['sessions']} live agents, {st['queued']} queued messages, {st['browsers']} signed-in browsers")
     print(f"  data: {st['home']}")
+    return 0
+
+
+def cli_issues(args):
+    ensure_running()
+    res = local_call("GET", "/api/issues")
+    if not res["issues"]:
+        print(f"No issues reported. ({res['path']})")
+    for i in res["issues"][-20:]:
+        print(f"{i['id']:<5} {time.strftime('%m-%d %H:%M', time.localtime(i['ts']))}  {i['from_name'] or '?'} ({i['space'] or '?'})  {i['text'][:100]}")
     return 0
 
 
@@ -1141,6 +1258,7 @@ def cli_logs(args):
 COMMANDS = {
     "web": (cli_web, "open the web UI with a one-time sign-in link (--print to only print it)"),
     "status": (cli_status, "daemon version, agents, queued messages"),
+    "issues": (cli_issues, "the last 20 problems agents reported with peerlink"),
     "peers": (cli_peers, "list live agents"),
     "messages": (cli_messages, "the last 20 messages"),
     "mute": (lambda a: cli_session_flag(a, "muted", True), "mute an agent by name"),
@@ -1183,6 +1301,35 @@ section{display:none}section.on{display:block}
 h1{font-size:20px;margin:0 0 4px}.lead{color:var(--mut);margin:0 0 18px}
 h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:22px 0 10px}
 .sub{margin-left:12px;padding-left:16px;border-left:2px solid var(--line)}.sub h2::before{content:"↳ ";color:var(--acc)}
+.card.is-lead{border-color:var(--acc)}
+.chart{overflow-x:auto;padding:4px 0 12px;margin-bottom:8px}
+.chart+.chart{margin-top:6px}
+.unit{display:inline-flex;flex-direction:column;align-items:center;border:1px dashed var(--line);border-radius:12px;padding:10px 12px 12px;min-width:0}
+.unit-h{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin-bottom:10px;white-space:nowrap}
+.orow{display:flex;gap:12px;align-items:flex-start;justify-content:center}
+.ocol{display:flex;flex-direction:column;align-items:center}.orow.stack{flex-direction:column;gap:8px}
+.down{width:2px;height:14px;background:var(--acc);flex:none}
+.node{width:190px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 10px;cursor:pointer;text-align:left;font:inherit;color:inherit}
+.node:hover{border-color:var(--mut)}.node.is-lead{border-color:var(--acc)}.node.sel{box-shadow:0 0 0 2px var(--acc)}
+.node .nm{font-weight:600;display:flex;align-items:center;gap:4px;justify-content:space-between}
+.node .tag{font-size:11px;font-weight:500;color:var(--acc);white-space:nowrap}
+.node .dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--mut);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.node .sum{font-size:12px;color:var(--mut);margin-top:4px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.sbox{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 12px;min-width:160px;max-width:260px;text-align:center}
+.sbox.led{border-color:var(--acc)}.sbox .small{margin-top:2px}
+#detail{max-width:560px;margin-top:6px}
+.branch{display:flex;align-items:flex-start;justify-content:center}
+.branch>.ocol{position:relative;padding:14px 6px 0}
+.branch>.ocol::before{content:"";position:absolute;top:0;left:0;right:0;border-top:2px solid var(--acc)}
+.branch>.ocol:first-child::before{left:50%}.branch>.ocol:last-child::before{right:50%}.branch>.ocol:only-child::before{display:none}
+.branch>.ocol::after{content:"";position:absolute;top:0;left:calc(50% - 1px);width:2px;height:14px;background:var(--acc)}
+@media (max-width:720px){
+ .chart{overflow:visible}.unit{display:flex;width:100%;align-items:stretch}.unit-h{text-align:left}
+ .orow{flex-direction:column;align-items:stretch;gap:8px}.ocol{align-items:stretch}.node{width:auto}
+ .ocol>.down{display:none}.ocol>.unit{margin:8px 0 0 14px;width:auto;border-left:2px solid var(--acc);border-style:none none none solid;border-radius:0;padding:4px 0 4px 12px}
+ .branch{flex-direction:column;align-items:stretch;margin-left:14px;border-left:2px solid var(--acc);padding-left:12px}
+ .branch>.ocol{padding:8px 0 0}.branch>.ocol::before,.branch>.ocol::after{display:none}.sbox{max-width:none;text-align:left}
+}
 .mut{color:var(--mut)}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(300px,100%),1fr));gap:12px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;overflow-wrap:anywhere;min-width:0}
@@ -1218,11 +1365,11 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 </nav>
 <main>
 
-<section id="agents"><h1>Agents</h1><p class="lead">Live Claude Code sessions, grouped by space. An agent only sees and messages agents in its own space.</p><div id="peers"></div></section>
+<section id="agents"><h1>Agents</h1><p class="lead">Live Claude Code sessions as an org chart. Each box is a space; a lead (outlined) sits in its parent's box with its team beneath it. An agent only sees and messages agents in its own space, and a lead also its parent's. Click an agent for its details.</p><div id="peers"></div><div id="detail"></div></section>
 
 <section id="spaces"><h1>Spaces</h1>
 <p class="lead">Each agent's space comes from, in order: an override for that agent, the nearest <span class="mono">.peerlink</span> file in its folder or above, a folder rule below, or <b>default</b>. A <span class="mono">.peerlink</span> with <span class="mono">parent: &lt;space&gt;</span> nests its space inside that one: the agent in that file's folder leads it and also sits in the parent.</p>
-<div id="spacelist" style="display:flex;flex-direction:column;gap:10px"></div>
+<div id="spacelist"></div>
 <h2>Folder rules</h2>
 <form class="card" id="rules">
 <label>One per line: <span class="mono">folder = space</span>. A rule covers the folder and everything inside it; the most specific rule wins.</label>
@@ -1272,7 +1419,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 </div></section>
 </main></div>
 <script>
-const $=s=>document.querySelector(s);let cfg={},editing=false;
+const $=s=>document.querySelector(s);let cfg={},editing=false,sel='';
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const J={'Content-Type':'application/json'};
 const tilde=p=>String(p||'').replace(/^\/Users\/[^/]+/,'~');
@@ -1288,12 +1435,12 @@ function wakeSel(id){const v=(cfg.sessions?.[id]||{}).auto_wake;const o=(val,t)=
 function source(x){if(x.space_source==='override')return 'override for this agent';
   if(x.space_source==='file')return 'from '+tilde(x.space_from);if(x.space_source==='rule')return 'folder rule '+tilde(x.space_from);return 'no space set'}
 function agentCard(x){const sc=cfg.sessions?.[x.id]||{};const fileSpace=x.space_source==='file'?x.space:'';
-  return `<div class="card peer">
+  return `<div class="card peer${x.parent?' is-lead':''}">
    <div class="top"><span><span class="dot ${x.busy?'busy':''}"></span><span class="name">${esc(x.name)}</span> <span class="mut small">${x.remote?'@'+esc(x.host):''}</span></span>
    <span class="mut small">${x.busy?'working':'idle'} · ${x.last_seen_s}s</span></div>
    <div class="mono mut" style="margin-top:4px">${esc(tilde(x.cwd))}${x.branch?' · '+esc(x.branch):''}</div>
    <div style="margin-top:6px">${esc(x.summary)||'<span class="mut">no summary yet</span>'}</div>
-   <div class="small mut" style="margin-top:6px"><span class="pill">${esc(x.space||'default')}</span> ${esc(source(x))}${x.parent?` · leads it inside <span class="pill">${esc(x.parent)}</span>`:''}</div>
+   <div class="small mut" style="margin-top:6px"><span class="pill">${esc(x.space||'default')}</span> ${esc(source(x))}${x.parent?` · <b>leads the ${esc(x.space)} team</b> inside <span class="pill">${esc(x.parent)}</span>`:''}</div>
    ${x.remote?'':`<details><summary>Manage</summary>
    <div class="row" style="align-items:end"><div><label>Nickname</label><input type="text" value="${esc(sc.nickname||'')}" data-nick="${esc(x.id)}"></div>
    <div style="flex:0 0 auto">${wakeSel(x.id)} <button class="ghost" data-mute="${esc(x.id)}" data-muted="${x.muted}">${x.muted?'Unmute':'Mute'}</button></div></div>
@@ -1309,25 +1456,43 @@ async function refresh(){
   $('#keypath').textContent=st.home+'/key';
   const groups={};for(const x of p.peers)(groups[x.space||'default']??=[]).push(x);
   const names=Object.keys(groups).sort((a,b)=>a==='default'?1:b==='default'?-1:a.localeCompare(b));
-  // A live lead nests its space under its parent; a parent with no live agents still shows as a heading.
-  const inside={},kids={};for(const x of p.peers)if(x.parent&&!inside[x.space]){inside[x.space]={parent:x.parent,lead:x.name};(kids[x.parent]??=[]).push(x.space)}
+  // An org chart. A space is a box of its own agents; the lead of a space inside it sits in that box too, with
+  // its team's box hanging beneath it. Charts with teams in them come first, so the top of the org is at the top.
+  const inside={},kids={};for(const x of p.peers)if(x.parent&&!inside[x.space]){inside[x.space]={parent:x.parent,lead:x.name,peer:x};(kids[x.parent]??=[]).push(x.space)}
   for(const n of Object.keys(kids))if(!groups[n])groups[n]=[];
-  const roots=Object.keys(groups).filter(n=>!inside[n]||!groups[inside[n].parent]||n===inside[n].parent).sort((a,b)=>a==='default'?1:b==='default'?-1:a.localeCompare(b));
-  const tree=(n,seen=new Set())=>{if(seen.has(n))return '';seen.add(n);
-    const lead=inside[n]?` <span style="text-transform:none;letter-spacing:0">· led by ${esc(inside[n].lead)}</span>`:'';
-    return `<h2>${esc(n)} · ${groups[n].length}${lead}</h2>${groups[n].length?`<div class="grid">${groups[n].map(agentCard).join('')}</div>`:''}`
-      +(kids[n]||[]).sort().map(c=>`<div class="sub">${tree(c,seen)}</div>`).join('')};
-  const spaceTree=(n,seen=new Set())=>{if(seen.has(n))return '';seen.add(n);
-    return `<div class="card"><div class="name">${esc(n)}${inside[n]?` <span class="mut small">led by ${esc(inside[n].lead)}</span>`:''}</div>
-    <div class="small mut" style="margin-top:4px">${groups[n].map(x=>esc(x.name)).join(', ')||'no live agents'}</div></div>`
-      +(kids[n]||[]).sort().map(c=>`<div class="sub" style="margin-top:8px">${spaceTree(c,seen)}</div>`).join('')};
+  const size=(n,seen=new Set())=>{if(seen.has(n))return 0;seen.add(n);return (groups[n]||[]).length+(kids[n]||[]).reduce((t,c)=>t+size(c,seen),0)};
+  const order=(a,b)=>a==='default'?1:b==='default'?-1:((kids[b]||[]).length>0)-((kids[a]||[]).length>0)||size(b)-size(a)||a.localeCompare(b);
+  const roots=Object.keys(groups).filter(n=>!inside[n]||n===inside[n].parent).sort(order);
+  // A space's box: its members, then the leads of the spaces under it.
+  const members=n=>[...groups[n].filter(x=>!(inside[n]&&x.id===inside[n].peer.id)).sort((a,b)=>a.name.localeCompare(b.name)),
+    ...(kids[n]||[]).filter(c=>c!==n).sort().map(c=>inside[c].peer)];
+  const short=d=>{const t=tilde(d).split('/');return t.length>3?'…/'+t.slice(-2).join('/'):t.join('/')};
+  const node=x=>`<button class="node${x.parent?' is-lead':''}${x.id===sel?' sel':''}" data-sel="${esc(x.id)}">
+    <div class="nm"><span><span class="dot ${x.busy?'busy':''}"></span>${esc(x.name)}</span>${x.parent?`<span class="tag">leads ${esc(x.space)}</span>`:''}</div>
+    <div class="dir">${esc(short(x.cwd))}</div><div class="sum">${esc(x.summary)||'no summary yet'}</div></button>`;
+  const unit=(n,seen)=>{if(seen.has(n))return '';seen.add(n);
+    const list=members(n),branches=list.some(x=>x.parent&&x.space!==n);
+    const cols=list.map(x=>x.parent&&x.space!==n&&!seen.has(x.space)
+      ?`<div class="ocol">${node(x)}<div class="down"></div>${unit(x.space,seen)}</div>`:`<div class="ocol">${node(x)}</div>`);
+    // A team with no teams under it stacks, so each lead's column stays one card wide.
+    const stack=inside[n]&&inside[n].parent!==n&&!branches;
+    return `<div class="unit"><div class="unit-h">${esc(n)}${inside[n]&&inside[n].parent!==n?' team':''} · ${list.length}</div><div class="orow${stack?' stack':''}">${cols.join('')||'<span class="mut small">no live agents</span>'}</div></div>`};
+  const sunit=(n,seen)=>{if(seen.has(n))return '';seen.add(n);
+    const own=groups[n].filter(x=>!(inside[n]&&x.id===inside[n].peer.id)).map(x=>esc(x.name));
+    const ch=(kids[n]||[]).filter(c=>c!==n&&!seen.has(c)).sort();
+    return `<div class="ocol"><div class="sbox${inside[n]?' led':''}"><div class="name">${esc(n)}</div>
+      ${inside[n]?`<div class="small" style="color:var(--acc)">led by ${esc(inside[n].lead)}${inside[n].parent!==n?' · inside '+esc(inside[n].parent):''}</div>`:''}
+      <div class="small mut">${own.join(', ')||'no other agents'}</div></div>
+      ${ch.length?`<div class="down"></div><div class="branch">${ch.map(c=>sunit(c,seen)).join('')}</div>`:''}</div>`};
   $('#n-agents').textContent=p.peers.length||'';$('#n-spaces').textContent=names.length||'';$('#n-msgs').textContent=m.messages.length||'';
   // Spaces caught in a parent loop have no root; they are shown at the top level after the rest.
   const all=(fn)=>{const seen=new Set();let out=roots.map(n=>fn(n,seen)).join('');for(const n of Object.keys(groups).sort())if(!seen.has(n))out+=fn(n,seen);return out};
-  $('#peers').innerHTML=p.peers.length?all(tree)
+  $('#peers').innerHTML=p.peers.length?all((n,seen)=>{const u=unit(n,seen);return u?`<div class="chart">${u}</div>`:''})
     :'<div class="empty">No live agents. Start Claude Code with the peerlink plugin.</div>';
   for(const id of open){const d=document.querySelector(`[data-nick="${CSS.escape(id)}"]`)?.closest('details');if(d)d.open=true}
-  $('#spacelist').innerHTML=all((n,seen)=>`<div>${spaceTree(n,seen)}</div>`).replaceAll('<div></div>','')||'<div class="empty">No live agents.</div>';
+  const picked=p.peers.find(x=>x.id===sel);
+  $('#detail').innerHTML=picked?agentCard(picked):'';
+  $('#spacelist').innerHTML=all((n,seen)=>{const u=sunit(n,seen);return u?`<div class="chart"><div class="orow" style="justify-content:flex-start">${u}</div></div>`:''})||'<div class="empty">No live agents.</div>';
   $('#msgs').innerHTML=m.messages.slice().reverse().map(x=>`<tr><td class="small mut">${new Date(x.ts*1000).toLocaleTimeString()}</td>
    <td><b>${esc(x.from_name)}</b> → <b>${esc(x.to_name)}</b>${x.reply_to?`<div class="small mut">re ${esc(x.reply_to)}</div>`:''}</td>
    <td><div class="msgtext">${esc(x.text)}</div></td><td class="small">${esc(x.status)} <span class="mut">${esc(x.id)}</span></td></tr>`).join('')||'<tr><td colspan="4" class="empty">No messages yet.</td></tr>';
@@ -1341,6 +1506,7 @@ document.addEventListener('change',async e=>{const t=e.target;editing=false;
   if(t.dataset.spacefile){const r=await post(`/api/sessions/${encodeURIComponent(t.dataset.spacefile)}/space-file`,{space:t.value.trim()});
     if(r.error){const el=document.querySelector(`[data-err="${CSS.escape(t.dataset.spacefile)}"]`);if(el)el.textContent=r.error}else refresh()}});
 document.addEventListener('click',async e=>{const t=e.target.closest('button');if(!t)return;
+  if(t.dataset.sel!==undefined){sel=sel===t.dataset.sel?'':t.dataset.sel;refresh();return}
   if(t.dataset.mute){setAgent(t.dataset.mute,{muted:t.dataset.muted!=='true'});return}
   const act=t.dataset.act;if(!act)return;
   if(act==='logout'){await post('/api/web/logout');location.reload()}

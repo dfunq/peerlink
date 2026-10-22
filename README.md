@@ -2,13 +2,14 @@
 
 Let your Claude agents find each other and message each other to get work done. Each agent is a Claude Code session; peerlink connects the ones running on your machine.
 
-Each agent gets three tools:
+Each agent gets four tools:
 
 | Tool | What it does |
 | --- | --- |
 | `list_peers` | Lists the other live agents: name, folder, branch, what each is working on, and whether it's busy |
 | `send_message` | Sends a message to a peer agent by name. The message is delivered into a turn that's running, or starts a turn in an idle agent |
 | `set_summary` | Sets the one-line summary that peers see for this agent |
+| `report_issue` | Reports a problem with peerlink itself, such as a reply that never arrived. See [Reporting problems](#reporting-problems) |
 
 Agents treat each other as teammates. Each one knows who else is live and what they're doing, and messages a peer when that peer clearly owns what it needs. Guidance in the system prompt sets the tone and says when a message is worth sending. You can edit that guidance in the web UI.
 
@@ -37,7 +38,7 @@ An agent's space comes from the first of these that applies:
    ```
    space: acme
    ```
-   Commit it, and the space travels with the repo. `/peerlink-spaces file <name>`, or "Space for this folder" in the web UI, writes it for you: it edits the `.peerlink` that already applies, or creates one at the repo root.
+   Commit it, and the space travels with the repo. `/peerlink-spaces file <name>`, or "Space for this folder" in the web UI, writes it for you: it edits the repo's own `.peerlink`, or creates one at the repo root. It never rewrites a `.peerlink` above the repo, because that file sets the space for other folders too.
 3. **A folder rule**, in the Spaces page of the web UI or `space_rules` in the config. For example, `~/Repos/acme = acme` covers that folder and everything inside it. The most specific rule wins.
 
 Space names are lowercased. Linked daemons on other machines only connect agents whose spaces have the same name.
@@ -55,7 +56,7 @@ parent: acme
 - **The lead** is the agent running in the folder that holds that `.peerlink`, here `~/Repos/acme/storefront`. It's in both spaces: it sees the agents in `storefront` and the agents in `acme`.
 - **Members**, such as agents in `storefront/client` and `storefront/server`, see only `storefront`. Agents in `acme` see the lead but not the members. The daemon enforces this.
 - **Guidance follows the shape.** The lead is told to delegate work from the parent to the agent in its space that owns it, and to report the outcome back. Members are told to report to the lead. A parent's agents are told to hand the lead an outcome, not instructions for each agent.
-- In the peer list a lead shows as `storefront [leads storefront]`. The web UI draws spaces as a tree.
+- In the peer list a lead shows as `storefront [leads storefront]`. The web UI's Agents page is an org chart: each space is a box, a lead sits in its parent's box, and its team hangs beneath it. `/peerlink-spaces` prints the same chart in the terminal.
 
 Spaces can nest to any depth. `/peerlink-spaces parent <name>` writes the key for you, and `/peerlink-spaces` prints the tree. An agent with a space override is never a lead.
 
@@ -65,7 +66,19 @@ Every message between agents shows up in both chats.
 
 - **Messages you send** appear as one row naming who the message went to and what it said, such as `↗ api · m4 · reply expected`. Press ctrl+o to see the full tool call.
 - **A message that wakes an idle agent** starts a turn and shows as a prompt from the peerlink plugin: `↘ web · m3 · reply expected`, then the text.
-- **A message that arrives mid-turn** is passed to the model straight away. It also shows in the chat as a line, `peerlink: ↘ web · m3: …`, which the model doesn't read again.
+- **A message that arrives mid-turn** is passed to the model straight away. It also shows in the chat as a line, `peerlink: ↘ web · m3: …`, which the model doesn't read again, plus a toast.
+- **A message that arrives while wake is off** shows once as a line and a toast, and is read with your next prompt.
+- **The daemon** gets a line at each session start, giving the plugin version, the daemon version and this agent's space. Starting or replacing the daemon shows as a line and a toast, such as `replaced daemon 0.6.1 → 0.6.2`. The status line ends with the daemon version.
+
+## How messages find their agent
+
+- **A name is what the agent is shown as**, its nickname once it has one. The folder it was named after doesn't count, so a renamed agent's old name can't land on someone else.
+- **A reply goes back to whoever sent the message it answers**, even across spaces: they reached you, so you can answer.
+- **A name outside your reach is an error**, such as `acme is in the 'bridge' space, which you can't reach`. It never falls back to another agent.
+
+## Reporting problems
+
+Agents call `report_issue` when peerlink itself misbehaves. Each report is logged to `~/.peerlink/issues.jsonl`. If an agent named `peerlink` is live (the `issue_agent` setting), the report is also sent to it as a message, whatever space it's in. Run an agent in the peerlink repo while you develop peerlink, and problems come to it as they happen. If the daemon is down, the report waits in `~/.peerlink/issues-pending/` until the daemon next starts. `/peerlink issues` and `peerlink issues` list recent reports.
 
 ## Keeping token costs down
 
@@ -83,7 +96,8 @@ In Claude Code:
 | Command | |
 | --- | --- |
 | `/peerlink` or `/peerlink status` | Daemon, this agent, its summary |
-| `/peerlink web` | Open the web UI with a one-time sign-in link. Its sidebar has Agents (drawn as a space tree), Spaces, Messages, Settings and Controls |
+| `/peerlink web` | Open the web UI with a one-time sign-in link. Its sidebar has Agents (an org chart of spaces and teams), Spaces, Messages, Settings and Controls |
+| `/peerlink issues` | The last problems agents reported with peerlink |
 | `/peerlink restart` | Restart the daemon. Agents reconnect, and queued messages are kept |
 | `/peerlink rotate-key` | Make a new key, which signs out every browser |
 | `/peerlink-spaces` | The space tree on this machine, and this agent's place in it |
@@ -104,6 +118,7 @@ In a shell, the daemon writes a launcher to `~/.peerlink/bin/peerlink`. You can 
 ```
 peerlink web          # open the UI (--print to only print the link)
 peerlink status
+peerlink issues       # problems agents reported
 peerlink peers
 peerlink messages     # the last 20
 peerlink mute <agent> / unmute <agent>
@@ -178,6 +193,7 @@ You can change these in the web UI, with `peerlink config <name> <value>`, or in
 | `auto_summary` | true | Keep summaries current with a cheap model call |
 | `summary_model` | haiku | Model used for summaries |
 | `guidance` | empty (built-in text) | Text added to every agent's system prompt |
+| `issue_agent` | peerlink | The agent that `report_issue` reports are also sent to, when it's live |
 | `sessions` | `{}` | Per-agent `nickname`, `muted`, `auto_wake` and `space`, keyed by Claude Code session id |
 | `space_rules` | `[]` | Folder rules, such as `[{"path": "~/Repos/acme", "space": "acme"}]` |
 | `remotes`, `listen_host`, `token` | | Settings for linking daemons across machines |
