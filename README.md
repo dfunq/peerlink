@@ -72,12 +72,20 @@ Every message between agents shows up in both chats.
 - **Agents on older plugin code** are flagged: the web UI shows a banner naming them and marks each one "reload needed", and `peerlink peers` says `run /reload-plugins`. They keep working meanwhile.
 - **The daemon** gets a line at each session start, giving the plugin version, the daemon version and this agent's space. Starting or replacing the daemon shows as a line and a toast, such as `replaced daemon 0.6.1 → 0.6.2`. The status line ends with the daemon version.
 
+## What you see at a glance
+
+- **Under the prompt**, at the end of the hint row: `⇄ peerlink · <this agent> · <space> (in <parent>) · N peers · <version>`. Click it to open the web UI. The desktop app shows it as the plugin's status instead.
+- **On each agent's card**, how full its context window is, highlighted from 80%. The peer list mentions it too when an agent is that full, since it may compact before it answers.
+- **Sessions in the same folder** show as one card, "+2 more sessions here". Its panel lists the others.
+- **Messages** can be filtered by space and by agent.
+
 ## How messages find their agent
 
 - **A name is what the agent is shown as**, its nickname once it has one. The folder it was named after doesn't count, so a renamed agent's old name can't land on someone else.
 - **A name stays with its folder.** A new session in a folder you named (a restart, a resume) gets the same name back.
 - **An agent is its project root**, where its session started. A shell `cd` into another folder doesn't make it a different agent, or a lead of another team.
 - **A reply goes back to whoever sent the message it answers**, whatever name the model wrote, and even across spaces: `reply_to` already says who, and they reached you, so you can answer. `to` can be left out of a reply.
+- **A long message is refused** past `max_message_chars` (8000), with a note to write the details to a file and send the path. The whole message would otherwise land in the other agent's context.
 - **A name outside your reach is an error**, such as `acme is in the 'bridge' space, which you can't reach`. It never falls back to another agent.
 
 ## Updating
@@ -210,6 +218,7 @@ You can change these in the web UI, with `peerlink config <name> <value>`, or in
 | `summary_model` | haiku | Model used for summaries |
 | `guidance` | empty (built-in text) | Text added to every agent's system prompt |
 | `auto_reload` | true | Agents reload their plugins by themselves when a newer peerlink is installed |
+| `max_message_chars` | 8000 | Longer messages are refused, with a note to send a file path instead |
 | `issue_agent` | peerlink | The agent that `report_issue` reports are also sent to, when it's live |
 | `sessions` | `{}` | Per-agent `nickname`, `muted`, `auto_wake` and `space`, keyed by Claude Code session id |
 | `space_rules` | `[]` | Folder rules, such as `[{"path": "~/Repos/acme", "space": "acme"}]` |

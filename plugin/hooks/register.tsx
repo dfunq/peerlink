@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.6.11'
+const DAEMON_VERSION = '0.6.12'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -27,6 +27,7 @@ type ClientConfig = {
   space_from: string
   // Set when this agent leads its space: the space it also sits in and speaks for its own.
   parent?: string
+  space_parent?: string
   // The agent that leads this agent's space, and the leads of spaces nested inside it.
   lead?: string
   children?: { name: string; space: string }[]
@@ -289,9 +290,26 @@ function framed(batch: PeerMessage[]) {
   return `${batch.map(frame).join('\n\n')}\n\n${REPLY_HINT}`
 }
 
+// Where this agent sits, for the status line: its space, whether it leads it, and the space that one sits in.
+function placeText() {
+  if (!cfg?.space || cfg.space === 'default') return ''
+  const inside = cfg.space_parent || cfg.parent
+  return ` · ${cfg.parent ? 'leads ' : ''}${cfg.space}${inside ? ` (in ${inside})` : ''}`
+}
+
+// The terminal draws peerlink's line at the end of the hint row under the prompt; other surfaces don't draw a
+// tail yet, so they get it as the plugin's pinned status instead.
+let surface = ''
+let statusLine = ''
 function showStatus($: EngineInterface) {
   const waiting = pending.length ? ` · ${pending.length} waiting` : ''
-  $.ui.status(myName ? `${myName} · ${peerCount} peer${peerCount === 1 ? '' : 's'}${waiting}${daemonVer ? ` · peerlink ${daemonVer}` : ''}` : undefined)
+  const next = myName ? `⇄ peerlink · ${myName}${placeText()} · ${peerCount} peer${peerCount === 1 ? '' : 's'}${waiting}${daemonVer ? ` · ${daemonVer}` : ''}` : ''
+  if (next === statusLine) return
+  statusLine = next
+  if (surface !== 'terminal') return $.ui.status(next || undefined)
+  try {
+    $.ui.invalidate('ui.render')
+  } catch {}
 }
 
 const shownWaiting = new Set<string>()
@@ -341,7 +359,7 @@ async function poll($: EngineInterface) {
   }
   let res
   try {
-    res = await call($, 'POST', `/api/sessions/${sessionId}/heartbeat`, { busy })
+    res = await call($, 'POST', `/api/sessions/${sessionId}/heartbeat`, { busy, context: await contextPercent($) })
   } catch {
     await ensureDaemon($)
     await announce($)
@@ -366,9 +384,20 @@ async function poll($: EngineInterface) {
   await deliver($)
 }
 
+// How full this agent's context window is, so leads and the web UI can see a teammate about to compact.
+async function contextPercent($: EngineInterface) {
+  try {
+    return (await $.session.usage()).context?.percent
+  } catch {
+    return undefined
+  }
+}
+
 function peerLine(p: any) {
   const where = p.cwd.replace(/^\/Users\/[^/]+/, '~') + (p.branch ? ` [${p.branch}]` : '')
-  return `- ${p.name}${p.remote ? '@' + p.host : ''}${spaceTag(p)}: ${where} — ${(p.summary || 'no summary yet').slice(0, 140)}`
+  // Only worth a mention when it's high: a nearly full agent may compact before it answers.
+  const full = typeof p.context === 'number' && p.context >= 80 ? ` (context ${p.context}% full)` : ''
+  return `- ${p.name}${p.remote ? '@' + p.host : ''}${spaceTag(p)}${full}: ${where} — ${(p.summary || 'no summary yet').slice(0, 140)}`
 }
 
 // The live agents, for the model to read beside the prompt; only when the list changed since it last saw it.
@@ -798,6 +827,7 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
+    surface = (e as any).surface ?? ''
     sessionId = await $.session.id()
     await $.tool.register({
       name: 'list_peers',
@@ -962,6 +992,23 @@ export const register: Register = on => {
     }))
 
   // A peer message that started a turn here: one row per message instead of the raw prompt (ctrl+o shows it whole).
+  // The hint row under the prompt, then peerlink's line as a link to the web UI. A tail can't be clicked, so the
+  // row is drawn here: the engine's hint as it reads, then the link. Sign-ins last 12 hours and survive daemon
+  // restarts; a signed-out browser is told to run /peerlink web.
+  on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
+    if (!statusLine || surface !== 'terminal') return next(e)
+    const ui = $.ui.resolve(e) as any
+    const props = e.props as any
+    return (
+      <ui.Box flexDirection="row">
+        <ui.Text dimColor>
+          {props.hint ? `${props.hint}  ` : ''}
+          <ui.Link href={`${DAEMON}/`}>{statusLine}</ui.Link>
+        </ui.Text>
+      </ui.Box>
+    )
+  })
+
   on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
     // Claude Code wraps a plugin's prompt in its own framing; the marker is inside.
     if (e.props.isExpanded || !e.props.text.includes(REPLY_HINT)) return next(e)
