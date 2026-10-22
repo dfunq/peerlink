@@ -57,6 +57,7 @@ parent: acme
 - **Members**, such as agents in `storefront/client` and `storefront/server`, see only `storefront`. Agents in `acme` see the lead but not the members. The daemon enforces this.
 - **Guidance follows the shape.** The lead is told to delegate work from the parent to the agent in its space that owns it, and to report the outcome back. Members are told to report to the lead. A parent's agents are told to hand the lead an outcome, not instructions for each agent.
 - In the peer list a lead shows as `storefront [leads storefront]`. The web UI's Agents page is an org chart: each space is a box, a lead sits in its parent's box, and its team hangs beneath it. `/peerlink-spaces` prints the same chart in the terminal.
+- Click an agent in the web UI to open its settings: its name, the space for its folder, the space that one sits inside, a space for this agent only, wake and mute. Save changes only what you edited.
 
 Spaces can nest to any depth. `/peerlink-spaces parent <name>` writes the key for you, and `/peerlink-spaces` prints the tree. An agent with a space override is never a lead.
 
@@ -73,7 +74,9 @@ Every message between agents shows up in both chats.
 ## How messages find their agent
 
 - **A name is what the agent is shown as**, its nickname once it has one. The folder it was named after doesn't count, so a renamed agent's old name can't land on someone else.
-- **A reply goes back to whoever sent the message it answers**, even across spaces: they reached you, so you can answer.
+- **A name stays with its folder.** A new session in a folder you named (a restart, a resume) gets the same name back.
+- **An agent is its project root**, where its session started. A shell `cd` into another folder doesn't make it a different agent, or a lead of another team.
+- **A reply goes back to whoever sent the message it answers**, whatever name the model wrote, and even across spaces: `reply_to` already says who, and they reached you, so you can answer. `to` can be left out of a reply.
 - **A name outside your reach is an error**, such as `acme is in the 'bridge' space, which you can't reach`. It never falls back to another agent.
 
 ## Reporting problems
@@ -130,7 +133,7 @@ peerlink rotate-key | logout
 ## Security
 
 - The daemon listens on `127.0.0.1` only. Every API call has to carry the key in `~/.peerlink/key`, a 0600 file that's created on first start. Agents send it as `X-Peerlink-Key`.
-- **The browser** gets in through a one-time link from `peerlink web`, signed with the key using HMAC-SHA256. The link is valid for 60 seconds and works once. It sets an `HttpOnly`, `SameSite=Strict` session cookie that lasts 12 hours.
+- **The browser** gets in through a one-time link from `peerlink web`, signed with the key using HMAC-SHA256. The link is valid for 60 seconds and works once. It sets an `HttpOnly`, `SameSite=Strict` session cookie that lasts 12 hours. Sign-ins are kept in `~/.peerlink/web_sessions.json` (0600), so restarting the daemon doesn't sign you out.
 - **Other web pages** can't drive the daemon. Requests whose `Host` header isn't `127.0.0.1` or `localhost` are refused, which blocks DNS rebinding. Browser writes from another origin are refused too.
 - **Rotating the key** signs out every browser and makes outstanding links useless. Running agents pick up the new key by themselves.
 - **Remote daemons** (optional) only get peer discovery and message delivery, and only with the shared `token`.
@@ -196,6 +199,7 @@ You can change these in the web UI, with `peerlink config <name> <value>`, or in
 | `issue_agent` | peerlink | The agent that `report_issue` reports are also sent to, when it's live |
 | `sessions` | `{}` | Per-agent `nickname`, `muted`, `auto_wake` and `space`, keyed by Claude Code session id |
 | `space_rules` | `[]` | Folder rules, such as `[{"path": "~/Repos/acme", "space": "acme"}]` |
+| `folder_names` | `{}` | The name each folder's agents get, kept when you name an agent |
 | `remotes`, `listen_host`, `token` | | Settings for linking daemons across machines |
 
 `PEERLINK_PORT` and `PEERLINK_HOME` override the port and the data directory.
