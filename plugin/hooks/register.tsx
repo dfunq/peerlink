@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.7.3'
+const DAEMON_VERSION = '0.7.4'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -256,7 +256,7 @@ type Frame = { id: string; from: string; re?: string; reply: boolean; body: stri
 // Reads back what frame() wrote, wherever it sits in the row's text.
 function parseFrames(text: string): Frame[] {
   const frames: Frame[] = []
-  const pattern = /^↘ (\S+) · (m\d+)((?: · [^\n]*)?)\n([\s\S]*?)(?=\n\n↘ |\n\n\(Reply with send_message|$)/gm
+  const pattern = /^↘ (.+?) · (m\d+)((?: · [^\n]*)?)\n([\s\S]*?)(?=\n\n↘ |\n\n\(Reply with send_message|$)/gm
   for (const match of text.matchAll(pattern)) {
     const tags = match[3]
     frames.push({ from: match[1], id: match[2], re: tags.match(/re (m\d+)/)?.[1], reply: tags.includes('reply expected'), body: match[4] })
@@ -270,6 +270,7 @@ function MessageRow(ui: any, arrow: '↘' | '↗', who: string, tags: string[], 
   return (
     <Box key={key} flexDirection="column">
       <Box flexDirection="row">
+        <Text dimColor>{'peerlink '}</Text>
         <Text color="claude" bold>{`${arrow} ${who}`}</Text>
         {tags.length ? <Text dimColor>{` · ${tags.join(' · ')}`}</Text> : null}
       </Box>
