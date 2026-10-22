@@ -22,10 +22,11 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.6.13', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.6.14', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (path === '/api/sessions') return ok({ id: body.id, name: body.name, config: { poll_interval_ms: 600000, ...config }, previous })
     if (path === '/api/peers') return ok({ peers })
     if (path.endsWith('/threads')) return ok(state.threads)
+    if (path === '/api/web/link') return ok({ url: 'http://127.0.0.1:7899/login?t=x', expires_in_s: 60 })
     if (path === '/api/issues') return ok({ id: 'i1', logged: '/Users/x/.peerlink/issues.jsonl', sent_to: 'peerlink' })
     return ok({ name: 'web', config: { poll_interval_ms: 600000, ...config }, inbox: inbox.splice(0), peer_count: peerCount })
   })
@@ -410,7 +411,7 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.6.13 · daemon 0.6.13 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.6.14 · daemon 0.6.14 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the team is listed once', async ($, on) => {
@@ -443,7 +444,7 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.6.13')
+  expect(reg.plugin).toBe('0.6.14')
 })
 
 test('plain /peerlink shows status, not the web UI', async ($, on) => {
@@ -485,7 +486,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.7.0', true], ['0.6.13', false]] as const)
+for (const [installed, reloads] of [['0.7.0', true], ['0.6.14', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     fakeDaemon(on)
@@ -512,16 +513,23 @@ test('each heartbeat says how full the context is, and a nearly full peer is fla
   expect(first.context?.join('\n')).toContain('billing-api (context 91% full): ~/r/billing')
 })
 
-test('in the terminal, the peerlink line ends the hint row as a link to the web UI, with space and parent', async ($, on) => {
+test('in the terminal, the peerlink line is a clickable row under the hint row that opens the web UI', async ($, on) => {
   const { pinned } = engine(on)
-  fakeDaemon(on, 1, null, [], { space: 'storefront', space_source: 'file', space_from: '/Users/x/r/web/.peerlink', parent: 'acme', space_parent: 'acme' })
+  const daemon = fakeDaemon(on, 1, null, [], { space: 'bridge', space_source: 'file', space_from: '/Users/x/r/web/.peerlink', space_parent: 'acme' })
+  on('ui.render', ($: any, e: any) => {
+    const { Text } = $.ui.resolve(e) as any
+    return <Text>{e.props.hint}</Text>
+  })
   await $.session.start(START)
   await settle()
   const hint = await $.ui.mount({ plugin: 'peerlink', surface: 'terminal', component: 'PromptHint', requestId: 'h1', props: { isDraft: false, isWorking: false, hint: '? for shortcuts' } } as any)
-  const link: any = await hint.find({ type: 'Link' })
-  expect(link?.props?.href).toBe('http://127.0.0.1:7899/')
-  expect(JSON.stringify(link)).toContain('⇄ peerlink · web · leads storefront (in acme)')
-  expect(await hint.find({ type: 'Text', text: /\? for shortcuts/ })).toBeDefined()
+  expect(await hint.find({ type: 'Text', text: '? for shortcuts' })).toBeDefined()
+  const button: any = await hint.find({ type: 'Button' })
+  expect(JSON.stringify(button)).toContain('⇄ peerlink · web · bridge (in acme)')
+  expect(JSON.stringify(button)).not.toContain('http')
+  await hint.press(button)
+  await settle()
+  expect(daemon.posted.some(p => p.path === '/api/web/link')).toBe(true)
   await hint.unmount()
   expect(pinned.filter((p: any) => p?.text)).toEqual([])
 })
