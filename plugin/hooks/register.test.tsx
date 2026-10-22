@@ -1,6 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 const START = { cwd: '/Users/x/r/web', surface: 'terminal', isInteractive: true } as const
+const COMPOSE = { model: 'opus', promptModel: 'opus', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] } as any
 const TURN = { turnId: 't', answer: 'done', text: 'done', durationMs: 1, isAborted: false, reason: 'end_turn' } as any
 
 // Lets the plugin's unawaited work (polls, summaries) run to its end.
@@ -9,7 +10,7 @@ async function settle() {
 }
 
 // A daemon in memory: what the plugin posts, and the peers it answers.
-function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unknown[] = []) {
+function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unknown[] = [], config: Record<string, unknown> = {}) {
   const posted: { path: string; body: any }[] = []
   const peers = [
     { id: 'p1', name: 'billing-api', host: 'Mac', cwd: '/Users/x/r/billing', branch: 'main', summary: 'Owns the invoice schema', busy: false, muted: false },
@@ -19,10 +20,10 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.4.1' })
-    if (path === '/api/sessions') return ok({ id: body.id, name: body.name, config: { poll_interval_ms: 600000 }, previous })
+    if (path === '/api/health') return ok({ ok: true, version: '0.5.0' })
+    if (path === '/api/sessions') return ok({ id: body.id, name: body.name, config: { poll_interval_ms: 600000, ...config }, previous })
     if (path === '/api/peers') return ok({ peers })
-    return ok({ name: 'web', config: { poll_interval_ms: 600000 }, inbox: inbox.splice(0), peer_count: peerCount })
+    return ok({ name: 'web', config: { poll_interval_ms: 600000, ...config }, inbox: inbox.splice(0), peer_count: peerCount })
   })
   const summaries = () => posted.filter(p => p.body?.summary).map(p => p.body.summary as string)
   return { posted, peers, summaries }
@@ -255,4 +256,24 @@ test('a delivered message hides its redundant result line, a failed one keeps it
     expect(await failed.find({ type: 'Text', text: /engine/ })).toBeDefined()
     await failed.unmount()
   }
+})
+
+test('an agent in a space is told so in its system prompt', async ($, on) => {
+  engine(on)
+  fakeDaemon(on, 1, null, [], { space: 'acme', space_source: 'file', space_from: '/Users/x/r/.peerlink', guidance: 'Be brief.' })
+  on('prompt.compose', () => ({ sections: [] }))
+  await $.session.start(START)
+  const composed: any = await $.prompt.compose(COMPOSE)
+  const text = composed.sections.find((s: any) => s.id === 'peerlink:guidance').text
+  expect(text).toContain('Peers know you as "web" in the "acme" space')
+})
+
+test('the default space adds nothing to the system prompt', async ($, on) => {
+  engine(on)
+  fakeDaemon(on, 1, null, [], { space: 'default', space_source: 'default', space_from: '', guidance: 'Be brief.' })
+  on('prompt.compose', () => ({ sections: [] }))
+  await $.session.start(START)
+  const composed: any = await $.prompt.compose(COMPOSE)
+  const text = composed.sections.find((s: any) => s.id === 'peerlink:guidance').text
+  expect(text).toBe('# Peer agents\nPeers know you as "web".\nBe brief.')
 })
