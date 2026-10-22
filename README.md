@@ -90,7 +90,7 @@ Compaction, `/clear` and `/resume` reset what an agent remembers, but not what i
 
 - **The agent stays connected.** After `/clear` or `/resume`, the plugin registers the new session as the old one's successor. It keeps the name, settings and queued messages.
 - **Nothing goes to a dead session.** A reply to a session that's gone goes to the live agent in the same folder. A new session in a folder picks up messages still queued for the last one there, for up to an hour.
-- **Open requests come back.** At the start of a conversation, after compaction and after `/clear`, the agent's context lists the peer requests it still owes an answer to and the ones it's waiting on, with message ids. They are taken from the last 24 hours of messages that expect a reply and haven't had one.
+- **Open requests come back.** At the start of a conversation, after compaction and after `/clear`, the agent's context lists the peer requests it still owes an answer to and the ones it's waiting on, with message ids. They are taken from the last 8 hours of messages that expect a reply and haven't had one.
 
 ## Reporting problems
 
