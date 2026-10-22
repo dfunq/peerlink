@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.7.2', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.7.3', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (path === '/api/sessions') return ok({ id: body.id, name: body.name, config: { poll_interval_ms: 600000, ...config }, previous })
     if (path === '/api/peers') return ok({ peers })
     if (path.endsWith('/threads')) return ok(state.threads)
@@ -411,7 +411,7 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.7.2 · daemon 0.7.2 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.7.3 · daemon 0.7.3 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the team is listed once', async ($, on) => {
@@ -444,7 +444,7 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.7.2')
+  expect(reg.plugin).toBe('0.7.3')
 })
 
 test('plain /peerlink shows status, not the web UI', async ($, on) => {
@@ -486,7 +486,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.7.3', true], ['0.7.2', false]] as const)
+for (const [installed, reloads] of [['0.7.4', true], ['0.7.3', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     fakeDaemon(on)
@@ -556,4 +556,14 @@ test('a heartbeat during a turn says what the agent is doing', async ($, on) => 
   await clock.advance(600000)
   for (let i = 0; i < 10; i++) await settle()
   expect(daemon.posted.filter(p => p.path.endsWith('/heartbeat') && p.body?.busy).at(-1)!.body.activity).toBe('thinking')
+})
+
+test('send_message passes options and files along', async ($, on) => {
+  engine(on)
+  const daemon = fakeDaemon(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: 'mcp__peerlink__send_message', to: 'discord', text: 'Which branch?', options: ['main', 'dev'], files: ['/tmp/plan.md'] } as any)
+  const sent = daemon.posted.find(p => p.path === '/api/messages')!.body
+  expect(sent.options).toEqual(['main', 'dev'])
+  expect(sent.files).toEqual(['/tmp/plan.md'])
 })
