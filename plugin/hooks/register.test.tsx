@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.7.3', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.7.4', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (path === '/api/sessions') return ok({ id: body.id, name: body.name, config: { poll_interval_ms: 600000, ...config }, previous })
     if (path === '/api/peers') return ok({ peers })
     if (path.endsWith('/threads')) return ok(state.threads)
@@ -202,7 +202,14 @@ test('an incoming peer message draws as a chat row, on every surface', async ($,
     expect((await ui.find({ type: 'Text', text: /↘ api/ }))?.text).toBe('↘ api')
     expect((await ui.find({ type: 'Text', text: /m7 · re m6 · reply expected/ }))).toBeDefined()
     expect((await ui.find({ type: 'Text', text: /Which file defines the invoice model\?/ }))).toBeDefined()
+    expect((await ui.find({ type: 'Text', text: /^peerlink $/ }))).toBeDefined()
     await ui.unmount()
+
+    const fromDiscord = PROMPT.replace('↘ api', '↘ dillon on Discord')
+    const discord = await $.ui.mount({ ...base, props: { text: fromDiscord, origin: { kind: 'plugin', name: 'peerlink' }, isExpanded: false } } as any)
+    expect((await discord.find({ type: 'Text', text: /↘ dillon/ }))?.text).toBe('↘ dillon on Discord')
+    expect((await discord.find({ type: 'Text', text: /The peerlink plugin sent a message/ }))).toBeUndefined()
+    await discord.unmount()
 
     const expanded = await $.ui.mount({ ...base, props: { text: PROMPT, origin: { kind: 'plugin', name: 'peerlink' }, isExpanded: true } } as any)
     expect((await expanded.find({ type: 'Text', text: /engine/ }))).toBeDefined()
@@ -411,7 +418,7 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.7.3 · daemon 0.7.3 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.7.4 · daemon 0.7.4 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the team is listed once', async ($, on) => {
@@ -444,7 +451,7 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.7.3')
+  expect(reg.plugin).toBe('0.7.4')
 })
 
 test('plain /peerlink shows status, not the web UI', async ($, on) => {
@@ -486,7 +493,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.7.4', true], ['0.7.3', false]] as const)
+for (const [installed, reloads] of [['0.7.5', true], ['0.7.4', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     fakeDaemon(on)
