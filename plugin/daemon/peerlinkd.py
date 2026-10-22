@@ -28,7 +28,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.6.11"
+VERSION = "0.6.12"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 with open(os.path.abspath(__file__), "rb") as _f:
     CODE = hashlib.sha256(_f.read()).hexdigest()[:16]
@@ -93,6 +93,7 @@ DEFAULT_CONFIG = {
     "inject_while_busy": True,
     "max_hops": 6,
     "rate_limit_per_min": 12,
+    "max_message_chars": 8000,
     "guidance": "",
     "issue_agent": "peerlink",
     "roster_in_prompt": True,
@@ -284,6 +285,8 @@ def client_config(sid):
         "space_source": source,
         "space_from": where,
         "parent": parent_of(rec) if rec else "",
+        # The space this agent's space sits inside, for members too (a lead's `parent` is the same).
+        "space_parent": read_space_file(where, "parent") if rec and source == "file" else "",
         "lead": lead,
         "children": children,
         "poll_interval_ms": config["poll_interval_ms"],
@@ -473,6 +476,7 @@ def public_peer(rec):
         "busy": rec.get("busy", False),
         # The plugin version the agent runs ('' before 0.6.6): one behind the daemon needs /reload-plugins.
         "plugin": rec.get("plugin", ""),
+        "context": rec.get("context"),  # percent of the context window in use, when the agent reports it
         "stale": rec.get("plugin", "") != VERSION,
         "muted": session_cfg(rec["id"])["muted"],
         "last_seen_s": round(time.time() - rec["last_seen"], 1),
@@ -590,6 +594,10 @@ def send(body):
     to = body.get("to", "")
     if not text or not (to or body.get("reply_to")):
         return 400, {"error": "text, and to or reply_to, are required"}
+    # A long message lands whole in the other agent's context; on a shared filesystem a path costs almost nothing.
+    limit = int(config.get("max_message_chars") or 0)
+    if limit and len(text) > limit and body.get("from") in sessions:
+        return 413, {"error": f"message is {len(text)} characters, over the {limit} limit: write the details to a file and send its path with a short summary"}
     now = time.time()
     with lock:
         sender_rec = sessions.get(sender)
@@ -653,6 +661,8 @@ def send(body):
             "to_name": display_name(target),
             "from_cwd": sender_rec.get("cwd", "") if sender_rec else "",
             "to_cwd": target.get("cwd", ""),
+            "from_space": space_of(sender_rec)[0] if sender_rec else (clean_space(body.get("space")) or ""),
+            "to_space": space_of(target)[0],
             "text": text[:20000],
             "expects_reply": bool(body.get("expects_reply")),
             "reply_to": body.get("reply_to") or None,
@@ -1036,6 +1046,8 @@ class Handler(BaseHTTPRequestHandler):
                 rec["last_seen"] = time.time()
                 if "busy" in b:
                     rec["busy"] = bool(b["busy"])
+                if isinstance(b.get("context"), (int, float)):
+                    rec["context"] = max(0, min(100, int(b["context"])))
                 if b.get("summary") is not None:
                     rec["summary"] = b["summary"][:500]
                     if b.get("summary_kind") in ("model", "manual"):
@@ -1444,6 +1456,7 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)
 .node .nm{font-weight:600;display:flex;align-items:center;gap:4px;justify-content:space-between}
 .node .tag{font-size:11px;font-weight:500;color:var(--acc);white-space:nowrap}
 .node .dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--mut);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ctx{font-size:11px;color:var(--mut);font-weight:500}.ctx.hi{color:var(--warn)}
 .node .stale{font-size:11px;color:var(--warn);margin-top:4px}
 .node .sum{font-size:12px;color:var(--mut);margin-top:4px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .sbox{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 12px;min-width:160px;max-width:260px;text-align:center}
@@ -1530,7 +1543,8 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 </section>
 
 <section id="messages"><h1>Messages</h1><p class="lead">The latest messages between agents, newest first. A reply sits under the message it answers. Click a message to read all of it.</p>
-<div class="msgbar"><label class="small mut" for="msgagent">Agent</label><select id="msgagent"><option value="">Everyone</option></select></div>
+<div class="msgbar"><label class="small mut" for="msgspace">Space</label><select id="msgspace"><option value="">All spaces</option></select>
+<label class="small mut" for="msgagent">Agent</label><select id="msgagent"><option value="">Everyone</option></select></div>
 <div class="mlist" id="msgs"></div></section>
 
 <section id="settings"><h1>Settings</h1><p class="lead">Changes reach every agent within a few seconds.</p>
@@ -1586,7 +1600,7 @@ function show(){const id=(location.hash||'#agents').slice(1);
 const closePanel=()=>{if(!sel)return;sel='';editing=false;refresh(true)};
 window.addEventListener('hashchange',()=>{show();closePanel()});
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closePanel()});
-function agentPanel(x){const sc=cfg.sessions?.[x.id]||{};const fileSpace=x.space_source==='file'?x.space:'';
+function agentPanel(x,others=[]){const sc=cfg.sessions?.[x.id]||{};const fileSpace=x.space_source==='file'?x.space:'';
   const wake=sc.auto_wake===true?'on':sc.auto_wake===false?'off':'default';
   const why=x.space_source==='override'?'set for this agent only':x.space_source==='file'?'from '+tilde(x.space_from):x.space_source==='rule'?'folder rule '+tilde(x.space_from):'no space set';
   const role=x.parent?`Leads the <b>${esc(x.space)}</b> team inside <b>${esc(x.parent)}</b>`:'Member';
@@ -1598,7 +1612,9 @@ function agentPanel(x){const sc=cfg.sessions?.[x.id]||{};const fileSpace=x.space
    <div class="facts"><span class="k">Status</span><span>${x.busy?'working':'idle'}${x.muted?' · muted':''}</span>
     <span class="k">Space</span><span><span class="pill">${esc(x.space||'default')}</span> <span class="mut">${esc(why)}</span></span>
     <span class="k">Role</span><span>${role}</span>
+    ${x.context!=null?`<span class="k">Context</span><span>${x.context}% of its window in use${x.context>=80?' · <span style="color:var(--warn)">close to compacting</span>':''}</span>`:''}
     <span class="k">Plugin</span><span>${esc(x.plugin||'older than 0.6.6')}${x.stale&&!x.remote?' · <span style="color:var(--warn)">run /reload-plugins in this agent</span>':''}</span></div>
+   ${others.length?`<div class="threads"><div class="k small">Other sessions in this folder</div>${others.map(o=>`<button class="ghost small" data-sel="${esc(o.id)}" style="text-align:left">${esc(o.name)} · ${o.busy?'working':'idle'}${o.summary?' · '+esc(o.summary.slice(0,60)):''}</button>`).join('')}</div>`:''}
    ${(x.threads&&(x.threads.owes.length||x.threads.waiting.length))?`<div class="threads"><div class="k small">Open requests</div>
     ${x.threads.owes.map(t=>`<div class="small">owes <b>${esc(t.with)}</b> a reply · <span class="mut">${esc(t.id)}: ${esc(t.text.slice(0,90))}</span></div>`).join('')}
     ${x.threads.waiting.map(t=>`<div class="small">waiting on <b>${esc(t.with)}</b> · <span class="mut">${esc(t.id)}: ${esc(t.text.slice(0,90))}</span></div>`).join('')}</div>`:''}
@@ -1611,12 +1627,15 @@ function agentPanel(x){const sc=cfg.sessions?.[x.id]||{};const fileSpace=x.space
     <label class="check"><input name="muted" type="checkbox" ${x.muted?'checked':''}> Mute: hold every message for this agent</label>
     <div><button type="submit">Save</button> <span id="agentmsg" class="small"></span></div></form>`}</div>`}
 // Messages as a conversation: newest first, each reply under the message it answers.
-let msgFilter='';
+let msgFilter='',spaceFilter='',livePeers=[];
+// A message's spaces: what it recorded when sent, else (older messages) the space of a live agent on either end.
+const spacesOf=x=>{const by=n=>livePeers.find(p=>p.name===n)?.space;return [x.from_space||by(x.from_name),x.to_space||by(x.to_name)].filter(Boolean)};
 function renderMessages(list){
-  const names=[...new Set(list.flatMap(x=>[x.from_name,x.to_name]))].sort();
-  const selEl=$('#msgagent');const keep=selEl.value;
-  selEl.innerHTML='<option value="">Everyone</option>'+names.map(n=>`<option ${n===keep?'selected':''}>${esc(n)}</option>`).join('');
-  const shown=list.filter(x=>!msgFilter||x.from_name===msgFilter||x.to_name===msgFilter);
+  const opts=(el,all,vals)=>{const keep=el.value;el.innerHTML=`<option value="">${all}</option>`+vals.map(n=>`<option ${n===keep?'selected':''}>${esc(n)}</option>`).join('')};
+  opts($('#msgspace'),'All spaces',[...new Set(list.flatMap(spacesOf))].sort());
+  const inSpace=list.filter(x=>!spaceFilter||spacesOf(x).includes(spaceFilter));
+  opts($('#msgagent'),'Everyone',[...new Set(inSpace.flatMap(x=>[x.from_name,x.to_name]))].sort());
+  const shown=inSpace.filter(x=>!msgFilter||x.from_name===msgFilter||x.to_name===msgFilter);
   const byId=Object.fromEntries(shown.map(x=>[x.id,x]));const kids={};
   for(const x of shown)if(x.reply_to&&byId[x.reply_to])(kids[x.reply_to]??=[]).push(x);
   const card=(x,inthread)=>{const st=x.status==='delivered'?'':`<span class="chip ${esc(x.status)}">${esc(x.status)}</span>`;
@@ -1632,7 +1651,9 @@ function renderMessages(list){
 const openMsgs=new Set();let lastMsgs=[];
 document.addEventListener('click',e=>{const m=e.target.closest('.msg');if(!m)return;m.classList.toggle('open');
   m.classList.contains('open')?openMsgs.add(m.dataset.msg):openMsgs.delete(m.dataset.msg)});
-document.addEventListener('change',e=>{if(e.target.id==='msgagent'){msgFilter=e.target.value;renderMessages(lastMsgs)}});
+document.addEventListener('change',e=>{
+  if(e.target.id==='msgagent'){msgFilter=e.target.value;renderMessages(lastMsgs)}
+  if(e.target.id==='msgspace'){spaceFilter=e.target.value;msgFilter='';$('#msgagent').value='';renderMessages(lastMsgs)}});
 // What a render shows; the page is redrawn only when this changes, so it never flickers or loses your place.
 let lastView='',lastPanel='';
 async function refresh(force){
@@ -1656,17 +1677,23 @@ async function refresh(force){
   const roots=Object.keys(groups).filter(n=>!inside[n]||n===inside[n].parent).sort(order);
   // A space's box: its members, then the leads of the spaces under it.
   const isLead=(x,n)=>!!(inside[n]&&inside[n].parent!==n&&x.parent&&x.space===n);
-  const members=n=>[...groups[n].filter(x=>!isLead(x,n)).sort((a,b)=>a.name.localeCompare(b.name)),
+  const members=n=>[...primary(groups[n].filter(x=>!isLead(x,n)).sort(rank)).sort((a,b)=>a.name.localeCompare(b.name)),
     ...(kids[n]||[]).filter(c=>c!==n).sort().map(c=>inside[c].peer)];
   const short=d=>{const t=tilde(d).split('/');return t.length>3?'…/'+t.slice(-2).join('/'):t.join('/')};
-  const node=x=>`<button class="node${x.parent?' is-lead':''}${x.id===sel?' sel':''}" data-sel="${esc(x.id)}">
-    <div class="nm"><span><span class="dot ${x.busy?'busy':''}"></span>${esc(x.name)}</span>${x.parent?`<span class="tag">leads ${esc(x.space)}</span>`:''}</div>
-    <div class="dir">${esc(short(x.cwd))}</div><div class="sum">${esc(x.summary)||'no summary yet'}</div>${x.stale&&!x.remote?'<div class="stale">reload needed</div>':''}</button>`;
+  const ctx=x=>x.context==null?'':`<span class="ctx${x.context>=80?' hi':''}" title="context window in use">${x.context}%</span>`;
+  // Sessions open in the same folder show as one card; its panel lists the others.
+  const twins=x=>p.peers.filter(y=>y.id!==x.id&&y.cwd===x.cwd&&y.space===x.space);
+  const node=x=>{const more=twins(x).length;return `<button class="node${x.parent?' is-lead':''}${x.id===sel?' sel':''}" data-sel="${esc(x.id)}">
+    <div class="nm"><span><span class="dot ${x.busy?'busy':''}"></span>${esc(x.name)}</span>${x.parent?`<span class="tag">leads ${esc(x.space)}</span>`:ctx(x)}</div>
+    <div class="dir">${esc(short(x.cwd))}</div><div class="sum">${esc(x.summary)||'no summary yet'}</div>${x.parent&&x.context!=null?`<div class="small mut">context ${ctx(x)}</div>`:''}${more?`<div class="small mut">+${more} more session${more>1?'s':''} here</div>`:''}${x.stale&&!x.remote?'<div class="stale">reload needed</div>':''}</button>`};
+  // One card per folder: the busiest, else most recently active, session stands for the rest.
+  const primary=list=>{const seen=new Set();return list.filter(x=>{const k=x.space+'\u0000'+x.cwd;if(seen.has(k))return false;seen.add(k);return true})};
+  const rank=(a,b)=>(b.busy-a.busy)||(a.last_seen_s-b.last_seen_s);
   const unit=(n,seen)=>{if(seen.has(n))return '';seen.add(n);
     const list=members(n),branches=list.some(x=>x.parent&&x.space!==n);
-    const count=list.reduce((t,x)=>t+(x.parent&&x.space!==n?leads[x.space].length:1),0);
+    const count=list.reduce((t,x)=>t+(x.parent&&x.space!==n?primary(leads[x.space]).length:1),0);
     const cols=list.map(x=>x.parent&&x.space!==n&&!seen.has(x.space)
-      ?`<div class="ocol"><div class="orow stack">${leads[x.space].map(node).join('')}</div><div class="down"></div>${unit(x.space,seen)}</div>`:`<div class="ocol">${node(x)}</div>`);
+      ?`<div class="ocol"><div class="orow stack">${primary(leads[x.space].slice().sort(rank)).map(node).join('')}</div><div class="down"></div>${unit(x.space,seen)}</div>`:`<div class="ocol">${node(x)}</div>`);
     // A team with no teams under it stacks, so each lead's column stays one card wide.
     const stack=inside[n]&&inside[n].parent!==n&&!branches;
     return `<div class="unit"><div class="unit-h">${esc(n)}${inside[n]&&inside[n].parent!==n?' team':''} · ${count}</div><div class="orow${stack?' stack':''}">${cols.join('')||'<span class="mut small">no live agents</span>'}</div></div>`};
@@ -1687,7 +1714,7 @@ async function refresh(force){
   $('#stalebar').style.display=behind.length?'block':'none';
   $('#stalebar').innerHTML=behind.length?`<b>${behind.length} agent${behind.length>1?'s':''} on an older peerlink plugin</b> (${behind.map(x=>esc(x.name)).join(', ')}). Update peerlink from the marketplace if needed, then run <span class="mono">/reload-plugins</span> in each.`:'';
   const picked=p.peers.find(x=>x.id===sel);
-  const panel=picked?agentPanel(picked):'';
+  const panel=picked?agentPanel(picked,p.peers.filter(y=>y.id!==picked.id&&y.cwd===picked.cwd&&y.space===picked.space)):'';
   // Never redraw the panel under someone editing it.
   if(panel!==lastPanel&&!(editing&&picked&&$('#agentform')?.dataset.id===picked.id)){$('#detail').innerHTML=panel;lastPanel=panel}
   // The open panel takes room beside the chart rather than covering part of it.
@@ -1695,7 +1722,7 @@ async function refresh(force){
   // The default space is always listed: it's where every agent with no space set lands.
   const dflt=groups.default?'':`<div class="chart"><div class="orow" style="justify-content:flex-start"><div class="ocol"><div class="sbox"><div class="name">default</div><div class="small mut">agents with no space set · none live</div></div></div></div></div>`;
   $('#spacelist').innerHTML=all((n,seen)=>{const u=sunit(n,seen);return u?`<div class="chart"><div class="orow" style="justify-content:flex-start">${u}</div></div>`:''})+dflt;
-  lastMsgs=m.messages;renderMessages(lastMsgs);
+  livePeers=p.peers;lastMsgs=m.messages;renderMessages(lastMsgs);
 }
 document.addEventListener('input',e=>{if(e.target.closest('#agentform'))editing=true});
 document.addEventListener('change',e=>{if(e.target.closest('#agentform'))editing=true});
