@@ -28,7 +28,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.7.1"
+VERSION = "0.7.2"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -1453,23 +1453,19 @@ def detach():
         print(json.dumps({"running": True, "started": False}))
         return
     os.makedirs(HOME, exist_ok=True)
-    if os.fork() > 0:
-        for _ in range(50):
-            time.sleep(0.1)
-            if health():
-                break
-        print(json.dumps({"running": bool(health()), "started": True}))
-        return
-    os.setsid()
-    if os.fork() > 0:
-        os._exit(0)
-    devnull = os.open(os.devnull, os.O_RDONLY)
+    # A fresh interpreter in its own session, not a fork of this one: on macOS a forked child that hasn't exec'd
+    # crashes the first time anything touches Objective-C, which an HTTPS call through urllib does (it brought
+    # the daemon down when a Discord token was connected).
     out = os.open(LOG_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-    os.dup2(devnull, 0)
-    os.dup2(out, 1)
-    os.dup2(out, 2)
-    serve()
-    os._exit(0)
+    with open(os.devnull, "rb") as devnull:
+        subprocess.Popen([sys.executable, os.path.abspath(__file__), "serve"], stdin=devnull, stdout=out, stderr=out,
+                         start_new_session=True, close_fds=True)
+    os.close(out)
+    for _ in range(50):
+        time.sleep(0.1)
+        if health():
+            break
+    print(json.dumps({"running": bool(health()), "started": True}))
 
 
 def restart_self(server):
