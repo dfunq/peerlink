@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.4.1'
+const DAEMON_VERSION = '0.5.0'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -22,6 +22,9 @@ type PeerMessage = {
 }
 
 type ClientConfig = {
+  space: string
+  space_source: 'override' | 'file' | 'rule' | 'default'
+  space_from: string
   poll_interval_ms: number
   auto_wake_idle: boolean
   inject_while_busy: boolean
@@ -50,6 +53,9 @@ const HELP = `peerlink commands:
   /peerlink summary <text> set what peers see for this agent
   /peerlink wake on|off|default   whether a message starts a turn here when idle
   /peerlink mute <agent> | unmute <agent>
+  /peerlink space                 this agent's space and where it comes from
+  /peerlink space <name> | clear  override the space for this agent only
+  /peerlink space file <name> | clear   set the space in this project's .peerlink
   /peerlink restart        restart the daemon
   /peerlink rotate-key     new key; signs out every browser
 In a shell: ~/.peerlink/bin/peerlink help`
@@ -280,7 +286,7 @@ async function rosterContext($: EngineInterface) {
   lastRoster = roster
   return peers.length
     ? `Peer agents now live (send_message to reach one):\n${roster}`
-    : 'peerlink: no other agents are live now.'
+    : 'peerlink: no other agents are live in your space now.'
 }
 
 async function postSummary($: EngineInterface, next: string, kind: 'seed' | 'model' | 'manual') {
@@ -418,6 +424,16 @@ async function listPeers($: EngineInterface, withIds: boolean) {
     .join('\n')
 }
 
+function spaceLine() {
+  if (!cfg?.space) return 'space: default'
+  const from =
+    cfg.space_source === 'override' ? 'override for this agent'
+    : cfg.space_source === 'file' ? `from ${cfg.space_from}`
+    : cfg.space_source === 'rule' ? `folder rule ${cfg.space_from}`
+    : 'no space set'
+  return `space: ${cfg.space} (${from})`
+}
+
 async function setAgentConfig($: EngineInterface, id: string, patch: Record<string, unknown>) {
   const current = await call($, 'GET', '/api/config')
   const sessions = { ...(current.data.sessions ?? {}) }
@@ -446,7 +462,7 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
     }
     case 'status': {
       const st = (await call($, 'GET', '/api/status')).data
-      return `daemon ${st.version} (pid ${st.pid}) · ${st.sessions} live agents · ${st.queued} queued messages · ${st.browsers} signed-in browsers\nthis agent: ${myName} · wake on message: ${cfg?.auto_wake_idle === false ? 'off' : 'on'}${cfg?.muted ? ' · muted' : ''}\nsummary: ${summary || '(none yet)'}`
+      return `daemon ${st.version} (pid ${st.pid}) · ${st.sessions} live agents · ${st.queued} queued messages · ${st.browsers} signed-in browsers\nthis agent: ${myName} · ${spaceLine()} · wake on message: ${cfg?.auto_wake_idle === false ? 'off' : 'on'}${cfg?.muted ? ' · muted' : ''}\nsummary: ${summary || '(none yet)'}`
     }
     case 'peers':
       return listPeers($, false)
@@ -475,6 +491,20 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
       if (!agent) return `No single live agent named "${arg}". /peerlink peers lists them.`
       await setAgentConfig($, agent.id, { muted: sub === 'mute' })
       return `${agent.name} is ${sub === 'mute' ? 'muted' : 'unmuted'}.`
+    }
+    case 'space': {
+      const [what = '', name = ''] = rest
+      if (!what) return `This agent's ${spaceLine()}.`
+      if (what === 'file') {
+        if (!name) return 'Usage: /peerlink space file <name> | clear'
+        const res = await call($, 'POST', `/api/sessions/${sessionId}/space-file`, { space: name === 'clear' ? '' : name })
+        if (!res.ok) return `Could not write .peerlink: ${res.data.error ?? res.status}`
+        await poll($)
+        return `${name === 'clear' ? 'Cleared the space in' : 'Wrote'} ${res.data.path}. This agent's ${spaceLine()}.`
+      }
+      await setAgentConfig($, sessionId, { space: what === 'clear' ? '' : what })
+      await poll($)
+      return `This agent's ${spaceLine()}.`
     }
     case 'restart': {
       await call($, 'POST', '/api/restart', {})
@@ -531,8 +561,8 @@ export const register: Register = on => {
     })
     await $.command.register({
       name: 'peerlink',
-      description: 'peerlink: web UI, status, peers, name, wake, mute, restart, rotate-key',
-      argumentHint: 'web | status | peers | name <name> | wake on|off | mute <agent> | help',
+      description: 'peerlink: web UI, status, peers, name, space, wake, mute, restart, rotate-key',
+      argumentHint: 'web | status | peers | name <name> | space [name] | wake on|off | mute <agent> | help',
     })
     if (await ensureDaemon($)) {
       await announce($)
@@ -598,7 +628,7 @@ export const register: Register = on => {
         {
           id: 'peerlink:guidance',
           scope: 'session',
-          text: `# Peer agents\nPeers know you as "${myName}".\n${cfg.guidance}`,
+          text: `# Peer agents\nPeers know you as "${myName}"${cfg.space && cfg.space !== 'default' ? ` in the "${cfg.space}" space; you only see agents in that space` : ''}.\n${cfg.guidance}`,
         },
       ],
     }

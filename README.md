@@ -26,6 +26,22 @@ Agents treat each other as teammates. Each one knows who else is live and what t
   - A resumed session summarizes its history as soon as it starts.
 - **Peer list.** A short list of live agents is added beside the prompt, but only when that list has changed since the agent last saw it.
 
+## Spaces
+
+Spaces keep groups of agents apart. An agent only sees and messages agents in its own space: the peer list, `list_peers` and `send_message` all stop at the space's edge, and the daemon enforces it. Agents with no space set are in `default`, so nothing changes until you set one.
+
+An agent's space comes from the first of these that applies:
+
+1. **An override for that agent.** Set it with `/peerlink space <name>`, or under Manage on the agent's card in the web UI. It lasts as long as the session's config entry.
+2. **The nearest `.peerlink` file** in the agent's folder or a folder above it, below your home folder:
+   ```
+   space: acme
+   ```
+   Commit it, and the space travels with the repo. `/peerlink space file <name>`, or "Space for this folder" in the web UI, writes it for you: it edits the `.peerlink` that already applies, or creates one at the repo root.
+3. **A folder rule**, in the Spaces page of the web UI or `space_rules` in the config. For example, `~/Repos/acme = acme` covers that folder and everything inside it. The most specific rule wins.
+
+Space names are lowercased. Linked daemons on other machines only connect agents whose spaces have the same name.
+
 ## What you see in the chat
 
 Every message between agents shows up in both chats.
@@ -49,13 +65,16 @@ In Claude Code:
 
 | Command | |
 | --- | --- |
-| `/peerlink web` | Open the web UI with a one-time sign-in link |
+| `/peerlink web` | Open the web UI with a one-time sign-in link. Its sidebar has Agents (grouped by space), Spaces, Messages, Settings and Controls |
 | `/peerlink status` | Daemon, this agent, its summary |
 | `/peerlink peers` | List live agents |
 | `/peerlink name <name>` | Rename this agent |
 | `/peerlink summary <text>` | Set what peers see for this agent |
 | `/peerlink wake on\|off\|default` | Whether a message starts a turn in this agent while it's idle |
 | `/peerlink mute <agent>`, `unmute <agent>` | Stop or resume deliveries to an agent |
+| `/peerlink space` | Show this agent's space and where it comes from |
+| `/peerlink space <name>` or `clear` | Override the space for this agent only |
+| `/peerlink space file <name>` or `clear` | Set the space in this project's `.peerlink` |
 | `/peerlink restart` | Restart the daemon. Agents reconnect, and queued messages are kept |
 | `/peerlink rotate-key` | Make a new key, which signs out every browser |
 
@@ -138,7 +157,8 @@ You can change these in the web UI, with `peerlink config <name> <value>`, or in
 | `auto_summary` | true | Keep summaries current with a cheap model call |
 | `summary_model` | haiku | Model used for summaries |
 | `guidance` | empty (built-in text) | Text added to every agent's system prompt |
-| `sessions` | `{}` | Per-agent `nickname`, `muted` and `auto_wake`, keyed by Claude Code session id |
+| `sessions` | `{}` | Per-agent `nickname`, `muted`, `auto_wake` and `space`, keyed by Claude Code session id |
+| `space_rules` | `[]` | Folder rules, such as `[{"path": "~/Repos/acme", "space": "acme"}]` |
 | `remotes`, `listen_host`, `token` | | Settings for linking daemons across machines |
 
 `PEERLINK_PORT` and `PEERLINK_HOME` override the port and the data directory.
