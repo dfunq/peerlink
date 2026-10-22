@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.6.0'
+const DAEMON_VERSION = '0.6.1'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -129,29 +129,40 @@ function isOlder(version: string, than: string) {
   return false
 }
 
-async function daemonVersion($: EngineInterface) {
+async function daemonHealth($: EngineInterface) {
   try {
     const health = await call($, 'GET', '/api/health')
-    return health.ok ? String(health.data.version ?? '0') : undefined
+    return health.ok ? { version: String(health.data.version ?? '0'), code: String(health.data.code ?? '') } : undefined
   } catch {
     return undefined
   }
 }
 
-// Start the daemon, or replace an older one. An older plugin still running in
-// another agent may restart its own daemon in the gap, so try a few times.
-async function ensureDaemon($: EngineInterface) {
+// The fingerprint of the daemon this plugin ships, from the daemon itself; '' when it can't say.
+async function shippedCode($: EngineInterface) {
+  const run = await $.process.run(['python3', `${$.plugin.root}/daemon/peerlinkd.py`, 'fingerprint'], { timeoutMs: 5000 })
+  return run.exitCode === 0 ? run.stdout.trim() : ''
+}
+
+// Start the daemon, or replace an older one. At a load or reload (`fresh`), a
+// daemon of the same version running other code is replaced too, so editing
+// the daemon and running /reload-plugins takes effect. A newer daemon is never
+// replaced. An older plugin still running in another agent may restart its own
+// daemon in the gap, so try a few times.
+async function ensureDaemon($: EngineInterface, fresh = false) {
+  const mine = fresh ? await shippedCode($) : ''
   for (let attempt = 0; attempt < 4; attempt++) {
-    const version = await daemonVersion($)
-    if (version !== undefined && !isOlder(version, DAEMON_VERSION)) return true
-    if (version !== undefined) {
+    const health = await daemonHealth($)
+    const stale = !!health && (isOlder(health.version, DAEMON_VERSION) || (health.version === DAEMON_VERSION && !!mine && health.code !== mine))
+    if (health && !stale) return true
+    if (health) {
       await call($, 'POST', '/api/shutdown', {}).catch(() => {})
       await $.clock.sleep(300)
     }
     await $.process.run(['python3', `${$.plugin.root}/daemon/peerlinkd.py`, 'start'], { timeoutMs: 15000 })
     key = ''
   }
-  return (await daemonVersion($)) !== undefined
+  return (await daemonHealth($)) !== undefined
 }
 
 async function git($: EngineInterface, cwd: string, args: string[]) {
@@ -679,7 +690,7 @@ export const register: Register = on => {
       isDeferred: false,
     })
     for (const { name, description, argumentHint } of COMMANDS) await $.command.register({ name, description, argumentHint })
-    if (await ensureDaemon($)) {
+    if (await ensureDaemon($, true)) {
       await announce($)
       startPolling($)
       showStatus($)
@@ -773,7 +784,10 @@ export const register: Register = on => {
     return text('Summary updated.')
   }).catch(daemonDown)
 
-  for (const c of COMMANDS) on('command.run', { command: c.name }, async ($, e) => ({ text: await runCommand($, c.args((e.args ?? '').trim())) }))
+  for (const c of COMMANDS)
+    on('command.run', { command: c.name }, async ($, e) => ({ text: await runCommand($, c.args((e.args ?? '').trim())) })).catch(() => ({
+      text: 'peerlink: the daemon did not answer that; try again shortly, or see ~/.peerlink/daemon.log.',
+    }))
 
   // A peer message that started a turn here: one row per message instead of the raw prompt (ctrl+o shows it whole).
   on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
