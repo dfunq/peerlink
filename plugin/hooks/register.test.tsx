@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.6.2', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.6.3', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (path === '/api/sessions') return ok({ id: body.id, name: body.name, config: { poll_interval_ms: 600000, ...config }, previous })
     if (path === '/api/peers') return ok({ peers })
     if (path === '/api/issues') return ok({ id: 'i1', logged: '/Users/x/.peerlink/issues.jsonl', sent_to: 'peerlink' })
@@ -32,7 +32,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
   return { posted, peers, summaries, state }
 }
 
-function engine(on: any, { turns = 0, readme = '', commits = '', fingerprint = '', transcripts = [] as { name: string; title: string; ageMs: number }[] } = {}) {
+function engine(on: any, { turns = 0, readme = '', claudeMd = '', commits = '', fingerprint = '', transcripts = [] as { name: string; title: string; ageMs: number }[] } = {}) {
   const clock = mock.clock(on, { now: 1_000_000 })
   const calls = { model: 0 }
   const writes: { path: string; text: string }[] = []
@@ -63,6 +63,7 @@ function engine(on: any, { turns = 0, readme = '', commits = '', fingerprint = '
   })
   on('fs.read', (_: any, e: any) => {
     if (readme && e.path.endsWith('/README.md')) return { value: readme }
+    if (claudeMd && e.path.endsWith('/CLAUDE.md')) return { value: claudeMd }
     throw new Error('ENOENT')
   })
   on('fs.list', (_: any, e: any) => {
@@ -399,5 +400,28 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.6.2 · daemon 0.6.2 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.6.3 · daemon 0.6.3 · web'))).toBe(true)
+})
+
+test('two sessions in a lead folder both sit with the parent; the team is listed once', async ($, on) => {
+  engine(on)
+  const daemon = fakeDaemon(on)
+  daemon.peers.splice(0, 1,
+    { id: 'p0', name: 'top', host: 'Mac', cwd: '/Users/x/r', space: 'top', parent: '' } as any,
+    { id: 'p1', name: 'pg', host: 'Mac', cwd: '/Users/x/r/pg', space: 'pg', parent: 'top' } as any,
+    { id: 'p2', name: 'pg-2', host: 'Mac', cwd: '/Users/x/r/pg', space: 'pg', parent: 'top' } as any,
+    { id: 'p3', name: 'client', host: 'Mac', cwd: '/Users/x/r/pg/client', space: 'pg', parent: '' } as any,
+  )
+  await $.session.start(START)
+  const { text } = (await $.command.run({ command: 'peerlink-spaces' })) as any
+  expect(text).toContain('top\n  top   ~/r\n  pg    ~/r/pg  leads pg\n  pg-2  ~/r/pg  leads pg\n    └ pg team\n        client  ~/r/pg/client')
+})
+
+test("a CLAUDE.md's stock first line is not taken as the project's description", async ($, on) => {
+  engine(on, { claudeMd: '# CLAUDE.md\n\nThis file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.\n\nA FastAPI service that renders customer sites.' })
+  const daemon = fakeDaemon(on, 0)
+  await $.session.start(START)
+  await settle()
+  expect(daemon.summaries().join('\n')).toContain('A FastAPI service that renders customer sites.')
+  expect(daemon.summaries().join('\n')).not.toContain('provides guidance')
 })

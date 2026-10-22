@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.6.2'
+const DAEMON_VERSION = '0.6.3'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -358,7 +358,8 @@ async function projectDescription($: EngineInterface, root: string) {
     const line = body
       .split('\n')
       .map(l => l.trim())
-      .find(l => l.length > 30 && !/^(#|<|!\[|\[!|```|\||-{3})/.test(l))
+      // `/init` starts every CLAUDE.md with the same sentence; it says nothing about the project.
+      .find(l => l.length > 30 && !/^(#|<|!\[|\[!|```|\||-{3})/.test(l) && !/^This file provides guidance to Claude Code/i.test(l))
     if (line) return line.replace(/[*_`]/g, '')
   }
   return ''
@@ -577,14 +578,16 @@ async function spaceTree($: EngineInterface) {
   const lines: string[] = []
   const tier = (space: string, pad: string) => {
     seen.add(space)
-    const own = (groups[space] ?? []).filter(p => p !== lead[space]).sort((a, b) => a.name.localeCompare(b.name))
-    const leads = (kids[space] ?? []).filter(c => c !== space).sort().map(c => lead[c])
+    // Every lead of a space sits with its parent (two sessions in a lead's folder are both leads).
+    const isLead = (p: any) => !!lead[space] && lead[space].parent !== space && p.parent && p.space === space
+    const own = (groups[space] ?? []).filter(p => !isLead(p)).sort((a, b) => a.name.localeCompare(b.name))
+    const leads = (kids[space] ?? []).filter(c => c !== space).sort().flatMap(c => (groups[c] ?? []).filter(p => p.parent && p.space === c))
     const all = [...own, ...leads]
     const width = Math.max(0, ...all.map(p => p.name.length))
     for (const p of all) {
       const tag = p.parent && p.space !== space ? `  leads ${p.space}` : ''
       lines.push(`${pad}${p.name.padEnd(width)}  ${p.cwd.replace(/^\/Users\/[^/]+/, '~')}${tag}${p.id === sessionId ? '  ← you' : ''}`)
-      if (tag && !seen.has(p.space)) {
+      if (tag && !seen.has(p.space) && p === leads.filter(l => l.space === p.space).at(-1)) {
         lines.push(`${pad}  └ ${p.space} team`)
         tier(p.space, `${pad}      `)
       }
