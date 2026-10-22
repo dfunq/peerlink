@@ -28,7 +28,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.6.12"
+VERSION = "0.6.13"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 with open(os.path.abspath(__file__), "rb") as _f:
     CODE = hashlib.sha256(_f.read()).hexdigest()[:16]
@@ -1529,7 +1529,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 </nav>
 <main><div id="stalebar" style="display:none" class="small"></div><div id="offline">Can't reach the peerlink daemon. It restarts when an agent next needs it; this page reconnects by itself.</div><div id="signedout">This page is signed out. Run <span class="mono">/peerlink web</span> in any agent to open it again.</div>
 
-<section id="agents"><h1>Agents</h1><p class="lead">Live Claude Code sessions as an org chart. Each box is a space; a lead (outlined) sits in its parent's box with its team beneath it. An agent only sees and messages agents in its own space, and a lead also its parent's. Click an agent to see and change its settings.</p><div class="orgwrap"><div id="peers"></div><div id="detail"></div></div></section>
+<section id="agents"><h1>Agents</h1><p class="lead">Live Claude Code sessions as an org chart. Each box is a space; a lead (outlined in orange) sits in its parent's box with its team beneath it. The percentage is how full each agent's context is. An agent only sees and messages agents in its own space, and a lead also its parent's. Click an agent to see and change its settings.</p><div class="orgwrap"><div id="peers"></div><div id="detail"></div></div></section>
 
 <section id="spaces"><h1>Spaces</h1>
 <p class="lead">Each agent's space comes from, in order: an override for that agent, the nearest <span class="mono">.peerlink</span> file in its folder or above, a folder rule below, or <b>default</b>. A <span class="mono">.peerlink</span> with <span class="mono">parent: &lt;space&gt;</span> nests its space inside that one: the agent in that file's folder leads it and also sits in the parent.</p>
@@ -1683,9 +1683,10 @@ async function refresh(force){
   const ctx=x=>x.context==null?'':`<span class="ctx${x.context>=80?' hi':''}" title="context window in use">${x.context}%</span>`;
   // Sessions open in the same folder show as one card; its panel lists the others.
   const twins=x=>p.peers.filter(y=>y.id!==x.id&&y.cwd===x.cwd&&y.space===x.space);
-  const node=x=>{const more=twins(x).length;return `<button class="node${x.parent?' is-lead':''}${x.id===sel?' sel':''}" data-sel="${esc(x.id)}">
-    <div class="nm"><span><span class="dot ${x.busy?'busy':''}"></span>${esc(x.name)}</span>${x.parent?`<span class="tag">leads ${esc(x.space)}</span>`:ctx(x)}</div>
-    <div class="dir">${esc(short(x.cwd))}</div><div class="sum">${esc(x.summary)||'no summary yet'}</div>${x.parent&&x.context!=null?`<div class="small mut">context ${ctx(x)}</div>`:''}${more?`<div class="small mut">+${more} more session${more>1?'s':''} here</div>`:''}${x.stale&&!x.remote?'<div class="stale">reload needed</div>':''}</button>`};
+  // A lead is told apart by its outline (and says which team on hover), so every card keeps its context in one place.
+  const node=x=>{const more=twins(x).length;return `<button class="node${x.parent?' is-lead':''}${x.id===sel?' sel':''}" data-sel="${esc(x.id)}"${x.parent?` title="Leads the ${esc(x.space)} team"`:''}>
+    <div class="nm"><span><span class="dot ${x.busy?'busy':''}"></span>${esc(x.name)}</span>${ctx(x)}</div>
+    <div class="dir">${esc(short(x.cwd))}</div><div class="sum">${esc(x.summary)||'no summary yet'}</div>${more?`<div class="small mut">+${more} more session${more>1?'s':''} here</div>`:''}${x.stale&&!x.remote?'<div class="stale">reload needed</div>':''}</button>`};
   // One card per folder: the busiest, else most recently active, session stands for the rest.
   const primary=list=>{const seen=new Set();return list.filter(x=>{const k=x.space+'\u0000'+x.cwd;if(seen.has(k))return false;seen.add(k);return true})};
   const rank=(a,b)=>(b.busy-a.busy)||(a.last_seen_s-b.last_seen_s);
