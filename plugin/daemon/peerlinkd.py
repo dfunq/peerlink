@@ -28,7 +28,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.6.5"
+VERSION = "0.6.6"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 with open(os.path.abspath(__file__), "rb") as _f:
     CODE = hashlib.sha256(_f.read()).hexdigest()[:16]
@@ -467,6 +467,9 @@ def public_peer(rec):
         "file_parent": read_space_file(where, "parent") if source == "file" else "",
         "reach": sorted(reach(rec)),
         "busy": rec.get("busy", False),
+        # The plugin version the agent runs ('' before 0.6.6): one behind the daemon needs /reload-plugins.
+        "plugin": rec.get("plugin", ""),
+        "stale": rec.get("plugin", "") != VERSION,
         "muted": session_cfg(rec["id"])["muted"],
         "last_seen_s": round(time.time() - rec["last_seen"], 1),
     }
@@ -949,7 +952,7 @@ class Handler(BaseHTTPRequestHandler):
                     # A folder keeps the name it was given: a new session there (a restart, a resume) is still "vault".
                     given = (config.get("folder_names") or {}).get(b.get("cwd") or "")
                     rec["name"] = unique_name(given or b["name"], sid)
-                for k in ("cwd", "repo", "branch", "summary", "model"):
+                for k in ("cwd", "repo", "branch", "summary", "model", "plugin"):
                     if b.get(k) is not None:
                         rec[k] = b[k]
                 rec["busy"] = bool(b.get("busy", False))
@@ -1222,7 +1225,8 @@ def cli_peers(args):
     for p in peers:
         state = "busy" if p["busy"] else "idle"
         flags = ", muted" if p.get("muted") else ""
-        print(f"{p['name']:<20} {state}{flags:<8} {p.get('space', DEFAULT_SPACE):<12} {p['cwd']}")
+        stale = f"  plugin {p.get('plugin') or 'old'}: run /reload-plugins" if p.get("stale") and not p.get("remote") else ""
+        print(f"{p['name']:<20} {state}{flags:<8} {p.get('space', DEFAULT_SPACE):<12} {p['cwd']}{stale}")
         if p.get("summary"):
             print(f"{'':<20} {p['summary']}")
 
@@ -1372,6 +1376,7 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)
 .node .nm{font-weight:600;display:flex;align-items:center;gap:4px;justify-content:space-between}
 .node .tag{font-size:11px;font-weight:500;color:var(--acc);white-space:nowrap}
 .node .dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--mut);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.node .stale{font-size:11px;color:var(--warn);margin-top:4px}
 .node .sum{font-size:12px;color:var(--mut);margin-top:4px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .sbox{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 12px;min-width:160px;max-width:260px;text-align:center}
 .sbox.led{border-color:var(--acc)}.sbox .small{margin-top:2px}
@@ -1383,6 +1388,7 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)
 .facts .k{color:var(--mut)}.panel form{margin-top:12px;border-top:1px solid var(--line);padding-top:12px;display:flex;flex-direction:column;gap:12px}
 .panel label{display:flex;flex-direction:column;gap:4px;font-size:13px;font-weight:500}.panel label .hint{font-weight:400;font-size:12px;color:var(--mut)}
 .panel label.check{flex-direction:row;align-items:center;gap:8px}.ok{color:var(--ok)}
+#stalebar .mono{white-space:nowrap}#stalebar{background:var(--card);border:1px solid var(--warn);border-radius:10px;padding:10px 14px;margin-bottom:14px}
 #offline{display:none;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin-bottom:14px;color:var(--mut)}
 #signedout{display:none;background:var(--card);border:1px solid var(--warn);border-radius:10px;padding:10px 14px;margin-bottom:14px}
 .msgbar{display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap}.msgbar select{width:auto}
@@ -1440,7 +1446,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <a href="#settings" data-nav="settings">Settings</a>
 <a href="#controls" data-nav="controls">Controls</a>
 </nav>
-<main><div id="offline">Can't reach the peerlink daemon. It restarts when an agent next needs it; this page reconnects by itself.</div><div id="signedout">This page is signed out. Run <span class="mono">/peerlink web</span> in any agent to open it again.</div>
+<main><div id="stalebar" style="display:none" class="small"></div><div id="offline">Can't reach the peerlink daemon. It restarts when an agent next needs it; this page reconnects by itself.</div><div id="signedout">This page is signed out. Run <span class="mono">/peerlink web</span> in any agent to open it again.</div>
 
 <section id="agents"><h1>Agents</h1><p class="lead">Live Claude Code sessions as an org chart. Each box is a space; a lead (outlined) sits in its parent's box with its team beneath it. An agent only sees and messages agents in its own space, and a lead also its parent's. Click an agent to see and change its settings.</p><div class="orgwrap"><div id="peers"></div><div id="detail"></div></div></section>
 
@@ -1523,7 +1529,8 @@ function agentPanel(x){const sc=cfg.sessions?.[x.id]||{};const fileSpace=x.space
    <div style="margin-top:8px">${esc(x.summary)||'<span class="mut">no summary yet</span>'}</div>
    <div class="facts"><span class="k">Status</span><span>${x.busy?'working':'idle'}${x.muted?' · muted':''}</span>
     <span class="k">Space</span><span><span class="pill">${esc(x.space||'default')}</span> <span class="mut">${esc(why)}</span></span>
-    <span class="k">Role</span><span>${role}</span></div>
+    <span class="k">Role</span><span>${role}</span>
+    <span class="k">Plugin</span><span>${esc(x.plugin||'older than 0.6.6')}${x.stale&&!x.remote?' · <span style="color:var(--warn)">run /reload-plugins in this agent</span>':''}</span></div>
    ${x.remote?'<div class="small mut">This agent runs on another machine; change it there.</div>':`<form id="agentform" data-id="${esc(x.id)}" data-nick="${esc(sc.nickname||'')}" data-spacefile="${esc(fileSpace)}" data-parent="${esc(x.file_parent||'')}" data-override="${esc(sc.space||'')}" data-wake="${wake}" data-muted="${x.muted?'1':''}">
     <label>Name<input name="nickname" type="text" value="${esc(sc.nickname||'')}" placeholder="${esc(x.name)}"><span class="hint">What peers call this agent. It stays with this folder.</span></label>
     <label>Space for this folder<input name="spacefile" type="text" value="${esc(fileSpace)}" placeholder="none"><span class="hint">Saved in this repo's .peerlink. Every agent in the folder joins it.</span></label>
@@ -1583,7 +1590,7 @@ async function refresh(force){
   const short=d=>{const t=tilde(d).split('/');return t.length>3?'…/'+t.slice(-2).join('/'):t.join('/')};
   const node=x=>`<button class="node${x.parent?' is-lead':''}${x.id===sel?' sel':''}" data-sel="${esc(x.id)}">
     <div class="nm"><span><span class="dot ${x.busy?'busy':''}"></span>${esc(x.name)}</span>${x.parent?`<span class="tag">leads ${esc(x.space)}</span>`:''}</div>
-    <div class="dir">${esc(short(x.cwd))}</div><div class="sum">${esc(x.summary)||'no summary yet'}</div></button>`;
+    <div class="dir">${esc(short(x.cwd))}</div><div class="sum">${esc(x.summary)||'no summary yet'}</div>${x.stale&&!x.remote?'<div class="stale">reload needed</div>':''}</button>`;
   const unit=(n,seen)=>{if(seen.has(n))return '';seen.add(n);
     const list=members(n),branches=list.some(x=>x.parent&&x.space!==n);
     const count=list.reduce((t,x)=>t+(x.parent&&x.space!==n?leads[x.space].length:1),0);
@@ -1604,6 +1611,10 @@ async function refresh(force){
   const all=(fn)=>{const seen=new Set();let out=roots.map(n=>fn(n,seen)).join('');for(const n of Object.keys(groups).sort())if(!seen.has(n))out+=fn(n,seen);return out};
   $('#peers').innerHTML=p.peers.length?all((n,seen)=>{const u=unit(n,seen);return u?`<div class="chart">${u}</div>`:''})
     :'<div class="empty">No live agents. Start Claude Code with the peerlink plugin.</div>';
+  // Agents still on older plugin code: they keep working, but get fixes only after /reload-plugins.
+  const behind=p.peers.filter(x=>x.stale&&!x.remote);
+  $('#stalebar').style.display=behind.length?'block':'none';
+  $('#stalebar').innerHTML=behind.length?`<b>${behind.length} agent${behind.length>1?'s':''} on an older peerlink plugin</b> (${behind.map(x=>esc(x.name)).join(', ')}). Update peerlink from the marketplace if needed, then run <span class="mono">/reload-plugins</span> in each.`:'';
   const picked=p.peers.find(x=>x.id===sel);
   const panel=picked?agentPanel(picked):'';
   // Never redraw the panel under someone editing it.
