@@ -28,7 +28,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.6.7"
+VERSION = "0.6.8"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 with open(os.path.abspath(__file__), "rb") as _f:
     CODE = hashlib.sha256(_f.read()).hexdigest()[:16]
@@ -97,6 +97,7 @@ DEFAULT_CONFIG = {
     "issue_agent": "peerlink",
     "roster_in_prompt": True,
     "auto_summary": True,
+    "auto_reload": True,
     "summary_model": "haiku",
     "sessions": {},
     "space_rules": [],
@@ -292,6 +293,7 @@ def client_config(sid):
         "muted": s["muted"],
         "roster_in_prompt": config["roster_in_prompt"],
         "auto_summary": config["auto_summary"],
+        "auto_reload": config.get("auto_reload", True),
         "summary_model": config["summary_model"],
     }
 
