@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.6.11', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.6.12', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (path === '/api/sessions') return ok({ id: body.id, name: body.name, config: { poll_interval_ms: 600000, ...config }, previous })
     if (path === '/api/peers') return ok({ peers })
     if (path.endsWith('/threads')) return ok(state.threads)
@@ -49,9 +49,14 @@ function engine(on: any, { turns = 0, readme = '', claudeMd = '', installed = ''
   on('session.root', () => ({ value: '/Users/x/r/web' }))
   on('session.repo', () => ({ value: { root: '/Users/x/r/web', remote: null, internal: false, name: null } }))
   on('session.model', () => ({ value: 'opus' }))
+  on('session.usage', () => ({ value: { context: { window: 200000, tokens: 170000, percent: 85 } } }))
   on('session.turns', () => ({ value: turns }))
   on('session.messages', () => ({ value: [{ role: 'user', text: 'build the invoice page', toolUses: [] }] }))
-  on('ui.status', () => ({ value: undefined }))
+  const pinned: unknown[] = []
+  on('ui.status', (_: any, e: any) => {
+    pinned.push(e)
+    return { value: undefined }
+  })
   on('process.run', (_: any, e: any) => {
     const [cmd, ...args] = e.argv
     let stdout = ''
@@ -84,7 +89,7 @@ function engine(on: any, { turns = 0, readme = '', claudeMd = '', installed = ''
       calls.model++
       return { value: { isAnswered: true, text, usage: {} } }
     })
-  return { clock, calls, answer, writes, ids }
+  return { clock, calls, answer, writes, ids, pinned }
 }
 
 test('the model is told about peers beside the prompt, once per change', async ($, on) => {
@@ -405,7 +410,7 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.6.11 · daemon 0.6.11 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.6.12 · daemon 0.6.12 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the team is listed once', async ($, on) => {
@@ -438,7 +443,7 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.6.11')
+  expect(reg.plugin).toBe('0.6.12')
 })
 
 test('plain /peerlink shows status, not the web UI', async ($, on) => {
@@ -480,7 +485,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.7.0', true], ['0.6.11', false]] as const)
+for (const [installed, reloads] of [['0.7.0', true], ['0.6.12', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     fakeDaemon(on)
@@ -494,3 +499,29 @@ for (const [installed, reloads] of [['0.7.0', true], ['0.6.11', false]] as const
     for (let i = 0; i < 10; i++) await settle()
     expect(ran.length).toBe(reloads ? 1 : 0)
   })
+
+test('each heartbeat says how full the context is, and a nearly full peer is flagged', async ($, on) => {
+  const { clock } = engine(on)
+  const daemon = fakeDaemon(on)
+  Object.assign(daemon.peers[0], { context: 91 })
+  await $.session.start(START)
+  await clock.advance(600000)
+  for (let i = 0; i < 10; i++) await settle()
+  expect(daemon.posted.find(p => p.path.endsWith('/heartbeat') && 'busy' in p.body)!.body.context).toBe(85)
+  const first: any = await $.prompt.submit({ text: 'go' })
+  expect(first.context?.join('\n')).toContain('billing-api (context 91% full): ~/r/billing')
+})
+
+test('in the terminal, the peerlink line ends the hint row as a link to the web UI, with space and parent', async ($, on) => {
+  const { pinned } = engine(on)
+  fakeDaemon(on, 1, null, [], { space: 'storefront', space_source: 'file', space_from: '/Users/x/r/web/.peerlink', parent: 'acme', space_parent: 'acme' })
+  await $.session.start(START)
+  await settle()
+  const hint = await $.ui.mount({ plugin: 'peerlink', surface: 'terminal', component: 'PromptHint', requestId: 'h1', props: { isDraft: false, isWorking: false, hint: '? for shortcuts' } } as any)
+  const link: any = await hint.find({ type: 'Link' })
+  expect(link?.props?.href).toBe('http://127.0.0.1:7899/')
+  expect(JSON.stringify(link)).toContain('⇄ peerlink · web · leads storefront (in acme)')
+  expect(await hint.find({ type: 'Text', text: /\? for shortcuts/ })).toBeDefined()
+  await hint.unmount()
+  expect(pinned.filter((p: any) => p?.text)).toEqual([])
+})
