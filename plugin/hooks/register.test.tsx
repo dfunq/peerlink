@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.6.3', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.6.4', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (path === '/api/sessions') return ok({ id: body.id, name: body.name, config: { poll_interval_ms: 600000, ...config }, previous })
     if (path === '/api/peers') return ok({ peers })
     if (path === '/api/issues') return ok({ id: 'i1', logged: '/Users/x/.peerlink/issues.jsonl', sent_to: 'peerlink' })
@@ -44,6 +44,7 @@ function engine(on: any, { turns = 0, readme = '', claudeMd = '', commits = '', 
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: 'me-session' }))
   on('session.cwd', () => ({ value: '/Users/x/r/web' }))
+  on('session.root', () => ({ value: '/Users/x/r/web' }))
   on('session.repo', () => ({ value: { root: '/Users/x/r/web', remote: null, internal: false, name: null } }))
   on('session.model', () => ({ value: 'opus' }))
   on('session.turns', () => ({ value: turns }))
@@ -400,7 +401,7 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.6.3 · daemon 0.6.3 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.6.4 · daemon 0.6.4 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the team is listed once', async ($, on) => {
@@ -424,4 +425,13 @@ test("a CLAUDE.md's stock first line is not taken as the project's description",
   await settle()
   expect(daemon.summaries().join('\n')).toContain('A FastAPI service that renders customer sites.')
   expect(daemon.summaries().join('\n')).not.toContain('provides guidance')
+})
+
+test('an agent is known by its project root, not the folder its shell moved to', async ($, on) => {
+  engine(on)
+  const daemon = fakeDaemon(on)
+  await $.session.start(START)
+  const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
+  expect(reg.cwd).toBe('/Users/x/r/web')
+  expect(reg.name).toBe('web')
 })

@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.6.3'
+const DAEMON_VERSION = '0.6.4'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -187,7 +187,8 @@ async function git($: EngineInterface, cwd: string, args: string[]) {
 }
 
 async function announce($: EngineInterface) {
-  const cwd = await $.session.cwd()
+  // The project root, not the shell's directory: an agent that cds into a subfolder is still the same agent.
+  const cwd = await $.session.root()
   const repo = await $.session.repo()
   const res = await call($, 'POST', '/api/sessions', {
     id: sessionId,
@@ -507,11 +508,9 @@ function hierarchyGuidance() {
   return lines.length ? `\n${lines.join('\n')}` : ''
 }
 
+// Merged by the daemon, so two agents changing settings at once can't undo each other.
 async function setAgentConfig($: EngineInterface, id: string, patch: Record<string, unknown>) {
-  const current = await call($, 'GET', '/api/config')
-  const sessions = { ...(current.data.sessions ?? {}) }
-  sessions[id] = { ...(sessions[id] ?? {}), ...patch }
-  return call($, 'PUT', '/api/config', { sessions })
+  return call($, 'POST', `/api/sessions/${encodeURIComponent(id)}/config`, patch)
 }
 
 async function findAgent($: EngineInterface, name: string) {
@@ -730,12 +729,12 @@ export const register: Register = on => {
       inputSchema: {
         type: 'object',
         properties: {
-          to: { type: 'string', description: 'Peer agent name or id' },
+          to: { type: 'string', description: 'Peer agent name or id; leave it out when replying, the reply goes back to the sender' },
           text: { type: 'string', description: 'The message: what you need and why, briefly' },
           expects_reply: { type: 'boolean', description: 'True if you need an answer' },
-          reply_to: { type: 'string', description: 'Id of the peer message you are answering' },
+          reply_to: { type: 'string', description: 'Id of the peer message you are answering; the reply goes to its sender' },
         },
-        required: ['to', 'text'],
+        required: ['text'],
       },
       isDeferred: false,
     })
