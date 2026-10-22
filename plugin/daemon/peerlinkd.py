@@ -28,7 +28,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 HOME = os.environ.get("PEERLINK_HOME", os.path.expanduser("~/.peerlink"))
 CONFIG_PATH = os.path.join(HOME, "config.json")
 PID_PATH = os.path.join(HOME, "daemon.pid")
@@ -243,10 +243,14 @@ def client_config(sid):
     s = session_cfg(sid)
     rec = sessions.get(sid)
     space, source, where = space_of(rec) if rec else (DEFAULT_SPACE, "default", "")
+    lead, children = hierarchy(rec) if rec else ("", [])
     return {
         "space": space,
         "space_source": source,
         "space_from": where,
+        "parent": parent_of(rec) if rec else "",
+        "lead": lead,
+        "children": children,
         "poll_interval_ms": config["poll_interval_ms"],
         "auto_wake_idle": config["auto_wake_idle"] if s["auto_wake"] is None else s["auto_wake"],
         "inject_while_busy": config["inject_while_busy"],
@@ -274,12 +278,12 @@ def find_space_file(cwd):
     return None
 
 
-def read_space_file(path):
+def read_space_file(path, key="space"):
     try:
         with open(path) as f:
             for line in f:
                 k, sep, v = line.partition(":") if ":" in line else line.partition("=")
-                if sep and k.strip().lower() == "space":
+                if sep and k.strip().lower() == key:
                     return clean_space(v)
     except OSError:
         pass
@@ -315,8 +319,42 @@ def space_of(rec):
         found = (read_space_file(path), "file", path)
     elif rule:
         found = (rule[1], "rule", rule[0])
-    rec["_space"] = (now, found)
+    # The agent in the folder of a .peerlink that names a `parent:` leads that space and also sits in the parent.
+    parent = ""
+    if found[1] == "file" and os.path.dirname(found[2]) == os.path.abspath(cwd or "/"):
+        parent = read_space_file(found[2], "parent")
+    rec["_space"] = (now, found, "" if parent == found[0] else parent)
     return found
+
+
+def parent_of(rec):
+    """The parent space this agent speaks for, if it leads its own space; else ''."""
+    space_of(rec)
+    return rec["_space"][2]
+
+
+def reach(rec):
+    """The spaces this agent sees and messages: its own, and the parent too when it leads its space."""
+    parent = parent_of(rec)
+    return {space_of(rec)[0], parent} - {""}
+
+
+def peer_reach(p):
+    return set(p.get("reach") or [p.get("space", DEFAULT_SPACE)])
+
+
+def hierarchy(rec):
+    """Who leads this agent's space, and the live leads of spaces inside it."""
+    space = space_of(rec)[0]
+    lead, children = "", []
+    for r in sessions.values():
+        if r["id"] == rec["id"] or not is_live(r) or not parent_of(r):
+            continue
+        if space_of(r)[0] == space:
+            lead = display_name(r)
+        elif parent_of(r) == space:
+            children.append({"name": display_name(r), "space": space_of(r)[0]})
+    return lead, children
 
 
 def forget_spaces():
@@ -325,10 +363,12 @@ def forget_spaces():
             rec.pop("_space", None)
 
 
-def write_space_file(rec, space):
-    """Set or clear `space:` in the .peerlink that governs this agent's folder (the repo root for a new one)."""
+def write_space_file(rec, space, key="space"):
+    """Set or clear `space:` (or `parent:`) in the .peerlink that governs this agent's folder (the repo root for a new one)."""
     cwd = rec.get("cwd", "")
     path = find_space_file(cwd)
+    if not path and key != "space":
+        raise ValueError("this folder has no .peerlink space to give a parent; set its space first")
     if not path:
         try:
             root = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"], capture_output=True, text=True, timeout=3).stdout.strip()
@@ -341,11 +381,11 @@ def write_space_file(rec, space):
     lines = []
     if os.path.exists(path):
         with open(path) as f:
-            lines = [l for l in f.read().splitlines() if not re.match(r"\s*space\s*[:=]", l, re.I)]
+            lines = [l for l in f.read().splitlines() if not re.match(rf"\s*{key}\s*[:=]", l, re.I)]
     elif space:
         lines = ["# peerlink: agents in this folder only see and message agents in the same space"]
     if space:
-        lines.append(f"space: {space}")
+        lines.append(f"{key}: {space}")
     if any(l.strip() and not l.strip().startswith("#") for l in lines):
         with open(path, "w") as f:
             f.write("\n".join(lines) + "\n")
@@ -385,6 +425,8 @@ def public_peer(rec):
         "space": space,
         "space_source": source,
         "space_from": where,
+        "parent": parent_of(rec),
+        "reach": sorted(reach(rec)),
         "busy": rec.get("busy", False),
         "muted": session_cfg(rec["id"])["muted"],
         "last_seen_s": round(time.time() - rec["last_seen"], 1),
@@ -420,11 +462,11 @@ def remote_peers():
     return found
 
 
-def resolve(to, space=None):
-    """Find a live local agent by id, id prefix, nickname or name; only in `space` when given."""
+def resolve(to, spaces=None):
+    """Find a live local agent by id, id prefix, nickname or name; only one that shares one of `spaces` when given."""
     to = to.strip().lower()
     with lock:
-        live = [r for r in sessions.values() if is_live(r) and (space is None or space_of(r)[0] == space)]
+        live = [r for r in sessions.values() if is_live(r) and (spaces is None or reach(r) & spaces)]
         for match in (
             lambda r: r["id"].lower() == to,
             lambda r: display_name(r).lower() == to,
@@ -515,15 +557,18 @@ def send(body):
                 return 429, {"error": f"rate limit: {config['rate_limit_per_min']} messages/min"}
             sent_times[sender] = recent
 
-        # Agents only reach their own space. A remote daemon says which space its sender is in.
-        space = space_of(sender_rec)[0] if sender_rec else (clean_space(body.get("space")) or None)
-        target, err = resolve(to, space)
+        # Agents only reach their own space, and a lead its parent too. A remote daemon says which spaces its sender reaches.
+        if sender_rec:
+            spaces = reach(sender_rec)
+        else:
+            spaces = {clean_space(s) for s in body.get("spaces") or [body.get("space")]} - {""} or None
+        target, err = resolve(to, spaces)
         if err:
             return 409, {"error": err}
 
     if target is None:
         if "@" in to or config.get("remotes"):
-            return forward(body, hops, space)
+            return forward(body, hops, spaces)
         return 404, {"error": f"no live peer '{to}'; call list_peers"}
 
     with lock:
@@ -555,13 +600,14 @@ def send(body):
     return 200, {"id": msg["id"], "to": msg["to_name"], "status": "queued"}
 
 
-def forward(body, hops, space):
+def forward(body, hops, spaces):
     to = body["to"]
     name, _, host = to.partition("@")
     for p in remote_peers():
         if (host and p["host"].lower() != host.lower()):
             continue
-        if space is not None and p.get("space", DEFAULT_SPACE) != space:
+        shared = peer_reach(p) & spaces if spaces is not None else None
+        if spaces is not None and not shared:
             continue
         if name.lower() in (p["id"].lower(), p["name"].lower()) or p["id"].lower().startswith(name.lower()):
             sender = sessions.get(body.get("from", ""))
@@ -573,7 +619,8 @@ def forward(body, hops, space):
                 "from": f"{body.get('from', '')}@{HOSTNAME}",
                 "from_name": f"{display_name(sender) if sender else body.get('from')}@{HOSTNAME}",
                 "from_host": HOSTNAME,
-                "space": space,
+                "space": min(shared) if shared else None,  # what daemons before 0.6 read
+                "spaces": sorted(spaces) if spaces is not None else None,
             }
             try:
                 res = remote_call(p["remote"], "/api/messages", fwd, timeout=5)
@@ -752,12 +799,13 @@ class Handler(BaseHTTPRequestHandler):
             peers = local_peers()
             if "local" not in q:
                 peers += remote_peers()
-            # An agent asking (exclude=its id) only sees its own space.
+            # An agent asking (exclude=its id) only sees the spaces it reaches.
             exclude = q.get("exclude", [""])[0]
             with lock:
                 me = sessions.get(exclude)
                 space = space_of(me)[0] if me else None
-            peers = [p for p in peers if p["id"] != exclude and (space is None or p.get("space", DEFAULT_SPACE) == space)]
+                mine = reach(me) if me else None
+            peers = [p for p in peers if p["id"] != exclude and (mine is None or peer_reach(p) & mine)]
             return self.reply(200, {"host": HOSTNAME, "space": space, "peers": peers})
 
         if rest == ["sessions"] and method == "POST":
@@ -797,7 +845,9 @@ class Handler(BaseHTTPRequestHandler):
                         remember_dir(rec)
                 cfg = client_config(sid)
             inbox = [] if cfg["muted"] else take_inbox(sid)
-            others = sum(1 for p in local_peers() if p["id"] != sid and p["space"] == cfg["space"]) + len(config.get("remotes", []))
+            with lock:
+                mine = reach(rec)
+            others = sum(1 for p in local_peers() if p["id"] != sid and peer_reach(p) & mine) + len(config.get("remotes", []))
             return self.reply(200, {"name": display_name(rec), "config": cfg, "inbox": inbox, "peer_count": others})
 
         if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "space-file" and method == "POST":
@@ -805,8 +855,10 @@ class Handler(BaseHTTPRequestHandler):
                 rec = sessions.get(rest[1])
             if rec is None:
                 return self.reply(404, {"error": "unknown agent"})
+            b = self.body()
+            key = "parent" if "parent" in b else "space"
             try:
-                path = write_space_file(rec, clean_space(self.body().get("space")))
+                path = write_space_file(rec, clean_space(b.get(key)), key)
             except (OSError, ValueError) as err:
                 return self.reply(400, {"error": str(err)})
             log("space file", path)
@@ -1126,6 +1178,7 @@ main{flex:1;min-width:0;max-width:1100px;padding:22px 24px 60px}
 section{display:none}section.on{display:block}
 h1{font-size:20px;margin:0 0 4px}.lead{color:var(--mut);margin:0 0 18px}
 h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:22px 0 10px}
+.sub{margin-left:12px;padding-left:16px;border-left:2px solid var(--line)}.sub h2::before{content:"↳ ";color:var(--acc)}
 .mut{color:var(--mut)}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(300px,100%),1fr));gap:12px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;overflow-wrap:anywhere;min-width:0}
@@ -1164,8 +1217,8 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <section id="agents"><h1>Agents</h1><p class="lead">Live Claude Code sessions, grouped by space. An agent only sees and messages agents in its own space.</p><div id="peers"></div></section>
 
 <section id="spaces"><h1>Spaces</h1>
-<p class="lead">Each agent's space comes from, in order: an override for that agent, the nearest <span class="mono">.peerlink</span> file in its folder or above, a folder rule below, or <b>default</b>.</p>
-<div id="spacelist" class="grid"></div>
+<p class="lead">Each agent's space comes from, in order: an override for that agent, the nearest <span class="mono">.peerlink</span> file in its folder or above, a folder rule below, or <b>default</b>. A <span class="mono">.peerlink</span> with <span class="mono">parent: &lt;space&gt;</span> nests its space inside that one: the agent in that file's folder leads it and also sits in the parent.</p>
+<div id="spacelist" style="display:flex;flex-direction:column;gap:10px"></div>
 <h2>Folder rules</h2>
 <form class="card" id="rules">
 <label>One per line: <span class="mono">folder = space</span>. A rule covers the folder and everything inside it; the most specific rule wins.</label>
@@ -1236,7 +1289,7 @@ function agentCard(x){const sc=cfg.sessions?.[x.id]||{};const fileSpace=x.space_
    <span class="mut small">${x.busy?'working':'idle'} · ${x.last_seen_s}s</span></div>
    <div class="mono mut" style="margin-top:4px">${esc(tilde(x.cwd))}${x.branch?' · '+esc(x.branch):''}</div>
    <div style="margin-top:6px">${esc(x.summary)||'<span class="mut">no summary yet</span>'}</div>
-   <div class="small mut" style="margin-top:6px"><span class="pill">${esc(x.space||'default')}</span> ${esc(source(x))}</div>
+   <div class="small mut" style="margin-top:6px"><span class="pill">${esc(x.space||'default')}</span> ${esc(source(x))}${x.parent?` · leads it inside <span class="pill">${esc(x.parent)}</span>`:''}</div>
    ${x.remote?'':`<details><summary>Manage</summary>
    <div class="row" style="align-items:end"><div><label>Nickname</label><input type="text" value="${esc(sc.nickname||'')}" data-nick="${esc(x.id)}"></div>
    <div style="flex:0 0 auto">${wakeSel(x.id)} <button class="ghost" data-mute="${esc(x.id)}" data-muted="${x.muted}">${x.muted?'Unmute':'Mute'}</button></div></div>
@@ -1252,12 +1305,25 @@ async function refresh(){
   $('#keypath').textContent=st.home+'/key';
   const groups={};for(const x of p.peers)(groups[x.space||'default']??=[]).push(x);
   const names=Object.keys(groups).sort((a,b)=>a==='default'?1:b==='default'?-1:a.localeCompare(b));
+  // A live lead nests its space under its parent; a parent with no live agents still shows as a heading.
+  const inside={},kids={};for(const x of p.peers)if(x.parent&&!inside[x.space]){inside[x.space]={parent:x.parent,lead:x.name};(kids[x.parent]??=[]).push(x.space)}
+  for(const n of Object.keys(kids))if(!groups[n])groups[n]=[];
+  const roots=Object.keys(groups).filter(n=>!inside[n]||!groups[inside[n].parent]||n===inside[n].parent).sort((a,b)=>a==='default'?1:b==='default'?-1:a.localeCompare(b));
+  const tree=(n,seen=new Set())=>{if(seen.has(n))return '';seen.add(n);
+    const lead=inside[n]?` <span style="text-transform:none;letter-spacing:0">· led by ${esc(inside[n].lead)}</span>`:'';
+    return `<h2>${esc(n)} · ${groups[n].length}${lead}</h2>${groups[n].length?`<div class="grid">${groups[n].map(agentCard).join('')}</div>`:''}`
+      +(kids[n]||[]).sort().map(c=>`<div class="sub">${tree(c,seen)}</div>`).join('')};
+  const spaceTree=(n,seen=new Set())=>{if(seen.has(n))return '';seen.add(n);
+    return `<div class="card"><div class="name">${esc(n)}${inside[n]?` <span class="mut small">led by ${esc(inside[n].lead)}</span>`:''}</div>
+    <div class="small mut" style="margin-top:4px">${groups[n].map(x=>esc(x.name)).join(', ')||'no live agents'}</div></div>`
+      +(kids[n]||[]).sort().map(c=>`<div class="sub" style="margin-top:8px">${spaceTree(c,seen)}</div>`).join('')};
   $('#n-agents').textContent=p.peers.length||'';$('#n-spaces').textContent=names.length||'';$('#n-msgs').textContent=m.messages.length||'';
-  $('#peers').innerHTML=p.peers.length?names.map(n=>`<h2>${esc(n)} · ${groups[n].length}</h2><div class="grid">${groups[n].map(agentCard).join('')}</div>`).join('')
+  // Spaces caught in a parent loop have no root; they are shown at the top level after the rest.
+  const all=(fn)=>{const seen=new Set();let out=roots.map(n=>fn(n,seen)).join('');for(const n of Object.keys(groups).sort())if(!seen.has(n))out+=fn(n,seen);return out};
+  $('#peers').innerHTML=p.peers.length?all(tree)
     :'<div class="empty">No live agents. Start Claude Code with the peerlink plugin.</div>';
   for(const id of open){const d=document.querySelector(`[data-nick="${CSS.escape(id)}"]`)?.closest('details');if(d)d.open=true}
-  $('#spacelist').innerHTML=names.map(n=>`<div class="card"><div class="name">${esc(n)}</div>
-    <div class="small mut" style="margin-top:4px">${groups[n].map(x=>esc(x.name)).join(', ')}</div></div>`).join('')||'<div class="empty">No live agents.</div>';
+  $('#spacelist').innerHTML=all((n,seen)=>`<div>${spaceTree(n,seen)}</div>`).replaceAll('<div></div>','')||'<div class="empty">No live agents.</div>';
   $('#msgs').innerHTML=m.messages.slice().reverse().map(x=>`<tr><td class="small mut">${new Date(x.ts*1000).toLocaleTimeString()}</td>
    <td><b>${esc(x.from_name)}</b> → <b>${esc(x.to_name)}</b>${x.reply_to?`<div class="small mut">re ${esc(x.reply_to)}</div>`:''}</td>
    <td><div class="msgtext">${esc(x.text)}</div></td><td class="small">${esc(x.status)} <span class="mut">${esc(x.id)}</span></td></tr>`).join('')||'<tr><td colspan="4" class="empty">No messages yet.</td></tr>';
