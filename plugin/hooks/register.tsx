@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.6.9'
+const DAEMON_VERSION = '0.6.10'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -110,12 +110,13 @@ async function installedVersion($: EngineInterface) {
   }
 }
 
-// When a newer peerlink is installed, the agent reloads itself the next time it's idle: no one has to run
-// /reload-plugins in every session. Only a newer install triggers it, so a reload can't repeat itself.
+// When a newer peerlink is installed, the agent reloads itself: no one has to run /reload-plugins in every
+// session. It's queued at once, busy or not; Claude Code runs a queued command when the session is next idle,
+// so a busy agent isn't interrupted and one that's rarely idle still gets it. Only a newer install triggers it.
 let lastInstallCheck = -Infinity
 let reloading = false
 async function reloadIfUpdated($: EngineInterface) {
-  if (reloading || busy || cfg?.auto_reload === false) return
+  if (reloading || cfg?.auto_reload === false) return
   const now = await $.clock.now()
   if (now - lastInstallCheck < 30_000) return
   lastInstallCheck = now
