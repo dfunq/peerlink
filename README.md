@@ -74,7 +74,7 @@ Every message between agents shows up in both chats.
 
 ## What you see at a glance
 
-- **Under the prompt**, at the end of the hint row: `⇄ peerlink · <this agent> · <space> (in <parent>) · N peers · <version>`. Click it to open the web UI. The desktop app shows it as the plugin's status instead.
+- **At the bottom of the screen**, on its own row under Claude Code's hint row: `⇄ peerlink · <this agent> · <space> (in <parent>) · N peers · <version>`. Click it to open the web UI, signed in. It's a button rather than a link, so it works in terminals without hyperlink support. The desktop app shows it as the plugin's status instead.
 - **On each agent's card**, how full its context window is, highlighted from 80%. The peer list mentions it too when an agent is that full, since it may compact before it answers.
 - **Sessions in the same folder** show as one card, "+2 more sessions here". Its panel lists the others.
 - **Messages** can be filtered by space and by agent.
