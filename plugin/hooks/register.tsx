@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.6.7'
+const DAEMON_VERSION = '0.6.8'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -37,6 +37,7 @@ type ClientConfig = {
   muted: boolean
   roster_in_prompt: boolean
   auto_summary: boolean
+  auto_reload?: boolean
   summary_model: string
 }
 
@@ -54,6 +55,7 @@ const HELP = `peerlink commands:
   /peerlink [status]       daemon, this agent, its summary
   /peerlink web            open the web UI (one-time sign-in link)
   /peerlink issues         the last problems agents reported with peerlink
+  /peerlink update         install the latest peerlink; every agent reloads itself when idle
   /peerlink restart        restart the daemon
   /peerlink rotate-key     new key; signs out every browser
 
@@ -94,6 +96,38 @@ let key = ''
 async function peerlinkHome($: EngineInterface) {
   if (!home) home = (await $.env.get('PEERLINK_HOME')) ?? `${(await $.env.get('HOME')) ?? ''}/.peerlink`
   return home
+}
+
+// The peerlink version Claude Code has installed for this plugin, from its install record; '' when unknown
+// (a --plugin-dir checkout has none).
+async function installedVersion($: EngineInterface) {
+  try {
+    const record = JSON.parse(String(await $.fs.read(`${(await $.env.get('HOME')) ?? ''}/.claude/plugins/installed_plugins.json`)))
+    const entry = Object.entries(record.plugins ?? record).find(([k]) => k.startsWith('peerlink@'))?.[1] as any
+    return String((Array.isArray(entry) ? entry[0] : entry)?.version ?? '')
+  } catch {
+    return ''
+  }
+}
+
+// When a newer peerlink is installed, the agent reloads itself the next time it's idle: no one has to run
+// /reload-plugins in every session. Only a newer install triggers it, so a reload can't repeat itself.
+let lastInstallCheck = -Infinity
+let reloading = false
+async function reloadIfUpdated($: EngineInterface) {
+  if (reloading || busy || cfg?.auto_reload === false) return
+  const now = await $.clock.now()
+  if (now - lastInstallCheck < 30_000) return
+  lastInstallCheck = now
+  const installed = await installedVersion($)
+  if (!installed || !isOlder(DAEMON_VERSION, installed)) return
+  reloading = true
+  $.ui.toast(`peerlink: updating to ${installed}`)
+  $.ui.log(`peerlink: ${installed} is installed; reloading plugins to use it`)
+  await $.command.run({ command: 'reload-plugins' }).catch(() => {
+    reloading = false
+    $.ui.log(`peerlink: ${installed} is installed; run /reload-plugins to use it`)
+  })
 }
 
 async function loadKey($: EngineInterface) {
@@ -326,6 +360,7 @@ async function poll($: EngineInterface) {
   if (!hadPeers && peerCount > 0 && !hasSummarizedTalk && !busy) void summarize($)
   pending.push(...(res.data.inbox as PeerMessage[]))
   if (cfg && before !== cfg.poll_interval_ms) startPolling($)
+  void reloadIfUpdated($)
   showStatus($)
   await deliver($)
 }
@@ -537,7 +572,7 @@ const COMMANDS: { name: string; description: string; argumentHint: string; args:
   {
     name: 'peerlink',
     description: 'peerlink: status, web UI, reported issues, restart, rotate-key (help lists every command)',
-    argumentHint: '[status | web | issues | restart | rotate-key | help]',
+    argumentHint: '[status | web | update | issues | restart | rotate-key | help]',
     args: a => a || 'status',
   },
   {
@@ -663,6 +698,22 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
     case 'status': {
       const st = (await call($, 'GET', '/api/status')).data
       return `daemon ${st.version} (pid ${st.pid}) · ${st.sessions} live agents · ${st.queued} queued messages · ${st.browsers} signed-in browsers\nthis agent: ${myName} · ${spaceLine()} · wake on message: ${cfg?.auto_wake_idle === false ? 'off' : 'on'}${cfg?.muted ? ' · muted' : ''}\nsummary: ${summary || '(none yet)'}`
+    }
+    case 'update': {
+      // Pull the latest peerlink and install it; every agent then reloads itself when it's next idle.
+      const steps = [
+        ['claude', 'plugin', 'marketplace', 'update', 'peerlink'],
+        ['claude', 'plugin', 'update', 'peerlink@peerlink'],
+      ]
+      const out: string[] = []
+      for (const argv of steps) {
+        const run = await $.process.run(argv, { timeoutMs: 120_000 })
+        out.push((run.stdout || run.stderr).trim().split('\n').at(-1) ?? '')
+        if (run.exitCode !== 0) return `Update stopped at \`${argv.join(' ')}\`:\n${out.join('\n')}`
+      }
+      lastInstallCheck = -Infinity
+      void reloadIfUpdated($)
+      return `${out.join('\n')}\nEvery agent picks it up by itself when it's next idle.`
     }
     case 'issues': {
       const res = await call($, 'GET', '/api/issues?limit=10')

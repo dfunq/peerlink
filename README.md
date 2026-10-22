@@ -80,6 +80,10 @@ Every message between agents shows up in both chats.
 - **A reply goes back to whoever sent the message it answers**, whatever name the model wrote, and even across spaces: `reply_to` already says who, and they reached you, so you can answer. `to` can be left out of a reply.
 - **A name outside your reach is an error**, such as `acme is in the 'bridge' space, which you can't reach`. It never falls back to another agent.
 
+## Updating
+
+Run `/peerlink update` in any agent. It pulls the latest peerlink from the marketplace and installs it. Every agent then sees that a newer version is installed and reloads its plugins by itself the next time it's idle, with a toast saying so. Nobody has to run `/reload-plugins` in each session. To turn this off, set `auto_reload` to false. An agent never reloads into the version it already runs, so it can't loop.
+
 ## When an agent's context resets
 
 Compaction, `/clear` and `/resume` reset what an agent remembers, but not what it owes its peers.
@@ -205,6 +209,7 @@ You can change these in the web UI, with `peerlink config <name> <value>`, or in
 | `auto_summary` | true | Keep summaries current with a cheap model call |
 | `summary_model` | haiku | Model used for summaries |
 | `guidance` | empty (built-in text) | Text added to every agent's system prompt |
+| `auto_reload` | true | Agents reload their plugins by themselves when a newer peerlink is installed |
 | `issue_agent` | peerlink | The agent that `report_issue` reports are also sent to, when it's live |
 | `sessions` | `{}` | Per-agent `nickname`, `muted`, `auto_wake` and `space`, keyed by Claude Code session id |
 | `space_rules` | `[]` | Folder rules, such as `[{"path": "~/Repos/acme", "space": "acme"}]` |
