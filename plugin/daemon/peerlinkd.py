@@ -28,7 +28,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.6.6"
+VERSION = "0.6.7"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 with open(os.path.abspath(__file__), "rb") as _f:
     CODE = hashlib.sha256(_f.read()).hexdigest()[:16]
@@ -612,12 +612,16 @@ def send(body):
         target, err = None, None
         # A reply goes to whoever sent the message it answers, whatever name the model wrote: with two
         # similar names in view it may guess the wrong one, and reply_to already says who.
-        if parent and parent.get("to") == sender and "@" not in str(parent.get("from", "")):
+        mine = {sender, *([sender_rec.get("cwd")] if sender_rec and sender_rec.get("cwd") else [])}
+        if parent and (parent.get("to") in mine or parent.get("to_cwd") in mine) and "@" not in str(parent.get("from", "")):
             back = sessions.get(parent["from"])
-            if back and is_live(back):
+            if not (back and is_live(back)):
+                # The sender's conversation moved on (a /clear, a resume, a new session): its folder's live agent takes it.
+                back = successor(parent.get("from_cwd") or (back or {}).get("cwd", ""))
+            if back:
                 target = back
             else:
-                err = f"{parent.get('from_name') or 'the sender'} of {parent['id']} is no longer live; its conversation may have moved to another session, so call list_peers"
+                err = f"{parent.get('from_name') or 'the sender'} of {parent['id']} is no longer live and no agent runs in its folder now"
         elif not to:
             err = "to is required unless reply_to names a message sent to you"
         if target is None and err is None:
@@ -643,6 +647,8 @@ def send(body):
             "from_host": body.get("from_host", HOSTNAME),
             "to": target["id"],
             "to_name": display_name(target),
+            "from_cwd": sender_rec.get("cwd", "") if sender_rec else "",
+            "to_cwd": target.get("cwd", ""),
             "text": text[:20000],
             "expects_reply": bool(body.get("expects_reply")),
             "reply_to": body.get("reply_to") or None,
@@ -760,6 +766,48 @@ def forward(body, hops, spaces):
             except Exception as err:
                 return 502, {"error": f"remote {p['remote']} refused: {err}"}
     return 404, {"error": f"no live peer '{to}'; call list_peers"}
+
+
+def successor(cwd):
+    """The live agent in a folder, the most recently seen one first: who takes over a gone session's messages."""
+    live = [r for r in sessions.values() if cwd and r.get("cwd") == cwd and is_live(r)]
+    return max(live, key=lambda r: r["last_seen"]) if live else None
+
+
+def adopt(rec, old=None):
+    """Give rec the messages still queued for sessions that are gone: `old` (one it replaces), or any in its folder."""
+    moved = 0
+    for sid in list(inboxes):
+        if sid == rec["id"]:
+            continue
+        other = sessions.get(sid)
+        if sid != old and other and is_live(other):
+            continue
+        box = [m for m in inboxes[sid] if sid == old or (m.get("to_cwd") and m.get("to_cwd") == rec.get("cwd"))]
+        if not box:
+            continue
+        inboxes[sid] = [m for m in inboxes[sid] if m not in box]
+        if not inboxes[sid]:
+            inboxes.pop(sid)
+        for m in box:
+            m["to"], m["to_name"] = rec["id"], display_name(rec)
+            append_log({"id": m["id"], "to": rec["id"], "to_name": display_name(rec)})
+        inboxes.setdefault(rec["id"], []).extend(box)
+        moved += len(box)
+    return moved
+
+
+def open_threads(rec, max_age=86400, limit=8):
+    """Requests this agent's folder still owes an answer to, and ones it still waits on, from the message log."""
+    me = {rec["id"], rec.get("cwd") or rec["id"]}
+    now = time.time()
+    answered = {m["reply_to"] for m in messages if m.get("reply_to")}
+    def gist(m, who):
+        return {"id": m["id"], "with": m.get(who), "ago_s": round(now - m["ts"]), "text": m["text"][:160]}
+    recent = [m for m in messages if m.get("expects_reply") and now - m["ts"] < max_age and m["id"] not in answered]
+    owes = [gist(m, "from_name") for m in recent if (m.get("to") in me or m.get("to_cwd") in me) and m.get("status") != "expired"]
+    waiting = [gist(m, "to_name") for m in recent if m.get("from") in me or m.get("from_cwd") in me]
+    return {"owes": owes[-limit:], "waiting": waiting[-limit:]}
 
 
 def take_inbox(sid):
@@ -958,6 +1006,16 @@ class Handler(BaseHTTPRequestHandler):
                 rec["busy"] = bool(b.get("busy", False))
                 rec["last_seen"] = time.time()
                 sessions[sid] = rec
+                old = b.get("succeeds")
+                if old and old != sid:
+                    # The same conversation after a /clear or resume: keep its name, settings and messages.
+                    prev = sessions.pop(old, None)
+                    if old in config["sessions"] and sid not in config["sessions"]:
+                        config["sessions"][sid] = dict(config["sessions"][old])
+                        save_config()
+                    if prev and prev.get("name"):
+                        rec["name"] = prev["name"]
+                adopt(rec, old)
                 previous = dir_summaries.get(rec.get("cwd", ""))
                 if previous and previous["ts"] < time.time() - DIR_MEMORY_S:
                     previous = None
@@ -1024,9 +1082,15 @@ class Handler(BaseHTTPRequestHandler):
 
         if len(rest) == 2 and rest[0] == "sessions" and method == "DELETE":
             with lock:
-                sessions.pop(rest[1], None)
-                expire(inboxes.pop(rest[1], []))
+                sessions.pop(rest[1], None)  # its queue waits for the next agent in its folder (an hour, as on restart)
             return self.reply(200, {"ok": True})
+
+        if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "threads" and method == "GET":
+            with lock:
+                rec = sessions.get(rest[1])
+                if rec is None:
+                    return self.reply(404, {"error": "unknown agent"})
+                return self.reply(200, open_threads(rec))
 
         if rest == ["messages"]:
             if method == "GET":
@@ -1349,7 +1413,7 @@ UI_HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Peerlink</title><link rel="icon" href="data:,">
 <style>
-:root{--bg:#faf9f7;--side:#f2f0ec;--fg:#1f1e1c;--mut:#6b6862;--line:#e4e1db;--card:#fff;--acc:#c96442;--ok:#2f7d4f;--warn:#b7791f}
+:root{color-scheme:light dark;--bg:#faf9f7;--side:#f2f0ec;--fg:#1f1e1c;--mut:#6b6862;--line:#e4e1db;--card:#fff;--acc:#c96442;--ok:#2f7d4f;--warn:#b7791f}
 @media (prefers-color-scheme:dark){:root{--bg:#1c1b19;--side:#161513;--fg:#ecebe8;--mut:#9b978f;--line:#34322e;--card:#252421;--acc:#e0805e;--ok:#5cb57f;--warn:#e0b04a}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,sans-serif}
 .app{display:flex;min-height:100vh}
@@ -1368,7 +1432,7 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)
 .chart+.chart{margin-top:6px}
 .unit{display:inline-flex;flex-direction:column;align-items:center;border:1px dashed var(--line);border-radius:12px;padding:10px 12px 12px;min-width:0}
 .unit-h{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin-bottom:10px;white-space:nowrap}
-.orow{display:flex;gap:12px;align-items:flex-start;justify-content:center}
+.orow{display:flex;gap:12px;align-items:flex-start;justify-content:safe center}
 .ocol{display:flex;flex-direction:column;align-items:center}.orow.stack{flex-direction:column;gap:8px}
 .down{width:2px;height:14px;background:var(--acc);flex:none}
 .node{width:190px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 10px;cursor:pointer;text-align:left;font:inherit;color:inherit}
@@ -1399,9 +1463,9 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)
 .msg.open .mt{display:block}.msg .chip{font-size:11px;border-radius:999px;padding:1px 8px;border:1px solid var(--line);color:var(--mut)}
 .chip.queued{border-color:var(--warn);color:var(--warn)}.chip.expired{border-color:#c0392b;color:#c0392b}.chip.reply{color:var(--acc);border-color:var(--acc)}
 .msg.inthread{margin-left:22px;border-left:3px solid var(--acc)}
-@media (min-width:721px){body.drawer main{padding-right:404px}}
+@media (min-width:721px){body.drawer main{padding-right:404px;max-width:1504px}}
 @media (max-width:720px){#detail{width:100%;border-left:0}}
-.branch{display:flex;align-items:flex-start;justify-content:center}
+.branch{display:flex;align-items:flex-start;justify-content:safe center}
 .branch>.ocol{position:relative;padding:14px 6px 0}
 .branch>.ocol::before{content:"";position:absolute;top:0;left:0;right:0;border-top:2px solid var(--acc)}
 .branch>.ocol:first-child::before{left:50%}.branch>.ocol:last-child::before{right:50%}.branch>.ocol:only-child::before{display:none}
