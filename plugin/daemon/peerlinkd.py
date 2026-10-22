@@ -28,7 +28,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.7.2"
+VERSION = "0.7.3"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -602,7 +602,10 @@ def expire(box):
 # The mapping: each Discord channel has one master agent (your messages go to it) and any members (they can
 # post there, and "name: ..." addresses one directly). Agents are kept by folder, so a mapping survives a
 # restart, /clear or a new session. Direct messages go to `dm`.
-discord = {"token": "", "app_id": "", "user": "", "enabled": True, "routes": [], "dm": ""}
+discord = {"token": "", "app_id": "", "user": "", "enabled": True, "routes": [], "dm": "",
+           # What agents may do beyond text, each a switch on the Channels page.
+           "buttons": True, "files_out": True, "files_in": True, "max_file_mb": 10}
+DISCORD_FILES = os.path.join(HOME, "files", "discord")  # what you attach on Discord, for the agent to read
 discord_bot = [None]
 
 
@@ -627,7 +630,7 @@ def start_discord():
         old.close()
     discord_bot[0] = None
     if discord.get("token") and discord.get("enabled", True):
-        discord_bot[0] = discordlink.Bot(discord["token"], on_discord, log)
+        discord_bot[0] = discordlink.Bot(discord["token"], on_discord, log, on_press)
 
 
 def folder_name(cwd):
@@ -650,6 +653,33 @@ def routes_for(cwd):
     if discord.get("dm") == cwd:
         out.append({"channel_id": "dm", "channel": "direct messages", "master": True})
     return out
+
+
+def save_discord_files(d):
+    """Files you attached, saved where the agent can read them; the lines that tell it so."""
+    if not d.get("files"):
+        return ""
+    if not discord.get("files_in", True):
+        return "\n\n(Files were attached on Discord, but saving them is turned off on the Channels page.)"
+    limit = int(float(discord.get("max_file_mb") or 10) * 1024 * 1024)
+    folder = os.path.join(DISCORD_FILES, d["message_id"])
+    lines = []
+    for f in d["files"][:10]:
+        name = os.path.basename(f["filename"]) or "file"
+        try:
+            data = discordlink.download(f["url"], limit)
+        except OSError as err:
+            lines.append(f"- {name}: couldn't download it ({err})")
+            continue
+        if data is None:
+            lines.append(f"- {name}: over the {discord.get('max_file_mb', 10)} MB limit, not saved")
+            continue
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, name)
+        with open(path, "wb") as out:
+            out.write(data)
+        lines.append(f"- {path} ({len(data):,} bytes)")
+    return "\n\nAttached on Discord:\n" + "\n".join(lines)
 
 
 def queue_for_folder(cwd, msg):
@@ -693,6 +723,9 @@ def on_discord(d):
         break
     if not cwd:
         discordlink.post(discord["token"], d["channel_id"], "No agent is mapped to this yet: pick one in the peerlink web UI, under Channels.", d["message_id"])
+        return
+    text += save_discord_files(d)
+    if not text.strip():
         return
     with lock:
         msg = {
@@ -754,32 +787,90 @@ def discord_activity(rec, activity):
             set_reaction(m, emoji)
 
 
-def post_to_discord(sender_rec, channel_id, text, reply_ref=None, reply_to=None, hops=0):
+def read_files(paths):
+    """The files an agent attaches: (name, bytes) each, or an error saying which one and why."""
+    if not discord.get("files_out", True):
+        return None, "attaching files to Discord is turned off on the Channels page"
+    limit = float(discord.get("max_file_mb") or 10) * 1024 * 1024
+    out = []
+    for p in paths[:10]:
+        p = os.path.expanduser(str(p))
+        if not os.path.isfile(p):
+            return None, f"no file at {p}"
+        if os.path.getsize(p) > limit:
+            return None, f"{p} is over the {discord.get('max_file_mb', 10)} MB limit"
+        with open(p, "rb") as f:
+            out.append((os.path.basename(p), f.read()))
+    return out, None
+
+
+def post_to_discord(sender_rec, channel_id, text, reply_ref=None, reply_to=None, hops=0, options=None, files=None):
     """An agent's message out to Discord, labelled with who said it, and recorded like any other."""
     name = display_name(sender_rec)
+    uploads, err = read_files(files) if files else (None, None)
+    if err:
+        return 400, {"error": err}
+    with lock:
+        mid = f"m{next_msg[0]}"
+        next_msg[0] += 1
+    use_buttons = bool(options) and discord.get("buttons", True)
+    body = f"**{name}**: {text}" if not reply_ref else text
+    if options and not use_buttons:
+        body += "\n" + "\n".join(f"{i + 1}. {o}" for i, o in enumerate(options))
     try:
-        discordlink.post(discord["token"], channel_id, f"**{name}**: {text}" if not reply_ref else text, reply_ref)
+        sent = discordlink.post(discord["token"], channel_id, body, reply_ref,
+                                discordlink.buttons(options, f"pl:{mid}") if use_buttons else None, uploads)
     except discordlink.DiscordError as err:
         return 502, {"error": f"Discord refused it: {err}"}
     with lock:
         msg = {
-            "id": f"m{next_msg[0]}", "ts": time.time(), "from": sender_rec["id"], "from_name": name,
+            "id": mid, "ts": time.time(), "from": sender_rec["id"], "from_name": name,
             "from_host": HOSTNAME, "to": f"discord:{channel_id}", "to_name": f"{discord_channel_label(channel_id)} on Discord",
             "from_cwd": sender_rec.get("cwd", ""), "to_cwd": "", "from_space": space_of(sender_rec)[0], "to_space": "discord",
-            "text": text[:20000], "expects_reply": False, "reply_to": reply_to, "hops": hops, "status": "delivered", "v": 2,
+            "text": text[:20000], "expects_reply": bool(use_buttons), "reply_to": reply_to, "hops": hops, "status": "delivered", "v": 2,
+            "options": list(options or []), "files": [os.path.expanduser(str(f)) for f in files or []],
+            "discord_out": {"channel_id": channel_id, "message_id": str((sent[-1] or {}).get("id", "")) if sent else ""},
         }
-        next_msg[0] += 1
         record(msg)
     return 200, {"id": msg["id"], "to": msg["to_name"], "status": "delivered"}
 
 
-def send_discord(sender_rec, to, text, parent, hops):
+def on_press(press):
+    """You pressed one of an agent's buttons: the choice goes to that agent as your answer to its message,
+    and the buttons are disabled with yours highlighted, so it reads as answered."""
+    _, mid, idx = (press["custom_id"].split(":") + ["", ""])[:3]
+    asked = next((m for m in messages if m["id"] == mid), None)
+    options = (asked or {}).get("options") or []
+    if not asked or not idx.isdigit() or int(idx) >= len(options):
+        discordlink.answer_interaction(press["id"], press["token"], 4, {"content": "That question isn't open anymore.", "flags": 64})
+        return
+    choice = options[int(idx)]
+    rows = (press["message"] or {}).get("components") or []
+    for row in rows:
+        for b in row.get("components", []):
+            b["disabled"] = True
+            b["style"] = 3 if b.get("custom_id") == press["custom_id"] else 2
+    discordlink.answer_interaction(press["id"], press["token"], 7, {"components": rows})
+    with lock:
+        msg = {
+            "id": f"m{next_msg[0]}", "ts": time.time(),
+            "from": f"discord:{press['channel_id']}", "from_name": f"{press['author']} on Discord", "from_host": "discord",
+            "from_cwd": "", "to_cwd": asked.get("from_cwd", ""), "from_space": "discord", "to_space": asked.get("from_space", ""),
+            "text": f"Chose: {choice}", "expects_reply": False, "reply_to": mid, "hops": 0, "status": "queued", "v": 2,
+            "discord": {"channel_id": press["channel_id"], "message_id": (asked.get("discord_out") or {}).get("message_id", "")},
+        }
+        next_msg[0] += 1
+        queue_for_folder(asked.get("from_cwd", ""), msg)
+    log("discord press", msg["id"], press["author"], "->", msg["to_name"], choice)
+
+
+def send_discord(sender_rec, to, text, parent, hops, options=None, files=None):
     """`to: "discord"` or `"discord#name"`, or a reply to a message from Discord. None when it's not for Discord."""
     if not sender_rec or not discord.get("token") or not discord_bot[0]:
         return None
     if parent and parent.get("discord") and parent.get("to_cwd") == sender_rec.get("cwd"):
         d = parent["discord"]
-        out = post_to_discord(sender_rec, d["channel_id"], text, d["message_id"], parent["id"], hops)
+        out = post_to_discord(sender_rec, d["channel_id"], text, d["message_id"], parent["id"], hops, options, files)
         if out[0] == 200:
             set_reaction(parent, "✅")
         return out
@@ -794,7 +885,7 @@ def send_discord(sender_rec, to, text, parent, hops):
         return 404, {"error": "this agent isn't mapped to that Discord channel; the mapping is in the web UI, under Channels"}
     if len(mine) > 1:
         return 409, {"error": "this agent is in several Discord channels: say which, e.g. " + ", ".join(f"discord{r['channel']}" for r in mine)}
-    return post_to_discord(sender_rec, mine[0]["channel_id"], text, None, None, hops)
+    return post_to_discord(sender_rec, mine[0]["channel_id"], text, None, None, hops, options, files)
 
 
 def send(body):
@@ -825,9 +916,16 @@ def send(body):
                 return 429, {"error": f"rate limit: {config['rate_limit_per_min']} messages/min"}
             sent_times[sender] = recent
 
-    out = send_discord(sender_rec, to, text, parent, hops)
+    options = [str(o) for o in body.get("options") or []][:25]
+    files = [str(f) for f in body.get("files") or []][:10]
+    out = send_discord(sender_rec, to, text, parent, hops, options, files)
     if out is not None:
         return out
+    # Between agents, options and files read as text: a numbered list, and paths (the filesystem is shared).
+    if options:
+        text += "\n" + "\n".join(f"{i + 1}. {o}" for i, o in enumerate(options))
+    if files:
+        text += "\n\nFiles:\n" + "\n".join(f"- {os.path.abspath(os.path.expanduser(f))}" for f in files)
     with lock:
         # Agents only reach their own space, and a lead its parent too. A remote daemon says which spaces its sender reaches.
         if sender_rec:
@@ -1083,6 +1181,8 @@ class Handler(BaseHTTPRequestHandler):
                 "reads_messages": bool(bot and bot.reads_messages),
                 "message_content_switch": discordlink.message_content_on(token) if token and q.get("check") else None,
                 "routes": discord.get("routes", []), "dm": discord.get("dm", ""),
+                "buttons": discord.get("buttons", True), "files_out": discord.get("files_out", True),
+                "files_in": discord.get("files_in", True), "max_file_mb": discord.get("max_file_mb", 10),
             })
         if rest == [] and method == "PUT":
             b = self.body()
@@ -1100,6 +1200,11 @@ class Handler(BaseHTTPRequestHandler):
                                      for r in b["routes"] if r.get("channel_id")]
             if "dm" in b:
                 discord["dm"] = b["dm"] or ""
+            for k in ("buttons", "files_out", "files_in"):
+                if k in b:
+                    discord[k] = bool(b[k])
+            if "max_file_mb" in b:
+                discord["max_file_mb"] = max(1, min(500, float(b["max_file_mb"] or 10)))
             save_discord()
             if "token" in b or "enabled" in b:
                 start_discord()
@@ -1742,6 +1847,7 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)
 .chip button{padding:0 5px;font-size:12px;line-height:1.4;background:transparent;color:var(--mut);border:0}
 .dstate{display:inline-flex;align-items:center;gap:6px;font-size:13px;margin-bottom:8px}.dstate .dot{margin:0}
 #channels a{color:var(--acc)}.dmap td:nth-child(2){min-width:190px}.dmap td:nth-child(1){min-width:150px}
+#channels label.check{display:flex;gap:8px;align-items:flex-start;margin:6px 0;max-width:820px;font-size:13px}#channels label.check input{margin-top:3px}
 .legend{display:grid;grid-template-columns:auto 1fr;gap:4px 10px;font-size:13px;max-width:820px}
 .ctx{font-size:11px;color:var(--mut);font-weight:500}.ctx.hi{color:var(--warn)}
 .node .stale{font-size:11px;color:var(--warn);margin-top:4px}
@@ -2092,8 +2198,14 @@ function renderDiscord(){if(!dState)return;const d=dState,invited=(dGuilds||[]).
   $('#dmore').innerHTML=`<h2>Talking to your agents</h2>${reading}
     <p class="meta">While an agent works on your message, a reaction on it shows where it's at:</p>
     <div class="legend"><span>👀</span><span>delivered to the agent</span><span>🤔</span><span>thinking</span><span>🛠️</span><span>using tools</span><span>❓</span><span>asked you something</span><span>✅</span><span>answered</span></div>
-    <p class="meta" style="margin-top:12px">An agent can also message you first, and its posts are labelled with its name. If an agent isn't running, your message waits up to an hour for it.</p>
-    <label class="check" style="margin-top:8px"><input type="checkbox" data-dact="enabled" ${d.enabled?'checked':''}> Bot running</label>`}
+    <p class="meta" style="margin-top:12px">An agent can also message you first, and its posts are labelled with its name. If an agent isn't running, your message waits up to an hour for it. Links in an agent's message work as usual.</p>
+    <h2>What agents can send</h2>
+    <label class="check"><input type="checkbox" data-dopt="buttons" ${d.buttons?'checked':''}> <span><b>Buttons</b> for choices: tap one and it goes back to the agent as your answer. Off, the choices are a numbered list you reply to.</span></label>
+    <label class="check"><input type="checkbox" data-dopt="files_out" ${d.files_out?'checked':''}> <span><b>Files from agents:</b> an agent can attach files from this machine to its messages.</span></label>
+    <label class="check"><input type="checkbox" data-dopt="files_in" ${d.files_in?'checked':''}> <span><b>Files to agents:</b> what you attach on Discord is saved here, in <span class="mono">~/.peerlink/files/discord</span>, and the agent gets the paths.</span></label>
+    <div class="addline" style="margin-top:8px"><label class="small mut" for="dmaxmb">Largest file, either way</label><input id="dmaxmb" type="number" min="1" max="500" step="1" value="${esc(d.max_file_mb)}" style="width:90px" data-dopt="max_file_mb"> <span class="small mut">MB (Discord allows 10 MB without Nitro)</span></div>
+    <h2>Bot</h2>
+    <label class="check"><input type="checkbox" data-dact="enabled" ${d.enabled?'checked':''}> Bot running</label>`}
 document.addEventListener('submit',async e=>{if(e.target.id!=='dtoken')return;e.preventDefault();const t=e.target.token.value.trim();if(!t)return;
   dBusy=true;renderDiscord();const r=await api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({token:t})});dBusy=false;
   if(r.error){renderDiscord();$('#dtokerr').textContent=r.error;return}dGuilds=null;dDraft=null;await loadDiscord()});
@@ -2101,6 +2213,7 @@ document.addEventListener('change',e=>{const t=e.target;if(!dDraft)return;
   if(t.dataset.droute!==undefined){dDraft.routes[+t.dataset.droute][t.dataset.dfield]=t.value;renderDiscord()}
   if(t.dataset.daddmember!==undefined&&t.value){const r=dDraft.routes[+t.dataset.daddmember];r.members=r.members||[];if(t.value!==r.master&&!r.members.includes(t.value))r.members.push(t.value);renderDiscord()}
   if(t.dataset.ddm!==undefined){dDraft.dm=t.value}
+  if(t.dataset.dopt){const v=t.type==='checkbox'?t.checked:Number(t.value);api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({[t.dataset.dopt]:v})}).then(()=>loadDiscord())}
   if(t.dataset.dact==='enabled')api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({enabled:t.checked})}).then(()=>loadDiscord())});
 document.addEventListener('click',async e=>{const t=e.target.closest('button');if(!t||!dDraft&&!t.dataset.dact)return;
   if(t.dataset.dremove!==undefined){dDraft.routes.splice(+t.dataset.dremove,1);renderDiscord()}
