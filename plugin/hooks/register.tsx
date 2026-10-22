@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.6.6'
+const DAEMON_VERSION = '0.6.7'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -186,11 +186,13 @@ async function git($: EngineInterface, cwd: string, args: string[]) {
   return run.exitCode === 0 ? run.stdout.trim() : ''
 }
 
-async function announce($: EngineInterface) {
+// `succeeds`: the session id this conversation ran under before a /clear or resume, whose messages it takes over.
+async function announce($: EngineInterface, succeeds?: string) {
   // The project root, not the shell's directory: an agent that cds into a subfolder is still the same agent.
   const cwd = await $.session.root()
   const repo = await $.session.repo()
   const res = await call($, 'POST', '/api/sessions', {
+    succeeds,
     id: sessionId,
     name: cwd.split('/').filter(Boolean).at(-1) ?? 'agent',
     cwd,
@@ -293,6 +295,15 @@ async function deliver($: EngineInterface) {
 
 async function poll($: EngineInterface) {
   if (!sessionId) return
+  // After a /clear or resume the process runs under a new session id, and no session.start says so.
+  const now = await $.session.id().catch(() => sessionId)
+  if (now && now !== sessionId) {
+    const old = sessionId
+    sessionId = now
+    lastRoster = ''
+    await announce($, old)
+    return
+  }
   let res
   try {
     res = await call($, 'POST', `/api/sessions/${sessionId}/heartbeat`, { busy })
@@ -617,6 +628,26 @@ async function reportIssue($: EngineInterface, what: string, details: string) {
   return `The daemon is down, so the report was saved to ${path}; it is filed when the daemon next starts.`
 }
 
+function ago(s: number) {
+  return s < 90 ? `${s}s` : s < 5400 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`
+}
+
+async function openThreadsBlock($: EngineInterface) {
+  if (!sessionId || !cfg || cfg.muted) return ''
+  const res = await call($, 'GET', `/api/sessions/${sessionId}/threads`)
+  if (!res.ok) return ''
+  const owes = res.data.owes as any[]
+  const waiting = res.data.waiting as any[]
+  if (!owes.length && !waiting.length) return ''
+  const line = (t: any) => `- ${t.id} ${t.with} (${ago(t.ago_s)} ago): ${clip(t.text, 140)}`
+  return [
+    'Peer requests still open from earlier in this folder (they survive compaction and /clear):',
+    ...(owes.length ? ['You owe a reply to:', ...owes.map(line)] : []),
+    ...(waiting.length ? ["You're waiting on:", ...waiting.map(line)] : []),
+    "Answer with send_message and reply_to the id. If you already did the work, say so briefly; a waiting reply arrives as a message.",
+  ].join('\n')
+}
+
 async function runCommand($: EngineInterface, args: string): Promise<string> {
   const [sub = 'help', ...rest] = args.trim().split(/\s+/).filter(Boolean)
   const arg = rest.join(' ')
@@ -784,6 +815,9 @@ export const register: Register = on => {
   })
 
   on('session.end', async ($, e, next) => {
+    // /clear and resume end a conversation, not the agent: the process goes on, so keep polling and let the
+    // next poll register the new session as this one's successor.
+    if (e.reason === 'clear' || e.reason === 'resume') return next(e)
     cancelPoll?.()
     if (sessionId) {
       try {
@@ -820,6 +854,14 @@ export const register: Register = on => {
     const roster = await rosterContext($)
     return next(roster ? { ...e, context: [...(e.context ?? []), roster] } : e)
   }).catch(($, e, next) => next(e))
+
+  // A conversation's first context, and again after compaction or /clear: what this agent still owes peers and
+  // waits on, so a reset context doesn't drop a commitment.
+  on('prompt.context', async ($, e, next) => {
+    const out = await next(e)
+    const threads = await openThreadsBlock($).catch(() => '')
+    return threads ? { ...out, blocks: [...out.blocks, { name: 'peerlink open threads', text: threads }] } : out
+  })
 
   on('prompt.compose', async ($, e, next) => {
     const composed = await next(e)
