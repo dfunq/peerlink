@@ -28,7 +28,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.6.10"
+VERSION = "0.6.11"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 with open(os.path.abspath(__file__), "rb") as _f:
     CODE = hashlib.sha256(_f.read()).hexdigest()[:16]
@@ -801,7 +801,7 @@ def adopt(rec, old=None):
     return moved
 
 
-def open_threads(rec, max_age=86400, limit=8):
+def open_threads(rec, max_age=8 * 3600, limit=8):
     """Requests this agent's folder still owes an answer to, and ones it still waits on, from the message log."""
     me = {rec["id"], rec.get("cwd") or rec["id"]}
     now = time.time()
