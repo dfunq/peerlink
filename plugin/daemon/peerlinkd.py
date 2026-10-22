@@ -28,7 +28,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.7.0"
+VERSION = "0.7.1"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -692,7 +692,7 @@ def on_discord(d):
             continue
         break
     if not cwd:
-        discordlink.post(discord["token"], d["channel_id"], "No agent is mapped to this yet: pick one in the peerlink web UI, under Discord.", d["message_id"])
+        discordlink.post(discord["token"], d["channel_id"], "No agent is mapped to this yet: pick one in the peerlink web UI, under Channels.", d["message_id"])
         return
     with lock:
         msg = {
@@ -791,7 +791,7 @@ def send_discord(sender_rec, to, text, parent, hops):
         want = "#" + word.split("#", 1)[1].lstrip("#")
         mine = [r for r in mine if r["channel"].lower() == want]
     if not mine:
-        return 404, {"error": "this agent isn't mapped to that Discord channel; the mapping is in the web UI, under Discord"}
+        return 404, {"error": "this agent isn't mapped to that Discord channel; the mapping is in the web UI, under Channels"}
     if len(mine) > 1:
         return 409, {"error": "this agent is in several Discord channels: say which, e.g. " + ", ".join(f"discord{r['channel']}" for r in mine)}
     return post_to_discord(sender_rec, mine[0]["channel_id"], text, None, None, hops)
@@ -1745,7 +1745,7 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)
 .chip{display:inline-flex;gap:4px;align-items:center;font-size:12px;border:1px solid var(--line);border-radius:999px;padding:1px 4px 1px 8px}
 .chip button{padding:0 5px;font-size:12px;line-height:1.4;background:transparent;color:var(--mut);border:0}
 .dstate{display:inline-flex;align-items:center;gap:6px;font-size:13px;margin-bottom:8px}.dstate .dot{margin:0}
-#discord a{color:var(--acc)}.dmap td:nth-child(2){min-width:190px}.dmap td:nth-child(1){min-width:150px}
+#channels a{color:var(--acc)}.dmap td:nth-child(2){min-width:190px}.dmap td:nth-child(1){min-width:150px}
 .legend{display:grid;grid-template-columns:auto 1fr;gap:4px 10px;font-size:13px;max-width:820px}
 .ctx{font-size:11px;color:var(--mut);font-weight:500}.ctx.hi{color:var(--warn)}
 .node .stale{font-size:11px;color:var(--warn);margin-top:4px}
@@ -1815,7 +1815,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <a href="#agents" data-nav="agents">Agents <span class="count" id="n-agents"></span></a>
 <a href="#spaces" data-nav="spaces">Spaces <span class="count" id="n-spaces"></span></a>
 <a href="#messages" data-nav="messages">Messages <span class="count" id="n-msgs"></span></a>
-<a href="#discord" data-nav="discord">Discord <span class="count" id="n-discord"></span></a>
+<a href="#channels" data-nav="channels">Channels <span class="count" id="n-discord"></span></a>
 <a href="#settings" data-nav="settings">Settings</a>
 <a href="#controls" data-nav="controls">Controls</a>
 </nav>
@@ -1839,8 +1839,10 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <label class="small mut" for="msgagent">Agent</label><select id="msgagent"><option value="">Everyone</option></select></div>
 <div class="mlist" id="msgs"></div></section>
 
-<section id="discord"><h1>Discord</h1>
-<p class="lead">Talk to your agents from Discord. Each channel you map has a <b>master</b> agent, which gets your messages, and can have <b>members</b>, which post there too; start a message with a member's name and a colon to reach it instead. Only the bot's owner can talk to it.</p>
+<section id="channels"><h1>Channels</h1>
+<p class="lead">Places outside your terminal where you can talk to your agents.</p>
+<h2>Discord</h2>
+<p class="lead">Each Discord channel you map has a <b>master</b> agent, which gets your messages, and can have <b>members</b>, which post there too; start a message with a member's name and a colon to reach it instead. Only the bot's owner can talk to it.</p>
 <div id="dstatus"></div>
 <ol class="steps">
 <li class="step" id="dstep1"><span class="step-n">1</span><div class="step-body"><div class="step-t">Create the bot and paste its token</div><div id="dstep1b"></div></div></li>
@@ -2118,8 +2120,8 @@ document.addEventListener('click',async e=>{const t=e.target.closest('button');i
     await api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({routes:dDraft.routes,dm:dDraft.dm})});dState=null;dDraft=null;await loadDiscord();
     $('#dsaved').className='small ok';$('#dsaved').textContent='Saved'}});
 // Invited in another tab, or back from the Developer Portal: look again when this tab gets focus.
-window.addEventListener('focus',()=>{if(location.hash==='#discord'&&dState?.configured){dGuilds=null;loadDiscord(true)}});
-window.addEventListener('hashchange',()=>{if(location.hash==='#discord')loadDiscord()});
+window.addEventListener('focus',()=>{if(location.hash==='#channels'&&dState?.configured){dGuilds=null;loadDiscord(true)}});
+window.addEventListener('hashchange',()=>{if(location.hash==='#discord')location.hash='#channels';if(location.hash==='#channels')loadDiscord()});
 
 async function loadCfg(){cfg=await api('/api/config');const f=$('#cfg');
   for(const el of f.elements){if(!el.name)continue;const v=cfg[el.name];
@@ -2141,7 +2143,7 @@ async function tick(){
   try{await refresh();if(misses){misses=0;$('#offline').style.display='none';await loadCfg();await refresh(true)}}
   catch(e){if(!signedOut){misses++;$('#offline').style.display='block'}}
   if(!signedOut)setTimeout(tick,misses?10000:2000)}
-show();loadCfg().then(()=>refresh(true)).then(()=>{if(location.hash==='#discord')loadDiscord()}).catch(()=>{misses=1;$('#offline').style.display='block'}).finally(()=>setTimeout(tick,2000));
+show();loadCfg().then(()=>refresh(true)).then(()=>{if(location.hash==='#discord')location.hash='#channels';else if(location.hash==='#channels')loadDiscord()}).catch(()=>{misses=1;$('#offline').style.display='block'}).finally(()=>setTimeout(tick,2000));
 </script></body></html>
 """
 
