@@ -10,7 +10,7 @@ async function settle() {
 }
 
 // A daemon in memory: what the plugin posts, and the peers it answers.
-function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unknown[] = [], config: Record<string, unknown> = {}) {
+function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unknown[] = [], config: Record<string, unknown> = {}, code = '') {
   const posted: { path: string; body: any }[] = []
   const peers = [
     { id: 'p1', name: 'billing-api', host: 'Mac', cwd: '/Users/x/r/billing', branch: 'main', summary: 'Owns the invoice schema', busy: false, muted: false },
@@ -20,7 +20,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.6.0' })
+    if (path === '/api/health') return ok({ ok: true, version: '0.6.1', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (path === '/api/sessions') return ok({ id: body.id, name: body.name, config: { poll_interval_ms: 600000, ...config }, previous })
     if (path === '/api/peers') return ok({ peers })
     return ok({ name: 'web', config: { poll_interval_ms: 600000, ...config }, inbox: inbox.splice(0), peer_count: peerCount })
@@ -29,7 +29,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
   return { posted, peers, summaries }
 }
 
-function engine(on: any, { turns = 0, readme = '', commits = '', transcripts = [] as { name: string; title: string; ageMs: number }[] } = {}) {
+function engine(on: any, { turns = 0, readme = '', commits = '', fingerprint = '', transcripts = [] as { name: string; title: string; ageMs: number }[] } = {}) {
   const clock = mock.clock(on, { now: 1_000_000 })
   const calls = { model: 0 }
   mock.env(on, { HOME: '/Users/x' })
@@ -46,6 +46,7 @@ function engine(on: any, { turns = 0, readme = '', commits = '', transcripts = [
     let stdout = ''
     if (cmd === 'git' && args[0] === 'rev-parse') stdout = 'main\n'
     if (cmd === 'git' && args[0] === 'log') stdout = commits
+    if (cmd === 'python3' && args[1] === 'fingerprint') stdout = fingerprint
     if (cmd === 'grep') {
       const t = transcripts.find(t => args.at(-1).endsWith(t.name))
       if (t) stdout = JSON.stringify({ type: 'ai-title', aiTitle: t.title }) + '\n'
@@ -324,4 +325,21 @@ test('topic commands reject what belongs to another topic', async ($, on) => {
   await $.session.start(START)
   const { text } = (await $.command.run({ command: 'peerlink-peers', args: 'rename x' } as any)) as any
   expect(text).toContain('Usage: /peerlink-peers')
+})
+
+test('a load replaces a daemon of the same version running other code', async ($, on) => {
+  const { clock } = engine(on, { fingerprint: 'new' })
+  const daemon = fakeDaemon(on, 1, null, [], {}, 'old')
+  const started = $.session.start(START)
+  await settle()
+  await clock.advance(1000)
+  await started
+  expect(daemon.posted.filter(p => p.path === '/api/shutdown').length).toBe(1)
+})
+
+test('a load leaves a daemon running the same code alone', async ($, on) => {
+  engine(on, { fingerprint: 'same' })
+  const daemon = fakeDaemon(on, 1, null, [], {}, 'same')
+  await $.session.start(START)
+  expect(daemon.posted.some(p => p.path === '/api/shutdown')).toBe(false)
 })
