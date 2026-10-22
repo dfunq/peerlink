@@ -28,16 +28,25 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.6.14"
+VERSION = "0.7.0"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
-with open(os.path.abspath(__file__), "rb") as _f:
-    CODE = hashlib.sha256(_f.read()).hexdigest()[:16]
+_here = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _here)
+import discordlink  # noqa: E402  (beside this file; installs nothing)
+
+# A fingerprint of the daemon's code, this file and discordlink.py together.
+_h = hashlib.sha256()
+for _name in ("peerlinkd.py", "discordlink.py"):
+    with open(os.path.join(_here, _name), "rb") as _f:
+        _h.update(_f.read())
+CODE = _h.hexdigest()[:16]
 HOME = os.environ.get("PEERLINK_HOME", os.path.expanduser("~/.peerlink"))
 CONFIG_PATH = os.path.join(HOME, "config.json")
 PID_PATH = os.path.join(HOME, "daemon.pid")
 LOG_PATH = os.path.join(HOME, "daemon.log")
 MESSAGES_PATH = os.path.join(HOME, "messages.jsonl")
 ISSUES_PATH = os.path.join(HOME, "issues.jsonl")
+DISCORD_PATH = os.path.join(HOME, "discord.json")  # the bot token and the channel mapping, 0600
 # Reports an agent wrote while the daemon was down; the daemon files them when it starts.
 PENDING_ISSUES_DIR = os.path.join(HOME, "issues-pending")
 KEY_PATH = os.path.join(HOME, "key")
@@ -289,6 +298,7 @@ def client_config(sid):
         "space_parent": read_space_file(where, "parent") if rec and source == "file" else "",
         "lead": lead,
         "children": children,
+        "discord": routes_for(rec.get("cwd", "")) if rec and discord.get("token") else [],
         "poll_interval_ms": config["poll_interval_ms"],
         "auto_wake_idle": config["auto_wake_idle"] if s["auto_wake"] is None else s["auto_wake"],
         "inject_while_busy": config["inject_while_busy"],
@@ -588,6 +598,205 @@ def expire(box):
         append_log({"id": m["id"], "status": "expired"})
 
 
+# -- Discord ---------------------------------------------------------------------------------------
+# The mapping: each Discord channel has one master agent (your messages go to it) and any members (they can
+# post there, and "name: ..." addresses one directly). Agents are kept by folder, so a mapping survives a
+# restart, /clear or a new session. Direct messages go to `dm`.
+discord = {"token": "", "app_id": "", "user": "", "enabled": True, "routes": [], "dm": ""}
+discord_bot = [None]
+
+
+def load_discord():
+    try:
+        with open(DISCORD_PATH) as f:
+            discord.update(json.load(f))
+    except (OSError, ValueError):
+        pass
+
+
+def save_discord():
+    fd = os.open(DISCORD_PATH + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(discord, f, indent=2)
+    os.replace(DISCORD_PATH + ".tmp", DISCORD_PATH)
+
+
+def start_discord():
+    old = discord_bot[0]
+    if old:
+        old.close()
+    discord_bot[0] = None
+    if discord.get("token") and discord.get("enabled", True):
+        discord_bot[0] = discordlink.Bot(discord["token"], on_discord, log)
+
+
+def folder_name(cwd):
+    return (config.get("folder_names") or {}).get(cwd) or os.path.basename(cwd.rstrip("/")) or cwd
+
+
+def discord_channel_label(channel_id):
+    bot = discord_bot[0]
+    name = bot.channel_name(channel_id) if bot else ""
+    return f"#{name}" if name else "Discord"
+
+
+def routes_for(cwd):
+    """The channels an agent's folder is mapped into, and whether it's their master."""
+    out = []
+    for r in discord.get("routes", []):
+        if r.get("master") == cwd or cwd in (r.get("members") or []):
+            out.append({"channel_id": r["channel_id"], "channel": discord_channel_label(r["channel_id"]),
+                        "master": r.get("master") == cwd})
+    if discord.get("dm") == cwd:
+        out.append({"channel_id": "dm", "channel": "direct messages", "master": True})
+    return out
+
+
+def queue_for_folder(cwd, msg):
+    """Deliver to the folder's live agent, or hold it for the next one there (adopt() hands it over)."""
+    agent = successor(cwd)
+    msg["to"] = agent["id"] if agent else f"folder:{cwd}"
+    msg["to_name"] = display_name(agent) if agent else folder_name(cwd)
+    inboxes.setdefault(msg["to"], []).append(msg)
+    record(msg)
+    return agent
+
+
+def on_discord(d):
+    """A message from you on Discord: to the channel's master, or to a member it names first."""
+    bot = discord_bot[0]
+    if not bot:
+        return
+    if d["dm"]:
+        route = {"channel_id": d["channel_id"], "master": discord.get("dm"), "members": []}
+    else:
+        route = next((r for r in discord.get("routes", []) if r["channel_id"] == d["channel_id"]), None)
+        # Without the Message Content switch only @mentions carry text; with it, every message in a mapped channel.
+        if route is None or not (d["mentioned"] or bot.reads_messages):
+            return
+    text, cwd = d["text"], route.get("master")
+    # "storefront: ..." or "@storefront ..." addresses a member of this channel by name.
+    head, sep, rest = text.partition(":")
+    first = text.split(None, 1)
+    for candidate, body in ((head.strip().lstrip("@"), rest.strip()) if sep else ("", ""),
+                            (first[0].lstrip("@"), first[1] if len(first) > 1 else "") if first and first[0].startswith("@") else ("", "")):
+        if not candidate:
+            continue
+        for member in [route.get("master")] + list(route.get("members") or []):
+            agent = successor(member or "")
+            names = {folder_name(member or "").lower(), (display_name(agent) if agent else "").lower()} - {""}
+            if member and candidate.lower() in names:
+                text, cwd = body or text, member
+                break
+        else:
+            continue
+        break
+    if not cwd:
+        discordlink.post(discord["token"], d["channel_id"], "No agent is mapped to this yet: pick one in the peerlink web UI, under Discord.", d["message_id"])
+        return
+    with lock:
+        msg = {
+            "id": f"m{next_msg[0]}", "ts": time.time(),
+            "from": f"discord:{d['channel_id']}", "from_name": f"{d['author']} on Discord", "from_host": "discord",
+            "from_cwd": "", "to_cwd": cwd, "from_space": "discord", "to_space": "",
+            "text": text[:20000], "expects_reply": True, "reply_to": None, "hops": 0, "status": "queued", "v": 2,
+            "discord": {"channel_id": d["channel_id"], "message_id": d["message_id"]},
+        }
+        next_msg[0] += 1
+        agent = queue_for_folder(cwd, msg)
+        msg["to_space"] = space_of(agent)[0] if agent else ""
+    log("discord in", msg["id"], d["author"], "->", msg["to_name"])
+    set_reaction(msg, "👀")
+    if not agent:
+        discordlink.post(discord["token"], d["channel_id"], f"{folder_name(cwd)} isn't running right now. Your message waits up to an hour for it.", d["message_id"])
+
+
+# A message from Discord shows where it's at, as a bot does: 👀 heard, 🤔 thinking, 🛠️ using tools,
+# ❓ asked you something, ✅ answered. The agent's plugin reports its activity with each heartbeat; the daemon
+# swaps the reaction on every open Discord message to that agent. Discord calls go through a queue on their own
+# thread, so a heartbeat never waits on Discord.
+ACTIVITY_EMOJI = {"thinking": "🤔", "tools": "🛠️", "asking": "❓"}
+reactions = {}  # message id -> the emoji it shows now
+reaction_jobs = []
+reaction_wake = threading.Event()
+
+
+def set_reaction(msg, emoji):
+    d = msg.get("discord")
+    if not d or reactions.get(msg["id"]) == emoji:
+        return
+    old = reactions.get(msg["id"])
+    reactions[msg["id"]] = emoji
+    reaction_jobs.append((d["channel_id"], d["message_id"], old, emoji))
+    reaction_wake.set()
+
+
+def reaction_worker():
+    while True:
+        reaction_wake.wait()
+        reaction_wake.clear()
+        while reaction_jobs:
+            channel, message, old, new = reaction_jobs.pop(0)
+            if old:
+                discordlink.unreact(discord["token"], channel, message, old)
+            if new:
+                discordlink.react(discord["token"], channel, message, new)
+
+
+def discord_activity(rec, activity):
+    """Show an agent's activity on the Discord messages it still has to answer."""
+    emoji = ACTIVITY_EMOJI.get(activity)
+    if not emoji:
+        return
+    answered = {m.get("reply_to") for m in messages if m.get("to", "").startswith("discord:")}
+    for m in messages[-200:]:
+        if m.get("discord") and m.get("to") == rec["id"] and m.get("status") == "delivered" and m["id"] not in answered:
+            set_reaction(m, emoji)
+
+
+def post_to_discord(sender_rec, channel_id, text, reply_ref=None, reply_to=None, hops=0):
+    """An agent's message out to Discord, labelled with who said it, and recorded like any other."""
+    name = display_name(sender_rec)
+    try:
+        discordlink.post(discord["token"], channel_id, f"**{name}**: {text}" if not reply_ref else text, reply_ref)
+    except discordlink.DiscordError as err:
+        return 502, {"error": f"Discord refused it: {err}"}
+    with lock:
+        msg = {
+            "id": f"m{next_msg[0]}", "ts": time.time(), "from": sender_rec["id"], "from_name": name,
+            "from_host": HOSTNAME, "to": f"discord:{channel_id}", "to_name": f"{discord_channel_label(channel_id)} on Discord",
+            "from_cwd": sender_rec.get("cwd", ""), "to_cwd": "", "from_space": space_of(sender_rec)[0], "to_space": "discord",
+            "text": text[:20000], "expects_reply": False, "reply_to": reply_to, "hops": hops, "status": "delivered", "v": 2,
+        }
+        next_msg[0] += 1
+        record(msg)
+    return 200, {"id": msg["id"], "to": msg["to_name"], "status": "delivered"}
+
+
+def send_discord(sender_rec, to, text, parent, hops):
+    """`to: "discord"` or `"discord#name"`, or a reply to a message from Discord. None when it's not for Discord."""
+    if not sender_rec or not discord.get("token") or not discord_bot[0]:
+        return None
+    if parent and parent.get("discord") and parent.get("to_cwd") == sender_rec.get("cwd"):
+        d = parent["discord"]
+        out = post_to_discord(sender_rec, d["channel_id"], text, d["message_id"], parent["id"], hops)
+        if out[0] == 200:
+            set_reaction(parent, "✅")
+        return out
+    word = to.strip().lower()
+    if not (word == "discord" or word.startswith("discord#")):
+        return None
+    mine = [r for r in routes_for(sender_rec.get("cwd", "")) if r["channel_id"] != "dm"]
+    if word.startswith("discord#"):
+        want = "#" + word.split("#", 1)[1].lstrip("#")
+        mine = [r for r in mine if r["channel"].lower() == want]
+    if not mine:
+        return 404, {"error": "this agent isn't mapped to that Discord channel; the mapping is in the web UI, under Discord"}
+    if len(mine) > 1:
+        return 409, {"error": "this agent is in several Discord channels: say which, e.g. " + ", ".join(f"discord{r['channel']}" for r in mine)}
+    return post_to_discord(sender_rec, mine[0]["channel_id"], text, None, None, hops)
+
+
 def send(body):
     sender = body.get("from", "")
     text = (body.get("text") or "").strip()
@@ -616,6 +825,10 @@ def send(body):
                 return 429, {"error": f"rate limit: {config['rate_limit_per_min']} messages/min"}
             sent_times[sender] = recent
 
+    out = send_discord(sender_rec, to, text, parent, hops)
+    if out is not None:
+        return out
+    with lock:
         # Agents only reach their own space, and a lead its parent too. A remote daemon says which spaces its sender reaches.
         if sender_rec:
             spaces = reach(sender_rec)
@@ -858,6 +1071,64 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
+    def discord_api(self, rest, method, q):
+        bot = discord_bot[0]
+        if rest == [] and method == "GET":
+            token = discord.get("token", "")
+            return self.reply(200, {
+                "configured": bool(token), "token_hint": discordlink.hint(token), "app_id": discord.get("app_id", ""),
+                "user": discord.get("user", ""), "invite_url": discordlink.invite_url(discord["app_id"]) if discord.get("app_id") else "",
+                "enabled": discord.get("enabled", True),
+                "state": bot.state if bot else ("off" if token else "unconfigured"), "error": bot.error if bot else "",
+                "reads_messages": bool(bot and bot.reads_messages),
+                "message_content_switch": discordlink.message_content_on(token) if token and q.get("check") else None,
+                "routes": discord.get("routes", []), "dm": discord.get("dm", ""),
+            })
+        if rest == [] and method == "PUT":
+            b = self.body()
+            if "token" in b:
+                try:
+                    info = discordlink.inspect_token(b["token"])
+                except discordlink.DiscordError as err:
+                    return self.reply(400, {"error": str(err)})
+                discord.update({"token": b["token"].strip(), "app_id": info["app_id"], "user": info["user"], "enabled": True})
+            if "enabled" in b:
+                discord["enabled"] = bool(b["enabled"])
+            if "routes" in b:
+                discord["routes"] = [{"channel_id": str(r["channel_id"]), "master": r.get("master", ""),
+                                      "members": [m for m in r.get("members", []) if m and m != r.get("master")]}
+                                     for r in b["routes"] if r.get("channel_id")]
+            if "dm" in b:
+                discord["dm"] = b["dm"] or ""
+            save_discord()
+            if "token" in b or "enabled" in b:
+                start_discord()
+            return self.reply(200, {"ok": True})
+        if rest == [] and method == "DELETE":
+            discord.update({"token": "", "app_id": "", "user": ""})
+            save_discord()
+            start_discord()
+            return self.reply(200, {"ok": True})
+        if rest == ["channels"] and method == "GET":
+            if not discord.get("token"):
+                return self.reply(200, {"guilds": []})
+            live_view = bot.channels_live() if bot else None
+            try:
+                return self.reply(200, {"guilds": live_view if live_view is not None else discordlink.channels_rest(discord["token"])})
+            except discordlink.DiscordError as err:
+                return self.reply(502, {"error": str(err)})
+        if rest == ["test"] and method == "POST":
+            channel = str(self.body().get("channel_id") or "")
+            try:
+                discordlink.post(discord["token"], channel, "👋 peerlink is connected. Messages here go to this channel's master agent; start with an agent's name and a colon to reach another one mapped here.")
+            except discordlink.DiscordError as err:
+                return self.reply(502, {"error": str(err)})
+            return self.reply(200, {"ok": True})
+        if rest == ["reconnect"] and method == "POST":
+            start_discord()
+            return self.reply(200, {"ok": True})
+        return self.reply(404, {"error": "not found"})
+
     def reply(self, code, body, ctype="application/json", headers=None):
         data = body.encode() if isinstance(body, str) else json.dumps(body).encode()
         self.send_response(code)
@@ -1046,6 +1317,8 @@ class Handler(BaseHTTPRequestHandler):
                 rec["last_seen"] = time.time()
                 if "busy" in b:
                     rec["busy"] = bool(b["busy"])
+                if b.get("activity"):
+                    discord_activity(rec, b["activity"])
                 if isinstance(b.get("context"), (int, float)):
                     rec["context"] = max(0, min(100, int(b["context"])))
                 if b.get("summary") is not None:
@@ -1115,6 +1388,9 @@ class Handler(BaseHTTPRequestHandler):
             if method == "POST":
                 code, res = send(self.body())
                 return self.reply(code, res)
+
+        if rest and rest[0] == "discord":
+            return self.discord_api(rest[1:], method, q)
 
         if rest == ["issues"]:
             if method == "GET":
@@ -1220,6 +1496,9 @@ def serve():
     load_messages()
     load_dirs()
     file_pending_issues()
+    load_discord()
+    threading.Thread(target=reaction_worker, name="discord-reactions", daemon=True).start()
+    start_discord()
     try:
         write_launcher()
     except OSError as err:
@@ -1456,6 +1735,18 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)
 .node .nm{font-weight:600;display:flex;align-items:center;gap:4px;justify-content:space-between}
 .node .tag{font-size:11px;font-weight:500;color:var(--acc);white-space:nowrap}
 .node .dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--mut);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.steps{list-style:none;padding:0;margin:8px 0 16px;display:flex;flex-direction:column;gap:12px;max-width:820px}
+.step{display:flex;gap:12px;align-items:flex-start;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.step-n{flex:none;width:24px;height:24px;border-radius:50%;border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--mut)}
+.step.done .step-n{background:var(--ok);border-color:var(--ok);color:#fff}.step-body{flex:1;min-width:0}.step-t{font-weight:600;margin-bottom:4px}
+.step .meta{color:var(--mut);font-size:13px;margin:4px 0 8px}.addline{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.addline .grow{flex:1;min-width:200px}
+.dmap{width:100%;border-collapse:collapse;margin-top:6px}.dmap td,.dmap th{padding:6px 6px;border-bottom:1px solid var(--line);vertical-align:top;text-align:left}
+.dmap th{font-size:12px;color:var(--mut);font-weight:500}.dmap select{width:100%}.chips{display:flex;flex-wrap:wrap;gap:4px;align-items:center}
+.chip{display:inline-flex;gap:4px;align-items:center;font-size:12px;border:1px solid var(--line);border-radius:999px;padding:1px 4px 1px 8px}
+.chip button{padding:0 5px;font-size:12px;line-height:1.4;background:transparent;color:var(--mut);border:0}
+.dstate{display:inline-flex;align-items:center;gap:6px;font-size:13px;margin-bottom:8px}.dstate .dot{margin:0}
+#discord a{color:var(--acc)}.dmap td:nth-child(2){min-width:190px}.dmap td:nth-child(1){min-width:150px}
+.legend{display:grid;grid-template-columns:auto 1fr;gap:4px 10px;font-size:13px;max-width:820px}
 .ctx{font-size:11px;color:var(--mut);font-weight:500}.ctx.hi{color:var(--warn)}
 .node .stale{font-size:11px;color:var(--warn);margin-top:4px}
 .node .sum{font-size:12px;color:var(--mut);margin-top:4px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
@@ -1524,6 +1815,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <a href="#agents" data-nav="agents">Agents <span class="count" id="n-agents"></span></a>
 <a href="#spaces" data-nav="spaces">Spaces <span class="count" id="n-spaces"></span></a>
 <a href="#messages" data-nav="messages">Messages <span class="count" id="n-msgs"></span></a>
+<a href="#discord" data-nav="discord">Discord <span class="count" id="n-discord"></span></a>
 <a href="#settings" data-nav="settings">Settings</a>
 <a href="#controls" data-nav="controls">Controls</a>
 </nav>
@@ -1546,6 +1838,17 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <div class="msgbar"><label class="small mut" for="msgspace">Space</label><select id="msgspace"><option value="">All spaces</option></select>
 <label class="small mut" for="msgagent">Agent</label><select id="msgagent"><option value="">Everyone</option></select></div>
 <div class="mlist" id="msgs"></div></section>
+
+<section id="discord"><h1>Discord</h1>
+<p class="lead">Talk to your agents from Discord. Each channel you map has a <b>master</b> agent, which gets your messages, and can have <b>members</b>, which post there too; start a message with a member's name and a colon to reach it instead. Only the bot's owner can talk to it.</p>
+<div id="dstatus"></div>
+<ol class="steps">
+<li class="step" id="dstep1"><span class="step-n">1</span><div class="step-body"><div class="step-t">Create the bot and paste its token</div><div id="dstep1b"></div></div></li>
+<li class="step" id="dstep2"><span class="step-n">2</span><div class="step-body"><div class="step-t">Invite it to your server</div><div id="dstep2b"></div></div></li>
+<li class="step" id="dstep3"><span class="step-n">3</span><div class="step-body"><div class="step-t">Map channels to agents</div><div id="dstep3b"></div></div></li>
+</ol>
+<div id="dmore"></div>
+</section>
 
 <section id="settings"><h1>Settings</h1><p class="lead">Changes reach every agent within a few seconds.</p>
 <form class="card" id="cfg">
@@ -1749,6 +2052,75 @@ document.addEventListener('click',async e=>{const t=e.target.closest('button');i
   if(act==='logout-all'&&confirm('Sign out every browser, including this one?')){await post('/api/web/logout',{all:true});location.reload()}
   if(act==='rotate'&&confirm('Rotate the key? Every browser is signed out; agents pick up the new key by themselves.')){await post('/api/key/rotate');location.reload()}
   if(act==='restart'){await post('/api/restart');$('#ctlmsg').textContent='Restarting…';setTimeout(()=>location.reload(),2500)}});
+// -- Discord: the setup walkthrough (a reference bot's three steps) and the channel-to-agent mapping --------
+let dState=null,dGuilds=null,dDraft=null,dBusy=false;
+const agentFolders=()=>{const m=new Map();for(const p of livePeers)if(!p.remote&&!m.has(p.cwd))m.set(p.cwd,{cwd:p.cwd,name:p.name,space:p.space});return [...m.values()].sort((a,b)=>a.name.localeCompare(b.name))};
+const folderLabel=cwd=>{const a=agentFolders().find(x=>x.cwd===cwd);return a?`${a.name} · ${a.space}`:`${(cfg.folder_names||{})[cwd]||cwd.split('/').filter(Boolean).pop()||cwd} (not running)`};
+function agentSelect(val,attrs,placeholder){const opts=agentFolders();const extra=val&&!opts.some(o=>o.cwd===val)?[{cwd:val}]:[];
+  return `<select ${attrs}><option value="">${placeholder}</option>${[...opts,...extra].map(o=>`<option value="${esc(o.cwd)}" ${o.cwd===val?'selected':''}>${esc(folderLabel(o.cwd))}</option>`).join('')}</select>`}
+function channelSelect(val,attrs){const gs=dGuilds||[];
+  return `<select ${attrs}><option value="">Pick a channel…</option>${gs.map(g=>`<optgroup label="${esc(g.name)}">${g.channels.map(c=>`<option value="${esc(c.id)}" ${c.id===val?'selected':''}>#${esc(c.name)}</option>`).join('')}</optgroup>`).join('')}</select>`}
+const chanName=id=>{for(const g of dGuilds||[])for(const c of g.channels)if(c.id===id)return '#'+c.name;return 'channel '+id};
+async function loadDiscord(check){
+  dState=await api('/api/discord'+(check?'?check=1':''));
+  if(dState.configured&&dGuilds===null){const r=await api('/api/discord/channels');dGuilds=r.guilds||[]}
+  if(!dDraft)dDraft={routes:JSON.parse(JSON.stringify(dState.routes||[])),dm:dState.dm||''};
+  renderDiscord()}
+function renderDiscord(){if(!dState)return;const d=dState,invited=(dGuilds||[]).length>0,mapped=(d.routes||[]).some(r=>r.master);
+  $('#n-discord').textContent=d.state==='online'?'on':'';
+  const label={online:'Online',connecting:'Connecting…',error:'Error',off:'Turned off',unconfigured:'Not set up'}[d.state]||d.state;
+  $('#dstatus').innerHTML=d.configured?`<div class="dstate"><span class="dot ${d.state==='online'?'':'busy'}"></span><b>${esc(label)}</b>${d.user?` as ${esc(d.user)}`:''}${d.error?` · <span class="err">${esc(d.error)}</span>`:''}</div>`:'';
+  $('#dstep1').classList.toggle('done',d.configured);$('#dstep2').classList.toggle('done',d.configured&&invited);$('#dstep3').classList.toggle('done',mapped);
+  $('#dstep1b').innerHTML=d.configured?`<p class="meta">Token <span class="mono">${esc(d.token_hint)}</span> saved. <button class="ghost small" data-dact="forget">Disconnect</button></p>`
+   :`<p class="meta">On the <a href="https://discord.com/developers/applications" target="_blank" rel="noreferrer">Developer Portal ↗</a>, click <b>New Application</b> and give it a name. Open <b>Bot</b>, click <b>Reset Token</b>, and copy it. Optional: on the same page, turn on <b>Message Content Intent</b> so you can talk to it without @mentioning it every time.</p>
+     <form class="addline" id="dtoken"><input type="password" class="mono grow" autocomplete="off" spellcheck="false" placeholder="Bot token" name="token"><button type="submit" ${dBusy?'disabled':''}>${dBusy?'Checking…':'Connect'}</button></form><p class="small err" id="dtokerr"></p>`;
+  $('#dstep2b').innerHTML=!d.configured?'':`<p class="meta">${invited?`In ${dGuilds.map(g=>esc(g.name)).join(', ')}. `:`Pick your server on Discord's page, then come back here. This step completes on its own. `}
+    ${d.invite_url?`<a href="${esc(d.invite_url)}" target="_blank" rel="noreferrer">${invited?'Invite to another server ↗':'<button>Invite the bot ↗</button>'}</a>`:''}</p>`;
+  if(!d.configured||!invited){$('#dstep3b').innerHTML='';$('#dmore').innerHTML='';return}
+  const rows=dDraft.routes.map((r,i)=>`<tr>
+    <td>${channelSelect(r.channel_id,`data-droute="${i}" data-dfield="channel_id"`)}</td>
+    <td>${agentSelect(r.master,`data-droute="${i}" data-dfield="master"`,'Pick its master…')}</td>
+    <td><div class="chips">${(r.members||[]).map((m,j)=>`<span class="chip">${esc(folderLabel(m))}<button title="Remove" data-dunmember="${i}:${j}">✕</button></span>`).join('')}
+      ${agentSelect('',`data-daddmember="${i}"`,'+ add member')}</div></td>
+    <td style="white-space:nowrap"><button class="ghost small" data-dtest="${esc(r.channel_id)}" ${r.channel_id&&d.state==='online'?'':'disabled'}>Send a test</button> <button class="ghost small" data-dremove="${i}" title="Remove this channel">✕</button></td></tr>`).join('');
+  $('#dstep3b').innerHTML=`<p class="meta">Give each channel a master, which gets your messages. Members can post in the channel too, and you reach one by starting with its name and a colon (<span class="mono">storefront: how's the build?</span>). One agent can be in several channels. Agents are kept by folder, so a mapping survives restarts and <span class="mono">/clear</span>.</p>
+    <table class="dmap"><thead><tr><th>Channel</th><th>Master</th><th>Members</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="4" class="mut small">No channels mapped yet.</td></tr>'}</tbody></table>
+    <div class="addline" style="margin-top:8px"><button class="ghost" data-dact="addroute">+ Map a channel</button><button class="ghost" data-dact="refresh" title="Look for new servers and channels">↻ Refresh channels</button></div>
+    <div class="addline" style="margin-top:12px"><label class="small mut">Direct messages to the bot go to</label>${agentSelect(dDraft.dm,'data-ddm','Nobody (ignored)')}</div>
+    <div class="addline" style="margin-top:12px"><button data-dact="save">Save mapping</button><span class="small" id="dsaved"></span></div>`;
+  const reading=d.reads_messages?`<p class="meta">Every message you write in a mapped channel goes to its master; DMs never need a mention.</p>`
+    :d.message_content_switch?`<p class="meta">The Message Content switch is on in Discord, but the bot connected before it was. <button class="ghost small" data-dact="reconnect">Reconnect now</button></p>`
+    :`<p class="meta">${d.message_content_switch===false?'<b>Discord says the Message Content switch is off.</b> ':''}@mention the bot each time, or DM it. To talk without @mentioning, turn on <b>Message Content Intent</b> on the <a href="${d.app_id?`https://discord.com/developers/applications/${esc(d.app_id)}/bot`:'https://discord.com/developers/applications'}" target="_blank" rel="noreferrer">Bot page ↗</a> (under Privileged Gateway Intents) and save. <button class="ghost small" data-dact="check">I turned it on</button></p>`;
+  $('#dmore').innerHTML=`<h2>Talking to your agents</h2>${reading}
+    <p class="meta">While an agent works on your message, a reaction on it shows where it's at:</p>
+    <div class="legend"><span>👀</span><span>delivered to the agent</span><span>🤔</span><span>thinking</span><span>🛠️</span><span>using tools</span><span>❓</span><span>asked you something</span><span>✅</span><span>answered</span></div>
+    <p class="meta" style="margin-top:12px">An agent can also message you first, and its posts are labelled with its name. If an agent isn't running, your message waits up to an hour for it.</p>
+    <label class="check" style="margin-top:8px"><input type="checkbox" data-dact="enabled" ${d.enabled?'checked':''}> Bot running</label>`}
+document.addEventListener('submit',async e=>{if(e.target.id!=='dtoken')return;e.preventDefault();const t=e.target.token.value.trim();if(!t)return;
+  dBusy=true;renderDiscord();const r=await api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({token:t})});dBusy=false;
+  if(r.error){renderDiscord();$('#dtokerr').textContent=r.error;return}dGuilds=null;dDraft=null;await loadDiscord()});
+document.addEventListener('change',e=>{const t=e.target;if(!dDraft)return;
+  if(t.dataset.droute!==undefined){dDraft.routes[+t.dataset.droute][t.dataset.dfield]=t.value;renderDiscord()}
+  if(t.dataset.daddmember!==undefined&&t.value){const r=dDraft.routes[+t.dataset.daddmember];r.members=r.members||[];if(t.value!==r.master&&!r.members.includes(t.value))r.members.push(t.value);renderDiscord()}
+  if(t.dataset.ddm!==undefined){dDraft.dm=t.value}
+  if(t.dataset.dact==='enabled')api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({enabled:t.checked})}).then(()=>loadDiscord())});
+document.addEventListener('click',async e=>{const t=e.target.closest('button');if(!t||!dDraft&&!t.dataset.dact)return;
+  if(t.dataset.dremove!==undefined){dDraft.routes.splice(+t.dataset.dremove,1);renderDiscord()}
+  if(t.dataset.dunmember){const [i,j]=t.dataset.dunmember.split(':').map(Number);dDraft.routes[i].members.splice(j,1);renderDiscord()}
+  if(t.dataset.dtest){const r=await post('/api/discord/test',{channel_id:t.dataset.dtest});t.textContent=r.error?'Failed':'Sent ✓';if(r.error)alert(r.error)}
+  const a=t.dataset.dact;if(!a)return;
+  if(a==='addroute'){dDraft.routes.push({channel_id:'',master:'',members:[]});renderDiscord()}
+  if(a==='refresh'){const r=await api('/api/discord/channels');dGuilds=r.guilds||[];renderDiscord()}
+  if(a==='forget'&&confirm('Disconnect the Discord bot? The channel mapping is kept.')){await api('/api/discord',{method:'DELETE'});dGuilds=null;await loadDiscord()}
+  if(a==='reconnect'){await post('/api/discord/reconnect');setTimeout(()=>loadDiscord(),2000)}
+  if(a==='check')await loadDiscord(true);
+  if(a==='save'){const bad=dDraft.routes.find(r=>!r.channel_id||!r.master);if(bad){$('#dsaved').className='small err';$('#dsaved').textContent='Every row needs a channel and a master.';return}
+    await api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({routes:dDraft.routes,dm:dDraft.dm})});dState=null;dDraft=null;await loadDiscord();
+    $('#dsaved').className='small ok';$('#dsaved').textContent='Saved'}});
+// Invited in another tab, or back from the Developer Portal: look again when this tab gets focus.
+window.addEventListener('focus',()=>{if(location.hash==='#discord'&&dState?.configured){dGuilds=null;loadDiscord(true)}});
+window.addEventListener('hashchange',()=>{if(location.hash==='#discord')loadDiscord()});
+
 async function loadCfg(){cfg=await api('/api/config');const f=$('#cfg');
   for(const el of f.elements){if(!el.name)continue;const v=cfg[el.name];
     if(el.type==='checkbox')el.checked=!!v;else if(el.name==='remotes')el.value=(v||[]).join('\n');else el.value=v??''}
@@ -1769,7 +2141,7 @@ async function tick(){
   try{await refresh();if(misses){misses=0;$('#offline').style.display='none';await loadCfg();await refresh(true)}}
   catch(e){if(!signedOut){misses++;$('#offline').style.display='block'}}
   if(!signedOut)setTimeout(tick,misses?10000:2000)}
-show();loadCfg().then(()=>refresh(true)).catch(()=>{misses=1;$('#offline').style.display='block'}).finally(()=>setTimeout(tick,2000));
+show();loadCfg().then(()=>refresh(true)).then(()=>{if(location.hash==='#discord')loadDiscord()}).catch(()=>{misses=1;$('#offline').style.display='block'}).finally(()=>setTimeout(tick,2000));
 </script></body></html>
 """
 
