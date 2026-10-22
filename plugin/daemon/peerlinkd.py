@@ -28,7 +28,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.6.9"
+VERSION = "0.6.10"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 with open(os.path.abspath(__file__), "rb") as _f:
     CODE = hashlib.sha256(_f.read()).hexdigest()[:16]

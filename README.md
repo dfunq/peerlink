@@ -82,7 +82,7 @@ Every message between agents shows up in both chats.
 
 ## Updating
 
-Run `/peerlink update` in any agent. It pulls the latest peerlink from the marketplace and installs it. Every agent then sees that a newer version is installed and reloads its plugins by itself the next time it's idle, with a toast saying so. Nobody has to run `/reload-plugins` in each session. To turn this off, set `auto_reload` to false. An agent never reloads into the version it already runs, so it can't loop.
+Run `/peerlink update` in any agent. It pulls the latest peerlink from the marketplace and installs it. Every agent then sees that a newer version is installed and queues a reload of its plugins, which Claude Code runs the next time that agent is idle, with a toast saying so. Nobody has to run `/reload-plugins` in each session. To turn this off, set `auto_reload` to false. An agent never reloads into the version it already runs, so it can't loop.
 
 ## When an agent's context resets
 
