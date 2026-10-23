@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.7.6'
+const DAEMON_VERSION = '0.8.0'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -19,6 +19,7 @@ type PeerMessage = {
   expects_reply: boolean
   reply_to: string | null
   hops: number
+  task?: string
 }
 
 type ClientConfig = {
@@ -251,7 +252,7 @@ async function announce($: EngineInterface, succeeds?: string) {
   return res.ok
 }
 
-type Frame = { id: string; from: string; re?: string; reply: boolean; body: string }
+type Frame = { id: string; from: string; re?: string; reply: boolean; task?: string; body: string }
 
 // Reads back what frame() wrote, wherever it sits in the row's text.
 function parseFrames(text: string): Frame[] {
@@ -259,7 +260,14 @@ function parseFrames(text: string): Frame[] {
   const pattern = /^↘ (.+?) · (m\d+)((?: · [^\n]*)?)\n([\s\S]*?)(?=\n\n↘ |\n\n\(Reply with send_message|$)/gm
   for (const match of text.matchAll(pattern)) {
     const tags = match[3]
-    frames.push({ from: match[1], id: match[2], re: tags.match(/re (m\d+)/)?.[1], reply: tags.includes('reply expected'), body: match[4] })
+    frames.push({
+      from: match[1],
+      id: match[2],
+      re: tags.match(/re (m\d+)/)?.[1],
+      reply: tags.includes('reply expected'),
+      task: tags.match(/task (t\d+)/)?.[1],
+      body: match[4],
+    })
   }
   return frames
 }
@@ -282,12 +290,13 @@ function MessageRow(ui: any, arrow: '↘' | '↗', who: string, tags: string[], 
 }
 
 function inboundTags(f: Frame) {
-  return [f.id, f.re ? `re ${f.re}` : '', f.reply ? 'reply expected' : ''].filter(Boolean)
+  return [f.id, f.task ? `task ${f.task}` : '', f.re ? `re ${f.re}` : '', f.task ? '' : f.reply ? 'reply expected' : ''].filter(Boolean)
 }
 
 function frame(m: PeerMessage) {
   const from = m.from.includes('@') ? m.from : m.from_name
-  const tags = [m.id, m.reply_to ? `re ${m.reply_to}` : '', m.expects_reply ? 'reply expected' : ''].filter(Boolean)
+  // A task is always answered, through update_task, so it needs no "reply expected".
+  const tags = [m.id, m.task ? `task ${m.task}` : '', m.reply_to ? `re ${m.reply_to}` : '', m.expects_reply && !m.task ? 'reply expected' : ''].filter(Boolean)
   return `${MESSAGE_MARK}${from} · ${tags.join(' · ')}\n${m.text}`
 }
 
@@ -730,13 +739,21 @@ async function openThreadsBlock($: EngineInterface) {
   if (!res.ok) return ''
   const owes = res.data.owes as any[]
   const waiting = res.data.waiting as any[]
-  if (!owes.length && !waiting.length) return ''
+  const tasks = (res.data.tasks ?? []) as any[]
+  const asked = (res.data.asked ?? []) as any[]
+  if (!owes.length && !waiting.length && !tasks.length && !asked.length) return ''
   const line = (t: any) => `- ${t.id} ${t.with} (${ago(t.ago_s)} ago): ${clip(t.text, 140)}`
+  const tline = (t: any) => `- ${t.id} ${t.status === 'in_progress' ? 'in progress' : 'open'}, ${t.with} (${ago(t.ago_s)} ago): ${clip(t.text, 140)}`
   return [
     'Peer requests still open from earlier in this folder (they survive compaction and /clear):',
+    ...(tasks.length ? ['Your open tasks:', ...tasks.map(tline)] : []),
     ...(owes.length ? ['You owe a reply to:', ...owes.map(line)] : []),
+    ...(asked.length ? ['Tasks you handed out, still open:', ...asked.map(tline)] : []),
     ...(waiting.length ? ["You're waiting on:", ...waiting.map(line)] : []),
-    "Answer with send_message and reply_to the id. If you already did the work, say so briefly; a waiting reply arrives as a message.",
+    ...(tasks.length ? ['Finish a task with update_task, done or failed and a short note: whoever asked gets the note.'] : []),
+    ...(owes.length || waiting.length
+      ? ["Answer with send_message and reply_to the id. If you already did the work, say so briefly; a waiting reply arrives as a message."]
+      : []),
   ].join('\n')
 }
 
@@ -874,6 +891,13 @@ export const register: Register = on => {
           text: { type: 'string', description: 'The message: what you need and why, briefly' },
           expects_reply: { type: 'boolean', description: 'True if you need an answer' },
           reply_to: { type: 'string', description: 'Id of the peer message you are answering; the reply goes to its sender' },
+          kind: {
+            type: 'string',
+            enum: ['message', 'task'],
+            description:
+              'message (the default) or task: work you hand to that agent. A task is tracked in the task queue until its owner marks it done or failed with update_task, and you get its note then; a task to a space lead is the lead\'s to delegate',
+          },
+          parent_task: { type: 'string', description: 'When delegating part of a task you own: its id (t…), so the subtask shows under it' },
           options: {
             type: 'array',
             items: { type: 'string' },
@@ -886,6 +910,21 @@ export const register: Register = on => {
           },
         },
         required: ['text'],
+      },
+      isDeferred: false,
+    })
+    await $.tool.register({
+      name: 'update_task',
+      description:
+        'Update a task you own (one that came to you with "task t…"): in_progress while you work on it, done when finished, or failed when you can\'t finish it. The note is your result, and it goes to whoever asked, so you don\'t need to message them as well. Whoever handed out a task can cancel it.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'The task id, e.g. t3' },
+          status: { type: 'string', enum: ['in_progress', 'done', 'failed', 'cancelled'] },
+          note: { type: 'string', description: 'The result, or why it failed: briefly, with paths rather than pasted content' },
+        },
+        required: ['id', 'status'],
       },
       isDeferred: false,
     })
@@ -1023,13 +1062,26 @@ export const register: Register = on => {
       text: input.text,
       expects_reply: !!input.expects_reply,
       reply_to: input.reply_to,
+      kind: input.kind === 'task' ? 'task' : undefined,
+      parent_task: typeof input.parent_task === 'string' && input.parent_task ? input.parent_task : undefined,
       options: Array.isArray(input.options) ? input.options : undefined,
       files: Array.isArray(input.files) ? input.files : undefined,
     })
     if (!res.ok) return text(`Not sent: ${res.data.error ?? res.status}`)
+    if (res.data.task)
+      return text(`Sent to ${res.data.to} (${res.data.id}) as task ${res.data.task}. You'll get its note when it's done or failed; continue with other work meanwhile.`)
     return text(
       `Sent to ${res.data.to} (${res.data.id}).${input.expects_reply ? ' Their reply will arrive as a peer message; continue with other work meanwhile.' : ''}`,
     )
+  }).catch(daemonDown)
+
+  on('tool.call', { tool: 'mcp__peerlink__update_task' }, async ($, e) => {
+    const input = e as any
+    const id = String(input.id ?? '').trim()
+    const res = await call($, 'POST', `/api/tasks/${encodeURIComponent(id)}`, { by: sessionId, status: input.status, note: input.note })
+    if (!res.ok) return text(`Not updated: ${res.data.error ?? res.status}`)
+    const t = res.data.task
+    return text(`Task ${t.id} is ${t.status.replace('_', ' ')}.${t.status === 'done' || t.status === 'failed' ? ` ${t.requester?.name || 'Whoever asked'} gets your note.` : ''}`)
   }).catch(daemonDown)
 
   on('tool.call', { tool: 'mcp__peerlink__report_issue' }, async ($, e) => text(await reportIssue($, String((e as any).what ?? ''), String((e as any).details ?? ''))))

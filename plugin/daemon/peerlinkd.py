@@ -28,7 +28,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.7.6"
+VERSION = "0.8.0"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -46,6 +46,7 @@ PID_PATH = os.path.join(HOME, "daemon.pid")
 LOG_PATH = os.path.join(HOME, "daemon.log")
 MESSAGES_PATH = os.path.join(HOME, "messages.jsonl")
 ISSUES_PATH = os.path.join(HOME, "issues.jsonl")
+TASKS_PATH = os.path.join(HOME, "tasks.json")
 DISCORD_PATH = os.path.join(HOME, "discord.json")  # the bot token and the channel mapping, 0600
 # Reports an agent wrote while the daemon was down; the daemon files them when it starts.
 PENDING_ISSUES_DIR = os.path.join(HOME, "issues-pending")
@@ -91,6 +92,9 @@ questions in one message.
 - When a peer writes to you, help if it fits your user's goals, answer once \
 and to the point, and skip acknowledgements, thanks and sign-offs.
 - Tell your user about any peer exchange that changes your plan.
+- To hand a peer a piece of work, send_message with kind "task". A task \
+that comes to you ("task t3") is yours until you call update_task with \
+done or failed and a short note; the note goes to whoever asked.
 - If peerlink itself misbehaves (a reply that never comes, a message that \
 reached the wrong agent, an error from these tools), call report_issue with \
 the message ids and agent names, then carry on with your task."""
@@ -123,6 +127,8 @@ inboxes = {}    # id -> [message]
 messages = []   # recent log, newest last
 sent_times = {} # sender id -> [timestamps]
 next_msg = [1]
+tasks = {}      # id -> task, see new_task()
+next_task = [1]
 config = {}
 key = [""]
 dir_summaries = {}  # cwd -> {summary, name, ts}: what the last agent there was doing
@@ -482,6 +488,7 @@ def public_peer(rec):
         "file_parent": read_space_file(where, "parent") if source == "file" else "",
         # Without ages, which change every second and would redraw the page each poll.
         "threads": {k: [{f: t[f] for f in ("id", "with", "text")} for t in v] for k, v in open_threads(rec, limit=5).items()},
+        "open_tasks": sum(1 for t in tasks.values() if t["status"] in TASK_OPEN and t["owner_cwd"] and t["owner_cwd"] == rec.get("cwd")),
         "reach": sorted(reach(rec)),
         "busy": rec.get("busy", False),
         # The plugin version the agent runs ('' before 0.6.6): one behind the daemon needs /reload-plugins.
@@ -730,6 +737,7 @@ def on_discord(d):
     text += save_discord_files(d)
     if not text.strip():
         return
+    kind = "task" if re.match(r"\s*task\s*:", text, re.I) else "message"
     with lock:
         msg = {
             "id": f"m{next_msg[0]}", "ts": time.time(),
@@ -739,8 +747,12 @@ def on_discord(d):
             "discord": {"channel_id": d["channel_id"], "message_id": d["message_id"]},
         }
         next_msg[0] += 1
+        task = new_task(msg, {"id": "", "name": msg["from_name"], "cwd": "", "discord": msg["discord"]}) if kind == "task" else None
         agent = queue_for_folder(cwd, msg)
         msg["to_space"] = space_of(agent)[0] if agent else ""
+        if task:
+            task["owner"], task["space"] = msg["to_name"], msg["to_space"]
+            save_tasks()
     log("discord in", msg["id"], d["author"], "->", msg["to_name"])
     set_reaction(msg, "👀")
     if not agent:
@@ -786,7 +798,8 @@ def discord_activity(rec, activity):
         return
     answered = {m.get("reply_to") for m in messages if m.get("to", "").startswith("discord:")}
     for m in messages[-200:]:
-        if m.get("discord") and m.get("to") == rec["id"] and m.get("status") == "delivered" and m["id"] not in answered:
+        closed = tasks.get(m.get("task") or "", {}).get("status") in TASK_CLOSED
+        if m.get("discord") and m.get("to") == rec["id"] and m.get("status") == "delivered" and m["id"] not in answered and not closed:
             set_reaction(m, emoji)
 
 
@@ -897,6 +910,12 @@ def send(body):
     to = body.get("to", "")
     if not text or not (to or body.get("reply_to")):
         return 400, {"error": "text, and to or reply_to, are required"}
+    kind = body.get("kind") or "message"
+    if kind not in ("message", "task"):
+        return 400, {"error": "kind is message or task"}
+    parent_task = body.get("parent_task") or ""
+    if parent_task and parent_task not in tasks:
+        return 400, {"error": f"no task {parent_task}"}
     # A long message lands whole in the other agent's context; on a shared filesystem a path costs almost nothing.
     limit = int(config.get("max_message_chars") or 0)
     if limit and len(text) > limit and body.get("from") in sessions:
@@ -981,19 +1000,21 @@ def send(body):
             "from_space": space_of(sender_rec)[0] if sender_rec else (clean_space(body.get("space")) or ""),
             "to_space": space_of(target)[0],
             "text": text[:20000],
-            "expects_reply": bool(body.get("expects_reply")),
+            "expects_reply": bool(body.get("expects_reply")) or kind == "task",
             "reply_to": body.get("reply_to") or None,
             "hops": hops,
             "status": "queued",
             "v": 2,  # logs older than this never recorded delivery, so they are not replayed
         }
         next_msg[0] += 1
+        if kind == "task":
+            new_task(msg, {"id": sender, "name": msg["from_name"], "cwd": msg["from_cwd"]}, parent_task)
         inboxes.setdefault(target["id"], []).append(msg)
         if sender in sent_times:
             sent_times[sender].append(now)
         record(msg)
     log("msg", msg["id"], msg["from_name"], "->", msg["to_name"])
-    return 200, {"id": msg["id"], "to": msg["to_name"], "status": "queued"}
+    return 200, {"id": msg["id"], "to": msg["to_name"], "status": "queued", "task": msg.get("task")}
 
 
 def report_issue(body):
@@ -1135,20 +1156,171 @@ def open_threads(rec, max_age=8 * 3600, limit=8):
     answered = {m["reply_to"] for m in messages if m.get("reply_to")}
     def gist(m, who):
         return {"id": m["id"], "with": m.get(who), "ago_s": round(now - m["ts"]), "text": m["text"][:160]}
-    recent = [m for m in messages if m.get("expects_reply") and now - m["ts"] < max_age and m["id"] not in answered]
+    # A task is tracked by its own status below, not by whether its message was answered.
+    recent = [m for m in messages if m.get("expects_reply") and not m.get("task") and now - m["ts"] < max_age and m["id"] not in answered]
     owes = [gist(m, "from_name") for m in recent if (m.get("to") in me or m.get("to_cwd") in me) and m.get("status") != "expired"]
     waiting = [gist(m, "to_name") for m in recent if m.get("from") in me or m.get("from_cwd") in me]
-    return {"owes": owes[-limit:], "waiting": waiting[-limit:]}
+    def tgist(t, who):
+        return {"id": t["id"], "with": who, "ago_s": round(now - t["created"]), "text": t["title"], "status": t["status"]}
+    live = [t for t in tasks.values() if t["status"] in TASK_OPEN]
+    mine = [tgist(t, t["requester"].get("name", "")) for t in live if t["owner_cwd"] and t["owner_cwd"] == rec.get("cwd")]
+    asked = [tgist(t, t["owner"]) for t in live if t["requester"].get("id") == rec["id"] or (rec.get("cwd") and t["requester"].get("cwd") == rec.get("cwd"))]
+    return {"owes": owes[-limit:], "waiting": waiting[-limit:], "tasks": mine[-limit:], "asked": asked[-limit:]}
 
 
 def take_inbox(sid):
     with lock:
         box = inboxes.pop(sid, [])
+        started = False
         for m in box:
             m["status"] = "delivered"
             m["delivered_ts"] = time.time()
             append_log({"id": m["id"], "status": "delivered", "delivered_ts": m["delivered_ts"]})
+            t = tasks.get(m.get("task") or "")
+            if t and t["status"] == "open":
+                t["status"], t["updated"], started = "in_progress", time.time(), True
+        if started:
+            save_tasks()
         return box
+
+
+# Tasks: work handed to an agent, tracked until its owner says done or failed. A task belongs to its owner's
+# folder, so it outlives a /clear, a restart or a new session there, and whoever asked hears how it ended.
+TASK_OPEN = ("open", "in_progress")
+TASK_CLOSED = ("done", "failed", "cancelled")
+
+
+def load_tasks():
+    try:
+        with open(TASKS_PATH) as f:
+            saved = json.load(f)
+    except (OSError, ValueError):
+        return
+    for t in saved:
+        tasks[t["id"]] = t
+        next_task[0] = max(next_task[0], int(t["id"][1:]) + 1)
+
+
+def save_tasks():
+    with open(TASKS_PATH + ".tmp", "w") as f:
+        json.dump(list(tasks.values()), f, indent=1)
+    os.replace(TASKS_PATH + ".tmp", TASKS_PATH)
+
+
+def new_task(msg, requester, parent_task=""):
+    """Open the task a kind=task message carries, before the message is recorded. Called with the lock held."""
+    now = time.time()
+    title = next((line.strip() for line in msg["text"].splitlines() if line.strip()), "")
+    t = {"id": f"t{next_task[0]}", "title": re.sub(r"(?i)^task\s*:\s*", "", title)[:120], "text": msg["text"][:4000],
+         "requester": requester, "owner_cwd": msg.get("to_cwd", ""), "owner": msg.get("to_name") or folder_name(msg.get("to_cwd", "")),
+         "space": msg.get("to_space", ""), "status": "open", "created": now, "updated": now, "note": "",
+         "msg": msg["id"], "parent": parent_task}
+    next_task[0] += 1
+    tasks[t["id"]] = t
+    msg["kind"], msg["task"] = "task", t["id"]
+    save_tasks()
+    return t
+
+
+def task_message(t, to_cwd, text, sender=None, reply_to=None, kind="message"):
+    """A note about a task from its owner (or peerlink), queued for an agent's folder. Called with the lock held."""
+    msg = {"id": f"m{next_msg[0]}", "ts": time.time(), "from": sender["id"] if sender else "peerlink",
+           "from_name": display_name(sender) if sender else "peerlink", "from_host": HOSTNAME,
+           "from_cwd": sender.get("cwd", "") if sender else "", "to_cwd": to_cwd,
+           "from_space": space_of(sender)[0] if sender else "", "to_space": "",
+           "text": text, "expects_reply": False, "reply_to": reply_to, "hops": 0, "status": "queued", "v": 2}
+    if kind == "task":
+        msg["kind"], msg["task"] = "task", t["id"]
+    next_msg[0] += 1
+    agent = queue_for_folder(to_cwd, msg)
+    msg["to_space"] = space_of(agent)[0] if agent else ""
+    return msg
+
+
+def update_task(tid, body, web=False):
+    """An owner marks its task in progress, done or failed; its requester can cancel it; the web UI can do any of
+    that, reopen it, or give it to another folder."""
+    status = body.get("status") or ""
+    note = (body.get("note") or "").strip()[:2000]
+    owner = (body.get("owner") or "").strip()
+    with lock:
+        t = tasks.get(tid)
+        if t is None:
+            return 404, {"error": f"no task {tid}"}
+        if web:
+            if status and status not in TASK_OPEN + TASK_CLOSED:
+                return 400, {"error": "status is open, in_progress, done, failed or cancelled"}
+        else:
+            by = sessions.get(body.get("by") or "")
+            if by is None:
+                return 403, {"error": "unknown agent; register again"}
+            owns = bool(t["owner_cwd"]) and by.get("cwd") == t["owner_cwd"]
+            asked = by["id"] == t["requester"].get("id") or (by.get("cwd") and by.get("cwd") == t["requester"].get("cwd"))
+            allowed = ({"in_progress", "done", "failed"} if owns else set()) | ({"cancelled"} if asked else set())
+            if status not in allowed:
+                if not allowed:
+                    return 403, {"error": f"{tid} belongs to {t['owner']}; only its owner can update it (and whoever asked can cancel it)"}
+                if not owns:
+                    return 403, {"error": f"{tid} belongs to {t['owner']}: only it marks it done or failed; you can cancel it"}
+                return 400, {"error": f"status is {' or '.join(sorted(allowed))}"}
+        was = t["status"]
+        handed = ""
+        if web and owner and owner != t["owner_cwd"]:
+            if t["owner_cwd"] and was in TASK_OPEN:
+                task_message(t, t["owner_cwd"], f"Task {tid} was handed to {folder_name(owner)} in the web UI: stop work on it. {t['title']}")
+            t["owner_cwd"], t["owner"] = owner, folder_name(owner)
+            status = status if status in TASK_OPEN else "open"
+            handed = f"Task {tid} was handed to you"
+        elif web and status in TASK_OPEN and was in TASK_CLOSED:
+            handed = f"Task {tid} was reopened"
+        if status:
+            t["status"] = status
+        if note:
+            t["note"] = note
+        t["updated"] = time.time()
+        if handed:
+            task_message(t, t["owner_cwd"], f"{handed}. When it's finished, call update_task with done or failed and a short note.\n\n{t['text']}", kind="task")
+            t["owner"] = folder_name(t["owner_cwd"]) if not successor(t["owner_cwd"]) else display_name(successor(t["owner_cwd"]))
+        closing = t["status"] in TASK_CLOSED and was not in TASK_CLOSED
+        save_tasks()
+        snapshot = dict(t)
+    log("task", tid, was, "->", snapshot["status"], "(web)" if web else "")
+    if closing:
+        task_closed(snapshot, web)
+    return 200, {"task": snapshot}
+
+
+def task_closed(t, web=False):
+    """Tell whoever asked how the task ended; Discord hears about every failure."""
+    mark = {"done": "✅ done", "failed": "❌ failed", "cancelled": "cancelled"}[t["status"]]
+    line = f"Task {t['id']} {mark}: {t['title']}" + (f"\n{t['note']}" if t["note"] else "")
+    req = t["requester"]
+    d = req.get("discord")
+    posts = []
+    with lock:
+        owner = successor(t["owner_cwd"])
+        if t["status"] == "cancelled" and t["owner_cwd"]:
+            # The owner stops; whoever cancelled it already knows.
+            task_message(t, t["owner_cwd"], f"Task {t['id']} was cancelled{' in the web UI' if web else ' by ' + req.get('name', 'whoever asked')}: stop work on it. {t['title']}")
+        elif d:
+            posts.append((d["channel_id"], f"**{t['owner']}**: {line}", d["message_id"]))
+            orig = next((m for m in messages if m["id"] == t["msg"]), None)
+            if orig:
+                set_reaction(orig, "✅" if t["status"] == "done" else "❌")
+        elif req.get("cwd"):
+            task_message(t, req["cwd"], line if owner else f"{t['owner']}: {line}", sender=owner, reply_to=t["msg"])
+        if t["status"] == "failed" and not d:
+            chans = [r for r in routes_for(t["owner_cwd"]) + routes_for(req.get("cwd", "")) if r["channel_id"] != "dm"]
+            if chans:
+                posts.append((chans[0]["channel_id"], f"**{t['owner']}**: {line} (asked by {req.get('name') or 'an agent'})", None))
+    if posts and discord.get("token") and discord_bot[0]:
+        def post_all():
+            for channel, text, ref in posts:
+                try:
+                    discordlink.post(discord["token"], channel, text, ref)
+                except discordlink.DiscordError as err:
+                    log("discord", "task post failed:", err)
+        threading.Thread(target=post_all, daemon=True).start()
 
 
 def reaper():
@@ -1499,6 +1671,13 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(404, {"error": "unknown agent"})
                 return self.reply(200, open_threads(rec))
 
+        if rest == ["tasks"] and method == "GET":
+            with lock:
+                return self.reply(200, {"tasks": sorted(tasks.values(), key=lambda t: -t["created"])[:500]})
+        if len(rest) == 2 and rest[0] == "tasks" and method == "POST":
+            code, out = update_task(rest[1], self.body(), web=bool(browser) and not self.key_ok())
+            return self.reply(code, out)
+
         if rest == ["messages"]:
             if method == "GET":
                 with lock:
@@ -1608,6 +1787,7 @@ def serve():
     load_key()
     load_web_sessions()
     load_messages()
+    load_tasks()
     load_dirs()
     file_pending_issues()
     load_discord()
@@ -1880,6 +2060,13 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)
 #signedout{display:none;background:var(--card);border:1px solid var(--warn);border-radius:10px;padding:10px 14px;margin-bottom:14px}
 .msgbar{display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap}.msgbar select{width:auto}
 .mlist{display:flex;flex-direction:column;gap:8px}
+.task{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px}
+.task .mh{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;font-size:13px}.task .mh .when{margin-left:auto;color:var(--mut);font-size:12px}
+.task .note{margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}.task .tact{margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}.task .tact select{width:auto}
+.task.sub{margin-left:24px}.tchip{font-size:11px;border-radius:999px;padding:1px 8px;border:1px solid var(--line);color:var(--mut)}
+.tchip.open,.tchip.in_progress{color:var(--acc);border-color:var(--acc)}.tchip.done{color:#2e8b57;border-color:#2e8b57}.tchip.failed{color:#c0392b;border-color:#c0392b}
+.ptabs{display:flex;gap:4px;margin-top:12px;border-bottom:1px solid var(--line)}.ptabs button{background:transparent;color:var(--mut);border:0;border-bottom:2px solid transparent;border-radius:0;padding:6px 10px}
+.ptabs button.on{color:var(--fg);border-bottom-color:var(--acc)}.ptasks{margin-top:12px;display:flex;flex-direction:column;gap:8px}.ptasks .k{color:var(--mut)}
 .msg{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px;cursor:pointer}
 .msg .mh{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;font-size:13px}.msg .mh .when{margin-left:auto;color:var(--mut);font-size:12px}
 .msg .mt{margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
@@ -1930,6 +2117,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <a href="#agents" data-nav="agents">Agents <span class="count" id="n-agents"></span></a>
 <a href="#spaces" data-nav="spaces">Spaces <span class="count" id="n-spaces"></span></a>
 <a href="#messages" data-nav="messages">Messages <span class="count" id="n-msgs"></span></a>
+<a href="#tasks" data-nav="tasks">Tasks <span class="count" id="n-tasks"></span></a>
 <a href="#channels" data-nav="channels">Channels <span class="count" id="n-discord"></span></a>
 <a href="#settings" data-nav="settings">Settings</a>
 <a href="#controls" data-nav="controls">Controls</a>
@@ -1953,6 +2141,12 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <div class="msgbar"><label class="small mut" for="msgspace">Space</label><select id="msgspace"><option value="">All spaces</option></select>
 <label class="small mut" for="msgagent">Agent</label><select id="msgagent"><option value="">Everyone</option></select></div>
 <div class="mlist" id="msgs"></div></section>
+
+<section id="tasks"><h1>Tasks</h1><p class="lead">Work agents hand each other with <span class="mono">kind: task</span>, and tasks you post on Discord starting with <span class="mono">Task:</span>. A task stays open until its owner marks it done or failed, and whoever asked gets the owner's note. A task sent to a lead is the lead's to split up; its subtasks show under it.</p>
+<div class="msgbar"><label class="small mut" for="tstatus">Show</label><select id="tstatus"><option value="live">Open and in progress</option><option value="done">Done</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option><option value="">All</option></select>
+<label class="small mut" for="towner">Owner</label><select id="towner"><option value="">Everyone</option></select>
+<label class="small mut" for="tspace">Space</label><select id="tspace"><option value="">All spaces</option></select></div>
+<div class="mlist" id="tasklist"></div></section>
 
 <section id="channels"><h1>Channels</h1>
 <p class="lead">Places outside your terminal where you can talk to your agents.</p>
@@ -2029,7 +2223,8 @@ function agentPanel(x,others=[]){const sc=cfg.sessions?.[x.id]||{};const fileSpa
    <div class="top"><span><span class="dot ${x.busy?'busy':''}"></span><span class="name">${esc(x.name)}</span>${x.remote?` <span class="mut small">@${esc(x.host)}</span>`:''}</span><button class="ghost x" data-close title="Close">✕</button></div>
    <div class="mono mut" style="margin-top:4px">${esc(tilde(x.cwd))}${x.branch?' · '+esc(x.branch):''}</div>
    <div style="margin-top:8px">${esc(x.summary)||'<span class="mut">no summary yet</span>'}</div>
-   <div class="facts"><span class="k">Status</span><span>${x.busy?'working':'idle'}${x.muted?' · muted':''}</span>
+   ${x.remote?'':`<div class="ptabs"><button class="${panelTab==='tasks'?'':'on'}" data-ptab="about">Agent</button><button class="${panelTab==='tasks'?'on':''}" data-ptab="tasks">Tasks${x.open_tasks?' · '+x.open_tasks:''}</button></div>`}
+   ${panelTab==='tasks'&&!x.remote?panelTasks(x):`<div class="facts"><span class="k">Status</span><span>${x.busy?'working':'idle'}${x.muted?' · muted':''}</span>
     <span class="k">Space</span><span><span class="pill">${esc(x.space||'default')}</span> <span class="mut">${esc(why)}</span></span>
     <span class="k">Role</span><span>${role}</span>
     ${x.context!=null?`<span class="k">Context</span><span>${x.context}% of its window in use${x.context>=80?' · <span style="color:var(--warn)">close to compacting</span>':''}</span>`:''}
@@ -2045,7 +2240,7 @@ function agentPanel(x,others=[]){const sc=cfg.sessions?.[x.id]||{};const fileSpa
     <label>Space for this agent only<input name="override" type="text" value="${esc(sc.space||'')}" placeholder="none"><span class="hint">Overrides the folder's space. An agent with its own space never leads a team.</span></label>
     <label>When a message arrives<select name="wake">${opt('default','Use the default')}${opt('on','Start a turn')}${opt('off','Wait for the next prompt')}</select></label>
     <label class="check"><input name="muted" type="checkbox" ${x.muted?'checked':''}> Mute: hold every message for this agent</label>
-    <div><button type="submit">Save</button> <span id="agentmsg" class="small"></span></div></form>`}</div>`}
+    <div><button type="submit">Save</button> <span id="agentmsg" class="small"></span></div></form>`}`}</div>`}
 // Messages as a conversation: newest first, each reply under the message it answers.
 let msgFilter='',spaceFilter='',livePeers=[];
 // A message's spaces: what it recorded when sent, else (older messages) the space of a live agent on either end.
@@ -2060,7 +2255,7 @@ function renderMessages(list){
   for(const x of shown)if(x.reply_to&&byId[x.reply_to])(kids[x.reply_to]??=[]).push(x);
   const card=(x,inthread)=>{const st=x.status==='delivered'?'':`<span class="chip ${esc(x.status)}">${esc(x.status)}</span>`;
     return `<div class="msg${inthread?' inthread':''}" data-msg="${esc(x.id)}"><div class="mh"><b>${esc(x.from_name)}</b><span class="mut">→</span><b>${esc(x.to_name)}</b>
-      ${x.expects_reply?'<span class="chip">reply expected</span>':''}${x.reply_to?`<span class="chip reply">re ${esc(x.reply_to)}</span>`:''}${st}
+      ${x.task?`<span class="chip reply">task ${esc(x.task)}</span>`:x.expects_reply?'<span class="chip">reply expected</span>':''}${x.reply_to?`<span class="chip reply">re ${esc(x.reply_to)}</span>`:''}${st}
       <span class="when">${new Date(x.ts*1000).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})} · ${esc(x.id)}</span></div>
       <div class="mt">${esc(x.text)}</div></div>`};
   const thread=(x,depth)=>card(x,depth>0)+(kids[x.id]||[]).sort((a,b)=>a.ts-b.ts).map(k=>thread(k,depth+1)).join('');
@@ -2078,8 +2273,9 @@ document.addEventListener('change',e=>{
 let lastView='',lastPanel='';
 async function refresh(force){
   if(signedOut)return;
-  const [st,p,m]=await Promise.all([api('/api/status'),api('/api/peers'),api('/api/messages?limit=100')]);
-  const view=JSON.stringify([p.peers.map(({last_seen_s,...x})=>x),m.messages.map(x=>[x.id,x.status]),sel,cfg.sessions]);
+  const [st,p,m,tk]=await Promise.all([api('/api/status'),api('/api/peers'),api('/api/messages?limit=100'),api('/api/tasks')]);
+  allTasks=tk.tasks||[];
+  const view=JSON.stringify([p.peers.map(({last_seen_s,...x})=>x),m.messages.map(x=>[x.id,x.status]),allTasks.map(t=>[t.id,t.status,t.owner,t.note]),sel,panelTab,cfg.sessions]);
   if(view===lastView&&!force)return;lastView=view;
   $('#hostline').textContent=`${st.host} · daemon ${st.version}`;
   $('#browsers').textContent=`${st.browsers} signed in · links work once and expire after 60 s`;
@@ -2104,7 +2300,7 @@ async function refresh(force){
   // A lead is told apart by its outline (and says which team on hover), so every card keeps its context in one place.
   const node=x=>`<button class="node${x.parent?' is-lead':''}${x.id===sel?' sel':''}" data-sel="${esc(x.id)}"${x.parent?` title="Leads the ${esc(x.space)} team"`:''}>
     <div class="nm"><span><span class="dot ${x.busy?'busy':''}"></span>${esc(x.name)}</span>${ctx(x)}</div>
-    <div class="dir">${esc(short(x.cwd))}</div><div class="sum">${esc(x.summary)||'no summary yet'}</div>${x.stale&&!x.remote?'<div class="stale">reload needed</div>':''}</button>`;
+    <div class="dir">${esc(short(x.cwd))}</div><div class="sum">${esc(x.summary)||'no summary yet'}</div>${x.open_tasks?`<div class="small" style="color:var(--acc)">${x.open_tasks} open task${x.open_tasks>1?'s':''}</div>`:''}${x.stale&&!x.remote?'<div class="stale">reload needed</div>':''}</button>`;
   // Every live agent gets its own card, two sessions in one folder included: a hidden one can't be found to message.
   const rank=(a,b)=>(b.busy-a.busy)||(a.last_seen_s-b.last_seen_s);
   const unit=(n,seen)=>{if(seen.has(n))return '';seen.add(n);
@@ -2140,8 +2336,44 @@ async function refresh(force){
   // The default space is always listed: it's where every agent with no space set lands.
   const dflt=groups.default?'':`<div class="chart"><div class="orow" style="justify-content:flex-start"><div class="ocol"><div class="sbox"><div class="name">default</div><div class="small mut">agents with no space set · none live</div></div></div></div></div>`;
   $('#spacelist').innerHTML=all((n,seen)=>{const u=sunit(n,seen);return u?`<div class="chart"><div class="orow" style="justify-content:flex-start">${u}</div></div>`:''})+dflt;
-  livePeers=p.peers;lastMsgs=m.messages;renderMessages(lastMsgs);
+  livePeers=p.peers;lastMsgs=m.messages;renderMessages(lastMsgs);renderTasks();
 }
+// Tasks: one row each, its subtasks under it. The Tasks page and an agent's Tasks tab share the row.
+let allTasks=[],panelTab='about';
+const TSTATE={open:'open',in_progress:'in progress',done:'done',failed:'failed',cancelled:'cancelled'};
+const isLive=t=>t.status==='open'||t.status==='in_progress';
+const ago=ts=>{const d=Date.now()/1000-ts;return d<90?Math.round(d)+'s':d<5400?Math.round(d/60)+'m':d<129600?Math.round(d/3600)+'h':Math.round(d/86400)+'d'};
+function taskRow(t,sub){const kids=allTasks.filter(x=>x.parent===t.id);
+  return `<div class="task${sub?' sub':''}" data-task="${esc(t.id)}"><div class="mh"><span class="tchip ${esc(t.status)}">${TSTATE[t.status]||esc(t.status)}</span><b>${esc(t.title)}</b><span class="when">${esc(t.id)} · ${ago(t.created)} ago</span></div>
+    <div class="small mut">${esc(t.requester?.name||'?')} → <b>${esc(t.owner)}</b>${t.space?' · '+esc(t.space):''}${kids.length?` · ${kids.filter(k=>k.status==='done').length} of ${kids.length} subtasks done`:''}${!isLive(t)?' · closed '+ago(t.updated)+' ago':''}</div>
+    ${t.note?`<div class="note">${esc(t.note)}</div>`:''}
+    <div class="tact">${isLive(t)?'<button class="ghost small" data-tact="cancelled">Cancel</button>':'<button class="ghost small" data-tact="open">Reopen</button>'}${agentSelect('','data-treassign','Reassign to…')}</div></div>`}
+// Open and in-progress first, then the rest, newest first within each.
+const byLive=list=>list.slice().sort((a,b)=>(isLive(b)-isLive(a))||(b.created-a.created));
+const withSubs=list=>{const ids=new Set(list.map(t=>t.id));return byLive(list.filter(t=>!t.parent||!ids.has(t.parent))).map(t=>taskRow(t,false)+byLive(list.filter(k=>k.parent===t.id)).map(k=>taskRow(k,true)).join('')).join('')};
+function renderTasks(){
+  const opts=(el,all,vals)=>{const keep=el.value;el.innerHTML=`<option value="">${all}</option>`+vals.map(n=>`<option ${n===keep?'selected':''}>${esc(n)}</option>`).join('')};
+  opts($('#towner'),'Everyone',[...new Set(allTasks.map(t=>t.owner))].sort());
+  opts($('#tspace'),'All spaces',[...new Set(allTasks.map(t=>t.space).filter(Boolean))].sort());
+  const st=$('#tstatus').value,ow=$('#towner').value,sp=$('#tspace').value;
+  const shown=allTasks.filter(t=>(st==='live'?isLive(t):!st||t.status===st)&&(!ow||t.owner===ow)&&(!sp||t.space===sp));
+  $('#n-tasks').textContent=allTasks.filter(isLive).length||'';
+  // Never redraw under an open reassign menu.
+  if(document.activeElement?.matches?.('#tasklist [data-treassign]'))return;
+  $('#tasklist').innerHTML=withSubs(shown)||`<div class="empty">${allTasks.length?'No tasks match.':'No tasks yet. An agent opens one with send_message and kind: task.'}</div>`}
+function panelTasks(x){
+  const mine=allTasks.filter(t=>t.owner_cwd&&t.owner_cwd===x.cwd),asked=allTasks.filter(t=>t.requester?.id===x.id||(x.cwd&&t.requester?.cwd===x.cwd));
+  const sec=(title,list,none)=>`<div class="k small">${title}</div>${list.length?byLive(list).map(t=>taskRow(t,false)).join(''):`<div class="small mut">${none}</div>`}`;
+  return `<div class="ptasks">${sec('Owns',mine,'No tasks for this agent.')}${sec('Asked for',asked,'It hasn\'t handed out any tasks.')}</div>`}
+document.addEventListener('click',async e=>{const b=e.target.closest('[data-ptab],[data-tact]');if(!b)return;
+  if(b.dataset.ptab){panelTab=b.dataset.ptab;refresh(true);return}
+  const id=b.closest('[data-task]').dataset.task;
+  if(b.dataset.tact==='cancelled'&&!confirm(`Cancel task ${id}? Its owner is told to stop.`))return;
+  const r=await post('/api/tasks/'+encodeURIComponent(id),{status:b.dataset.tact});if(r.error)alert(r.error);refresh(true)});
+document.addEventListener('change',async e=>{const t=e.target;
+  if(['tstatus','towner','tspace'].includes(t.id)){renderTasks();return}
+  if(t.dataset.treassign!==undefined&&t.value){const id=t.closest('[data-task]').dataset.task;
+    const r=await post('/api/tasks/'+encodeURIComponent(id),{owner:t.value});if(r.error)alert(r.error);t.blur();refresh(true)}});
 document.addEventListener('input',e=>{if(e.target.closest('#agentform'))editing=true});
 document.addEventListener('change',e=>{if(e.target.closest('#agentform'))editing=true});
 // Save applies only what changed, in one go, and says what happened.
