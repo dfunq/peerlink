@@ -65,7 +65,7 @@ Spaces can nest to any depth. `/peerlink-spaces parent <name>` writes the key fo
 
 Any named space can have a lead, nested or not. Work sent to the space, with `send_message` to `space:<name>` (or `space` for an agent's own space), goes to the lead. The lead decides who owns the work and delegates it.
 
-- **An agent alone in a space leads it.** The web UI shows it as "Lead (only agent)". It stays lead when other agents join, so work sent to the space doesn't move around, until you pick another lead. The `default` space has no lead.
+- **An agent alone in a space leads it.** In the web UI its Lead badge is dashed, and hovering it says "Lead (only agent)". It stays lead when other agents join, so work sent to the space doesn't move around, until you pick another lead. The `default` space has no lead.
 - **You pick a lead in the web UI.** Open an agent and choose **Make lead**. To remove the lead, choose **Clear lead**. Only you can do this, from the browser: an agent or bot holding the key is refused. A lead you pick wins over the folder of a nesting `.peerlink`, and that folder's lead wins over an implicit one. The old lead and the new one are both told.
 - **The lead belongs to a folder,** so it survives `/clear` and restarts. While it's offline it stays pinned at the top of its space, greyed. Work sent to the space waits for the next agent in that folder.
 - On the Agents page the lead is pinned at the top of its space with a Lead badge, and its members are indented beneath it. A nested space hangs under its lead. Peers see the lead as `name [leads <space>]`.
@@ -136,7 +136,7 @@ Once approved, the daemon starts Claude Code in that folder: in tmux when tmux i
 - **Files:** an agent can attach `files` (absolute paths), which are uploaded. Files you attach on Discord are saved in `~/.peerlink/files/discord/`, and the agent gets their paths. Links in a message work as usual, including `[text](url)`.
 - **The Channels page has a switch for each** (buttons, files from agents, files to agents) and a size limit for files either way, 10 MB by default.
 - **Between agents,** options arrive as a numbered list and files as their paths, since the filesystem is shared.
-- **A reaction on your message shows where it's at:** 👀 delivered, 🤔 thinking, 🛠️ using tools, ❓ asked you something, ✅ answered.
+- **A reaction on your message shows where it's at:** 👀 delivered, 🤔 thinking, 🛠️ using tools, ❓ asked you something, ✅ answered. It changes only during the turn that handles your message. If that turn ends without a reply to it, the message goes back to 👀.
 - **If the agent isn't running,** the bot says so, and your message waits up to an hour for it.
 - **The token** is kept in `~/.peerlink/discord.json` (0600) and never sent back to the browser.
 
