@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.2'
+const DAEMON_VERSION = '0.8.3'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -20,6 +20,7 @@ type PeerMessage = {
   reply_to: string | null
   hops: number
   task?: string
+  kind?: string
 }
 
 type ClientConfig = {
@@ -86,6 +87,8 @@ let myName = ''
 let busy = false
 let cfg: ClientConfig | undefined
 let pending: PeerMessage[] = []
+// Announcements don't start a turn: they're read at the start of the next one.
+let notices: PeerMessage[] = []
 let cancelPoll: (() => void) | undefined
 let lastRoster = ''
 let manualSummaryAt = -Infinity
@@ -296,7 +299,7 @@ function inboundTags(f: Frame) {
 function frame(m: PeerMessage) {
   const from = m.from.includes('@') ? m.from : m.from_name
   // A task is always answered, through update_task, so it needs no "reply expected".
-  const tags = [m.id, m.task ? `task ${m.task}` : '', m.reply_to ? `re ${m.reply_to}` : '', m.expects_reply && !m.task ? 'reply expected' : ''].filter(Boolean)
+  const tags = [m.id, m.kind === 'announcement' ? 'announcement' : '', m.task ? `task ${m.task}` : '', m.reply_to ? `re ${m.reply_to}` : '', m.expects_reply && !m.task ? 'reply expected' : ''].filter(Boolean)
   return `${MESSAGE_MARK}${from} · ${tags.join(' · ')}\n${m.text}`
 }
 
@@ -391,7 +394,12 @@ async function poll($: EngineInterface) {
   peerCount = Number(res.data.peer_count ?? 0)
   // The first peer to show up gets a real summary to read.
   if (!hadPeers && peerCount > 0 && !hasSummarizedTalk && !busy) void summarize($)
-  pending.push(...(res.data.inbox as PeerMessage[]))
+  const inbox = res.data.inbox as PeerMessage[]
+  for (const m of inbox.filter(m => m.kind === 'announcement')) {
+    notices.push(m)
+    $.ui.log(`${frame(m).replace('\n', ': ')}  (read at the next turn)`)
+  }
+  pending.push(...inbox.filter(m => m.kind !== 'announcement'))
   if (cfg && before !== cfg.poll_interval_ms) startPolling($)
   void reloadIfUpdated($)
   showStatus($)
@@ -897,9 +905,9 @@ export const register: Register = on => {
           reply_to: { type: 'string', description: 'Id of the peer message you are answering; the reply goes to its sender' },
           kind: {
             type: 'string',
-            enum: ['message', 'task'],
+            enum: ['message', 'task', 'announcement'],
             description:
-              'message (the default) or task: work you hand to that agent. A task is tracked in the task queue until its owner marks it done or failed with update_task, and you get its note then; a task to a space lead is the lead\'s to delegate',
+              'message (the default); task: work you hand to that agent, tracked until its owner marks it done or failed with update_task, and you get its note then (a task to a space lead is the lead\'s to delegate); announcement: to "space" (or "space:<name>"), read by every agent there at its next turn, no replies. Announce only what everyone needs, such as a shared API change',
           },
           parent_task: { type: 'string', description: 'When delegating part of a task you own: its id (t…), so the subtask shows under it' },
           options: {
@@ -1038,7 +1046,14 @@ export const register: Register = on => {
   on('prompt.context', async ($, e, next) => {
     const out = await next(e)
     const threads = await openThreadsBlock($).catch(() => '')
-    return threads ? { ...out, blocks: [...out.blocks, { name: 'peerlink open threads', text: threads }] } : out
+    const heard = notices.splice(0)
+    const blocks = [
+      ...(heard.length
+        ? [{ name: 'peerlink announcements', text: `Announced to your space since your last turn (no reply expected):\n\n${heard.map(frame).join('\n\n')}` }]
+        : []),
+      ...(threads ? [{ name: 'peerlink open threads', text: threads }] : []),
+    ]
+    return blocks.length ? { ...out, blocks: [...out.blocks, ...blocks] } : out
   })
 
   on('prompt.compose', async ($, e, next) => {
