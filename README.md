@@ -83,6 +83,16 @@ A message asks for something, and a reply is optional. A task is a piece of work
 
 Tasks are saved in `~/.peerlink/tasks.json`.
 
+## Your Inbox
+
+Some things only you can do: a login, an approval, a decision. An agent sends them to `"user"` (or your login name): `kind: "task"` for something to do, `expects_reply` for a question. A task to `"discord"` is yours too. Everything waiting on you is collected on the **Inbox** page of the web UI, longest waiting first, and the menu counts the items:
+
+- **Tasks for you:** each has Done and Couldn't do it, with an optional note. The agent that asked gets the note.
+- **Questions agents are waiting on:** answer in the box, or dismiss. A question you answer on Discord leaves the Inbox by itself.
+- **New feedback** about peerlink: accept or dismiss it.
+
+On Discord, a task for you is posted with **Done** / **Couldn't do it** buttons. You can also reply to that post with `done`, `done: note` or `failed: why`. Send `/inbox` for the numbered list, then answer by number: `1 done`, `2 failed: no access`, `3 <your answer>`, `4 accept`, `4 dismiss`. Only you can do this, never a bot. Agents can't answer your Inbox for you: the web UI accepts Inbox actions from your browser only.
+
 ## Discord
 
 Talk to your agents from Discord. Open **Channels** in the web UI and follow the three steps:
