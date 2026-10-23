@@ -28,7 +28,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.1"
+VERSION = "0.8.2"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -59,6 +59,9 @@ WEB_SESSION_TTL_S = 12 * 3600
 COOKIE = "peerlink_session"
 PORT = int(os.environ.get("PEERLINK_PORT", "7899"))
 HOSTNAME = socket.gethostname().split(".")[0]
+# You, the person these agents work for: an agent reaches you as "user" or by your login name.
+USER_NAME = os.environ.get("USER") or os.path.basename(os.path.expanduser("~")) or "you"
+USER_ALIASES = {"user", "you", USER_NAME.lower()}
 SPACE_FILE = ".peerlink"
 DEFAULT_SPACE = "default"
 SPACE_CACHE_S = 5
@@ -95,6 +98,10 @@ and to the point, and skip acknowledgements, thanks and sign-offs.
 - To hand a peer a piece of work, send_message with kind "task". A task \
 that comes to you ("task t3") is yours until you call update_task with \
 done or failed and a short note; the note goes to whoever asked.
+- When you need your user to do something only they can (a login, an \
+approval, a decision), send_message to "user": kind "task" for something to \
+do, expects_reply for a question. It waits in their Inbox, and on Discord \
+when you have a channel there; their answer comes back to you.
 - If peerlink itself misbehaves (a reply that never comes, a message that \
 reached the wrong agent, an error from these tools), call report_issue with \
 the message ids and agent names, then carry on with your task. When \
@@ -710,6 +717,9 @@ def on_discord(d):
     bot = discord_bot[0]
     if not bot:
         return
+    # Your own words can work the Inbox: "/inbox", "1 done", or a reply to a task posted for you. Never a bot's.
+    if not d.get("bot") and (d["dm"] or d["mentioned"] or bot.reads_messages) and inbox_command(d):
+        return
     if d["dm"]:
         route = {"channel_id": d["channel_id"], "master": discord.get("dm"), "members": []}
     else:
@@ -823,7 +833,7 @@ def read_files(paths):
     return out, None
 
 
-def post_to_discord(sender_rec, channel_id, text, reply_ref=None, reply_to=None, hops=0, options=None, files=None):
+def post_to_discord(sender_rec, channel_id, text, reply_ref=None, reply_to=None, hops=0, options=None, files=None, expects_reply=False):
     """An agent's message out to Discord, labelled with who said it, and recorded like any other."""
     name = display_name(sender_rec)
     uploads, err = read_files(files) if files else (None, None)
@@ -846,7 +856,7 @@ def post_to_discord(sender_rec, channel_id, text, reply_ref=None, reply_to=None,
             "id": mid, "ts": time.time(), "from": sender_rec["id"], "from_name": name,
             "from_host": HOSTNAME, "to": f"discord:{channel_id}", "to_name": f"{discord_channel_label(channel_id)} on Discord",
             "from_cwd": sender_rec.get("cwd", ""), "to_cwd": "", "from_space": space_of(sender_rec)[0], "to_space": "discord",
-            "text": text[:20000], "expects_reply": bool(use_buttons), "reply_to": reply_to, "hops": hops, "status": "delivered", "v": 2,
+            "text": text[:20000], "expects_reply": bool(use_buttons) or expects_reply, "reply_to": reply_to, "hops": hops, "status": "delivered", "v": 2,
             "options": list(options or []), "files": [os.path.expanduser(str(f)) for f in files or []],
             "discord_out": {"channel_id": channel_id, "message_id": str((sent[-1] or {}).get("id", "")) if sent else ""},
         }
@@ -857,6 +867,8 @@ def post_to_discord(sender_rec, channel_id, text, reply_ref=None, reply_to=None,
 def on_press(press):
     """You pressed one of an agent's buttons: the choice goes to that agent as your answer to its message,
     and the buttons are disabled with yours highlighted, so it reads as answered."""
+    if press["custom_id"].startswith("pt:"):
+        return on_task_press(press)
     _, mid, idx = (press["custom_id"].split(":") + ["", ""])[:3]
     asked = next((m for m in messages if m["id"] == mid), None)
     options = (asked or {}).get("options") or []
@@ -883,13 +895,13 @@ def on_press(press):
     log("discord press", msg["id"], press["author"], "->", msg["to_name"], choice)
 
 
-def send_discord(sender_rec, to, text, parent, hops, options=None, files=None):
+def send_discord(sender_rec, to, text, parent, hops, options=None, files=None, expects_reply=False):
     """`to: "discord"` or `"discord#name"`, or a reply to a message from Discord. None when it's not for Discord."""
     if not sender_rec or not discord.get("token") or not discord_bot[0]:
         return None
     if parent and parent.get("discord") and parent.get("to_cwd") == sender_rec.get("cwd"):
         d = parent["discord"]
-        out = post_to_discord(sender_rec, d["channel_id"], text, d["message_id"], parent["id"], hops, options, files)
+        out = post_to_discord(sender_rec, d["channel_id"], text, d["message_id"], parent["id"], hops, options, files, expects_reply)
         if out[0] == 200:
             set_reaction(parent, "✅")
         return out
@@ -904,7 +916,206 @@ def send_discord(sender_rec, to, text, parent, hops, options=None, files=None):
         return 404, {"error": "this agent isn't mapped to that Discord channel; the mapping is in the web UI, under Channels"}
     if len(mine) > 1:
         return 409, {"error": "this agent is in several Discord channels: say which, e.g. " + ", ".join(f"discord{r['channel']}" for r in mine)}
-    return post_to_discord(sender_rec, mine[0]["channel_id"], text, None, None, hops, options, files)
+    return post_to_discord(sender_rec, mine[0]["channel_id"], text, None, None, hops, options, files, expects_reply)
+
+
+def user_send(sender_rec, word, text, kind, parent_task, expects_reply, hops, options, files):
+    """A message or task for you: it waits in your Inbox, and is posted to Discord when the agent has a channel there."""
+    chans = [r for r in routes_for(sender_rec.get("cwd", "")) if r["channel_id"] != "dm"] if discord.get("token") and discord_bot[0] else []
+    if word.startswith("discord#"):
+        chans = [r for r in chans if r["channel"].lower() == "#" + word.split("#", 1)[1].lstrip("#")]
+    if word.startswith("discord") and not chans:
+        return 404, {"error": "this agent isn't mapped to that Discord channel; send it to \"user\" to put it in their Inbox, or map a channel under Channels"}
+    channel = chans[0]["channel_id"] if chans else ""
+    if kind != "task" and channel:
+        return post_to_discord(sender_rec, channel, text, None, None, hops, options, files, expects_reply)
+    if options:
+        text += "\n" + "\n".join(f"{i + 1}. {o}" for i, o in enumerate(options))
+    if files:
+        text += "\n\nFiles:\n" + "\n".join(f"- {os.path.abspath(os.path.expanduser(f))}" for f in files)
+    with lock:
+        msg = {"id": f"m{next_msg[0]}", "ts": time.time(), "from": sender_rec["id"], "from_name": display_name(sender_rec),
+               "from_host": HOSTNAME, "to": "user", "to_name": USER_NAME, "from_cwd": sender_rec.get("cwd", ""), "to_cwd": "",
+               "from_space": space_of(sender_rec)[0], "to_space": "", "text": text[:20000],
+               "expects_reply": expects_reply or kind == "task", "reply_to": None, "hops": hops, "status": "delivered", "v": 2}
+        next_msg[0] += 1
+        task = None
+        if kind == "task":
+            task = new_task(msg, {"id": sender_rec["id"], "name": msg["from_name"], "cwd": msg["from_cwd"]}, parent_task)
+            task["user"], task["owner"] = True, USER_NAME
+            save_tasks()
+        record(msg)
+    if task and channel:
+        try:
+            sent = discordlink.post(discord["token"], channel, f"**{msg['from_name']}** has a task for you ({task['id']}): {text}",
+                                    None, discordlink.buttons(["Done", "Couldn't do it"], f"pt:{task['id']}"))
+            with lock:
+                task["discord_out"] = {"channel_id": channel, "message_id": str((sent[-1] or {}).get("id", "")) if sent else ""}
+                save_tasks()
+        except discordlink.DiscordError as err:
+            log("discord", "task post failed:", err)
+    log("to user", msg["id"], msg["from_name"], task["id"] if task else "")
+    out = {"id": msg["id"], "to": USER_NAME, "status": "waiting in their Inbox"}
+    if task:
+        out["task"] = task["id"]
+    return 200, out
+
+
+def inbox_items():
+    """Everything waiting on you: tasks you own, questions agents wait on, new feedback; the longest waiting first."""
+    now = time.time()
+    with lock:
+        out = [{"kind": "task", "id": t["id"], "who": t["requester"].get("name", ""), "since": t["created"], "title": t["title"], "text": t["text"]}
+               for t in tasks.values() if t.get("user") and t["status"] in TASK_OPEN]
+        recent = [m for m in messages if now - m["ts"] < 3 * 86400]
+        replied = {m.get("reply_to") for m in recent if m.get("reply_to")}
+        for i, m in enumerate(recent):
+            if not m.get("expects_reply") or m.get("task") or m.get("inbox_done") or m["id"] in replied:
+                continue
+            if not (m.get("to") == "user" or str(m.get("to", "")).startswith("discord:")):
+                continue
+            # On Discord you answer by writing in the channel, not always as a reply: anything you send that agent after it counts.
+            if any(str(n.get("from", "")).startswith("discord:") and n.get("to_cwd") == m.get("from_cwd") for n in recent[i + 1:]):
+                continue
+            out.append({"kind": "question", "id": m["id"], "who": m["from_name"], "since": m["ts"], "title": task_title_of(m["text"])[:120], "text": m["text"]})
+        out += [{"kind": "feedback", "id": f["id"], "who": f.get("from_name") or "an agent", "since": f["ts"], "title": task_title_of(f["text"])[:120],
+                 "text": f["text"], "type": f.get("type", "bug")} for f in feedback.values() if f.get("status") == "new"]
+    order = {"task": 0, "question": 1, "feedback": 2}
+    return sorted(out, key=lambda x: (order[x["kind"]], x["since"]))
+
+
+def inbox_act(body, discord_from=None):
+    """Done or failed for your task, an answer or dismissal for a question, accept or dismiss for feedback."""
+    kind, iid, action, text = body.get("kind"), body.get("id", ""), body.get("action", ""), (body.get("text") or "").strip()
+    if kind == "task":
+        if action not in ("done", "failed"):
+            return 400, {"error": "a task is done or failed"}
+        t = tasks.get(iid)
+        if not t or not t.get("user"):
+            return 404, {"error": f"{iid} isn't a task of yours"}
+        code, out = update_task(iid, {"status": action, "note": text}, web=True)
+        if code == 200:
+            close_task_buttons(t)
+        return code, out
+    if kind == "feedback":
+        if action not in ("accepted", "dismissed"):
+            return 400, {"error": "feedback is accepted or dismissed"}
+        return update_feedback(iid, {"status": action, **({"note": text} if text else {})})
+    if kind == "question":
+        with lock:
+            m = next((x for x in messages if x["id"] == iid), None)
+            if m is None:
+                return 404, {"error": f"no message {iid}"}
+            if action == "dismiss":
+                m["inbox_done"] = True
+                append_log({"id": iid, "inbox_done": True})
+                return 200, {"ok": True}
+            if action != "reply" or not text:
+                return 400, {"error": "reply with text, or dismiss"}
+            if discord_from:
+                d = discord_from
+                msg = {"from": f"discord:{d['channel_id']}", "from_name": f"{d['author']} on Discord", "from_host": "discord",
+                       "discord": {"channel_id": d["channel_id"], "message_id": d["message_id"]}}
+            else:
+                msg = {"from": "user", "from_name": f"{USER_NAME} (web UI)", "from_host": HOSTNAME}
+            msg.update({"id": f"m{next_msg[0]}", "ts": time.time(), "from_cwd": "", "to_cwd": m.get("from_cwd", ""),
+                        "from_space": "", "to_space": m.get("from_space", ""), "text": text[:20000], "expects_reply": False,
+                        "reply_to": iid, "hops": 0, "status": "queued", "v": 2})
+            next_msg[0] += 1
+            agent = queue_for_folder(m.get("from_cwd", ""), msg)
+        return 200, {"id": msg["id"], "to": msg["to_name"], "waiting": not agent}
+    return 400, {"error": "kind is task, question or feedback"}
+
+
+def close_task_buttons(t):
+    """Grey out the Done / Couldn't do it buttons on a task's Discord post once it's settled elsewhere."""
+    out = t.get("discord_out") or {}
+    if not out.get("message_id") or not discord.get("token"):
+        return
+    def edit():
+        try:
+            discordlink.call(discord["token"], "PATCH", f"/channels/{out['channel_id']}/messages/{out['message_id']}", {"components": []})
+        except discordlink.DiscordError as err:
+            log("discord", "could not clear task buttons:", err)
+    threading.Thread(target=edit, daemon=True).start()
+
+
+def on_task_press(press):
+    _, tid, idx = (press["custom_id"].split(":") + ["", ""])[:3]
+    t = tasks.get(tid)
+    if not t or t["status"] not in TASK_OPEN:
+        discordlink.answer_interaction(press["id"], press["token"], 4, {"content": f"Task {tid} is already {t['status'] if t else 'gone'}.", "flags": 64})
+        return
+    action = "done" if idx == "0" else "failed"
+    rows = (press["message"] or {}).get("components") or []
+    for row in rows:
+        for b in row.get("components", []):
+            b["disabled"] = True
+            b["style"] = 3 if b.get("custom_id") == press["custom_id"] else 2
+    discordlink.answer_interaction(press["id"], press["token"], 7, {"components": rows})
+    update_task(tid, {"status": action}, web=True)
+    log("discord press", tid, press["author"], action)
+
+
+inbox_lists = {}  # Discord channel -> (when, [(kind, id)]): what "1 done" refers to after "/inbox"
+INBOX_VERBS = {"done": ("task", "done"), "failed": ("task", "failed"), "fail": ("task", "failed"), "accept": ("feedback", "accepted"),
+               "dismiss": (None, "dismiss")}
+
+
+def inbox_command(d):
+    """Handle what you write on Discord to work your Inbox. True when it was one of those, not a message for an agent."""
+    text, channel = d["text"].strip(), d["channel_id"]
+    say = lambda line: discordlink.post(discord["token"], channel, line, d["message_id"])
+    # A reply to a task posted for you settles it: "done", "done: it's set", "failed: no access".
+    task = next((t for t in tasks.values() if t.get("user") and d.get("ref") and (t.get("discord_out") or {}).get("message_id") == d["ref"]), None)
+    if task:
+        verb, _, note = text.partition(":")
+        verb = verb.strip().lower()
+        action = "done" if verb in ("done", "✅", "ok", "yes") else "failed" if verb in ("failed", "fail", "no", "can't", "cant") else ""
+        if action and task["status"] in TASK_OPEN:
+            inbox_act({"kind": "task", "id": task["id"], "action": action, "text": note.strip()})
+            say(f"Task {task['id']} marked {action}; {task['requester'].get('name') or 'the agent'} has been told.")
+            return True
+        return False
+    if text.lower() in ("/inbox", "inbox"):
+        items = inbox_items()
+        inbox_lists[channel] = (time.time(), [(i["kind"], i["id"]) for i in items])
+        if not items:
+            say("Your Inbox is empty.")
+            return True
+        icon = {"task": "☑️", "question": "❓", "feedback": "💡"}
+        lines = [f"**Inbox** ({len(items)})"] + [
+            f"{n}. {icon[i['kind']]} {i['id']} · {i['who']} · {ago_text(time.time() - i['since'])}: {i['title']}" for n, i in enumerate(items[:20], 1)]
+        lines.append('Answer with the number: "1 done", "1 failed: why", "2 <your answer>", "3 accept" or "3 dismiss".')
+        say("\n".join(lines))
+        return True
+    listed = inbox_lists.get(channel)
+    match = re.match(r"^(\d+)[\s.:)]+(.+)$", text, re.S)
+    if not (listed and match and time.time() - listed[0] < 3600):
+        return False
+    n, rest = int(match.group(1)), match.group(2).strip()
+    if not 1 <= n <= len(listed[1]):
+        say(f"There's no {n} in your Inbox; send /inbox for the list.")
+        return True
+    kind, iid = listed[1][n - 1]
+    verb, _, note = rest.partition(":")
+    want = INBOX_VERBS.get(verb.strip().lower())
+    if want and want[0] in (None, kind):
+        action = want[1] if want[1] != "dismiss" else ("dismissed" if kind == "feedback" else "dismiss")
+        if kind == "task" and action == "dismiss":
+            action = "failed"
+        code, out = inbox_act({"kind": kind, "id": iid, "action": action, "text": note.strip()})
+    elif kind == "question":
+        code, out = inbox_act({"kind": kind, "id": iid, "action": "reply", "text": rest}, discord_from=d)
+    else:
+        say(f'{iid} is a {kind}: answer {"done or failed" if kind == "task" else "accept or dismiss"}.')
+        return True
+    say(f"{iid}: {out.get('error')}" if code != 200 else f"{iid}: {action if want else 'answer sent'}.")
+    return True
+
+
+def ago_text(s):
+    return f"{int(s)}s" if s < 90 else f"{round(s / 60)}m" if s < 5400 else f"{round(s / 3600)}h" if s < 129600 else f"{round(s / 86400)}d"
 
 
 def send(body):
@@ -943,7 +1154,13 @@ def send(body):
 
     options = [str(o) for o in body.get("options") or []][:25]
     files = [str(f) for f in body.get("files") or []][:10]
-    out = send_discord(sender_rec, to, text, parent, hops, options, files)
+    # A reply to something you sent from the web UI comes back to you.
+    if parent and parent.get("from") == "user":
+        to = "user"
+    word = to.strip().lower()
+    if sender_rec and (word in USER_ALIASES or (kind == "task" and word.startswith("discord") and not parent)):
+        return user_send(sender_rec, word, text, kind, parent_task, bool(body.get("expects_reply")), hops, options, files)
+    out = send_discord(sender_rec, to, text, parent, hops, options, files, bool(body.get("expects_reply")))
     if out is not None:
         return out
     # Between agents, options and files read as text: a numbered list, and paths (the filesystem is shared).
@@ -1358,6 +1575,7 @@ def update_task(tid, body, web=False):
             if t["owner_cwd"] and was in TASK_OPEN:
                 task_message(t, t["owner_cwd"], f"Task {tid} was handed to {folder_name(owner)} in the web UI: stop work on it. {t['title']}")
             t["owner_cwd"], t["owner"] = owner, folder_name(owner)
+            t.pop("user", None)
             status = status if status in TASK_OPEN else "open"
             handed = f"Task {tid} was handed to you"
         elif web and status in TASK_OPEN and was in TASK_CLOSED:
@@ -1403,7 +1621,7 @@ def task_closed(t, web=False):
                 set_reaction(orig, "✅" if t["status"] == "done" else "❌")
         elif req.get("cwd"):
             task_message(t, req["cwd"], line if owner else f"{t['owner']}: {line}", sender=owner, reply_to=t["msg"])
-        if t["status"] == "failed" and not d:
+        if t["status"] == "failed" and not d and not t.get("user"):
             chans = [r for r in routes_for(t["owner_cwd"]) + routes_for(req.get("cwd", "")) if r["channel_id"] != "dm"]
             if chans:
                 posts.append((chans[0]["channel_id"], f"**{t['owner']}**: {line} (asked by {req.get('name') or 'an agent'})", None))
@@ -1765,6 +1983,14 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(404, {"error": "unknown agent"})
                 return self.reply(200, open_threads(rec))
 
+        if rest == ["inbox"] and method == "GET":
+            return self.reply(200, {"items": inbox_items(), "user": USER_NAME})
+        if rest == ["inbox"] and method == "POST":
+            # Only you, in the browser: an agent holding the key must not close your tasks or answer for you.
+            if not browser:
+                return self.reply(403, {"error": "the Inbox is answered from the web UI or Discord"})
+            code, out = inbox_act(self.body())
+            return self.reply(code, out)
         if rest == ["tasks"] and method == "GET":
             with lock:
                 return self.reply(200, {"tasks": sorted(tasks.values(), key=lambda t: -t["created"])[:500]})
@@ -2158,7 +2384,7 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)
 .task{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px}
 .task .mh{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;font-size:13px}.task .mh .when{margin-left:auto;color:var(--mut);font-size:12px}
 .task .note{margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}.task .tact{margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}.task .tact select{width:auto}
-.task.sub{margin-left:24px}.task .ftext{margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;max-height:9em;overflow:auto}
+.task.sub{margin-left:24px}nav .count.hot:not(:empty){background:var(--acc);color:#fff;border-radius:999px;padding:1px 7px;font-weight:600}.task .ftext{margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;max-height:9em;overflow:auto}
 .task .tact input{flex:1;min-width:160px}.tchip.new,.tchip.bug{color:var(--warn);border-color:var(--warn)}.tchip.accepted,.tchip.idea{color:var(--acc);border-color:var(--acc)}.tchip{font-size:11px;border-radius:999px;padding:1px 8px;border:1px solid var(--line);color:var(--mut)}
 .tchip.open,.tchip.in_progress{color:var(--acc);border-color:var(--acc)}.tchip.done{color:#2e8b57;border-color:#2e8b57}.tchip.failed{color:#c0392b;border-color:#c0392b}
 .ptabs{display:flex;gap:4px;margin-top:12px;border-bottom:1px solid var(--line)}.ptabs button{background:transparent;color:var(--mut);border:0;border-bottom:2px solid transparent;border-radius:0;padding:6px 10px}
@@ -2211,6 +2437,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <nav>
 <div class="brand">Peerlink</div><div class="host" id="hostline"></div>
 <a href="#agents" data-nav="agents">Agents <span class="count" id="n-agents"></span></a>
+<a href="#inbox" data-nav="inbox">Inbox <span class="count hot" id="n-inbox"></span></a>
 <a href="#spaces" data-nav="spaces">Spaces <span class="count" id="n-spaces"></span></a>
 <a href="#messages" data-nav="messages">Messages <span class="count" id="n-msgs"></span></a>
 <a href="#tasks" data-nav="tasks">Tasks <span class="count" id="n-tasks"></span></a>
@@ -2222,6 +2449,9 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <main><div id="stalebar" style="display:none" class="small"></div><div id="offline">Can't reach the peerlink daemon. It restarts when an agent next needs it; this page reconnects by itself.</div><div id="signedout">This page is signed out. Run <span class="mono">/peerlink web</span> in any agent to open it again.</div>
 
 <section id="agents"><h1>Agents</h1><p class="lead">Live Claude Code sessions as an org chart. Each box is a space; a lead (outlined in orange) sits in its parent's box with its team beneath it. The percentage is how full each agent's context is. An agent only sees and messages agents in its own space, and a lead also its parent's. Click an agent to see and change its settings.</p><div class="orgwrap"><div id="peers"></div><div id="detail"></div></div></section>
+
+<section id="inbox"><h1>Inbox</h1><p class="lead">Everything waiting on you: tasks agents handed you, questions they're waiting on, and new feedback about peerlink. The longest waiting is first. On Discord, send <span class="mono">/inbox</span> for the same list and answer by number, like <span class="mono">1 done</span>.</p>
+<div class="mlist" id="inboxlist"></div></section>
 
 <section id="spaces"><h1>Spaces</h1>
 <p class="lead">Each agent's space comes from, in order: an override for that agent, the nearest <span class="mono">.peerlink</span> file in its folder or above, a folder rule below, or <b>default</b>. A <span class="mono">.peerlink</span> with <span class="mono">parent: &lt;space&gt;</span> nests its space inside that one: the agent in that file's folder leads it and also sits in the parent.</p>
@@ -2375,9 +2605,9 @@ document.addEventListener('change',e=>{
 let lastView='',lastPanel='';
 async function refresh(force){
   if(signedOut)return;
-  const [st,p,m,tk,fb]=await Promise.all([api('/api/status'),api('/api/peers'),api('/api/messages?limit=100'),api('/api/tasks'),api('/api/issues')]);
-  allTasks=tk.tasks||[];allFeedback=fb.issues||[];
-  const view=JSON.stringify([p.peers.map(({last_seen_s,...x})=>x),m.messages.map(x=>[x.id,x.status]),allTasks.map(t=>[t.id,t.status,t.owner,t.note]),allFeedback.map(f=>[f.id,f.status,f.note]),sel,panelTab,cfg.sessions]);
+  const [st,p,m,tk,fb,ib]=await Promise.all([api('/api/status'),api('/api/peers'),api('/api/messages?limit=100'),api('/api/tasks'),api('/api/issues'),api('/api/inbox')]);
+  allTasks=tk.tasks||[];allFeedback=fb.issues||[];inbox=ib.items||[];
+  const view=JSON.stringify([p.peers.map(({last_seen_s,...x})=>x),m.messages.map(x=>[x.id,x.status]),allTasks.map(t=>[t.id,t.status,t.owner,t.note]),allFeedback.map(f=>[f.id,f.status,f.note]),inbox.map(i=>i.id),sel,panelTab,cfg.sessions]);
   if(view===lastView&&!force)return;lastView=view;
   $('#hostline').textContent=`${st.host} · daemon ${st.version}`;
   $('#browsers').textContent=`${st.browsers} signed in · links work once and expire after 60 s`;
@@ -2438,8 +2668,28 @@ async function refresh(force){
   // The default space is always listed: it's where every agent with no space set lands.
   const dflt=groups.default?'':`<div class="chart"><div class="orow" style="justify-content:flex-start"><div class="ocol"><div class="sbox"><div class="name">default</div><div class="small mut">agents with no space set · none live</div></div></div></div></div>`;
   $('#spacelist').innerHTML=all((n,seen)=>{const u=sunit(n,seen);return u?`<div class="chart"><div class="orow" style="justify-content:flex-start">${u}</div></div>`:''})+dflt;
-  livePeers=p.peers;lastMsgs=m.messages;renderMessages(lastMsgs);renderTasks();renderFeedback();
+  livePeers=p.peers;lastMsgs=m.messages;renderMessages(lastMsgs);renderTasks();renderFeedback();renderInbox();
 }
+// The Inbox: one row per thing waiting on you, with the action it needs.
+let inbox=[];
+function renderInbox(){
+  $('#n-inbox').textContent=inbox.length||'';
+  if(document.activeElement?.closest?.('#inboxlist'))return;
+  const label={task:'task for you',question:'waiting on your answer',feedback:'feedback'};
+  const btn=(a,t)=>`<button class="ghost small" data-iact="${a}">${t}</button>`;
+  $('#inboxlist').innerHTML=inbox.map(i=>`<div class="task" data-ikind="${esc(i.kind)}" data-iid="${esc(i.id)}"><div class="mh"><span class="tchip ${i.kind==='task'?'open':i.kind==='question'?'new':esc(i.type)}">${label[i.kind]}</span><b>${esc(i.title)}</b><span class="when">${esc(i.id)} · waiting ${ago(i.since)}</span></div>
+    <div class="small mut">from <b>${esc(i.who)}</b>${i.kind==='feedback'?' · '+esc(i.type):''}</div>
+    ${(()=>{const more=i.text.trim().startsWith(i.title.trim())?i.text.trim().slice(i.title.trim().length).trim():i.text.trim();return more?`<div class="ftext">${esc(more)}</div>`:''})()}
+    <div class="tact">${i.kind==='task'?`<input class="small" data-itext placeholder="Note for ${esc(i.who)} (optional)">${btn('done','Done')}${btn('failed',"Couldn't do it")}`
+      :i.kind==='question'?`<input class="small" data-itext placeholder="Your answer">${btn('reply','Send')}${btn('dismiss','Dismiss')}`
+      :`${btn('accepted','Accept')}${btn('dismissed','Dismiss')}`}</div></div>`).join('')
+    ||'<div class="empty">Nothing is waiting on you.</div>'}
+document.addEventListener('click',async e=>{const b=e.target.closest('[data-iact]');if(!b)return;const row=b.closest('[data-iid]');
+  const text=row.querySelector('[data-itext]')?.value||'';
+  if(b.dataset.iact==='reply'&&!text.trim()){row.querySelector('[data-itext]').focus();return}
+  const r=await post('/api/inbox',{kind:row.dataset.ikind,id:row.dataset.iid,action:b.dataset.iact,text});
+  if(r.error)alert(r.error);document.activeElement?.blur();refresh(true)});
+document.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target.matches?.('#inboxlist [data-itext]')){e.preventDefault();e.target.closest('[data-iid]').querySelector('[data-iact]').click()}});
 // Feedback: newest first; accepting one opens a task for peerlink's maintainer.
 let allFeedback=[];
 function renderFeedback(){

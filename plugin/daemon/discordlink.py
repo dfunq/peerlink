@@ -445,6 +445,7 @@ class Bot:
                     "channel_id": str(d["channel_id"]), "message_id": str(d["id"]),
                     "guild_id": str(d.get("guild_id") or ""), "author": author.get("global_name") or author.get("username", "you"),
                     "author_id": str(author["id"]), "text": text, "dm": not d.get("guild_id"), "mentioned": mentioned,
+                    "ref": str((d.get("message_reference") or {}).get("message_id") or ""),  # the message it replies to
                     "files": files, "bot": bool(author.get("bot")),
                 })
             except Exception as err:  # one bad message must not drop the connection
