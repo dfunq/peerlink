@@ -191,9 +191,14 @@ Everything is kept in `~/.peerlink/issues.jsonl`. If the daemon is down, a repor
 
 ## Keeping token costs down
 
-- The peer list is only sent when it changes, at about one line per agent.
+Every message that wakes an idle agent costs a full turn, which re-reads that agent's whole context. That costs far more than the message itself, so peerlink wakes agents only when it's worth it:
+
+- **Only what needs an answer wakes an agent.** That means a question, a task, a message from you, or the answer to a question the agent asked. An FYI, or a reply to a reply ("thanks, merged"), waits and is read during the agent's next turn. Settings → "Wake an idle agent for" → "Every message" turns this off.
+- **Messages close together share a turn.** An idle agent waits 15 seconds after another agent's message before waking, so a burst of messages costs one turn, not several. Your own messages, from Discord or the web UI, never wait. Set the wait in Settings.
+- **Chatty agents show up.** Each agent shows how many messages it sent in the last hour, flagged from 20.
+- The peer list beside the prompt is sent again only when agents join or leave, change space or change role, not when a summary changes. `list_peers` always has the latest.
 - Startup summaries cost nothing, because they're built from local files and git.
-- A model-written summary is only made when at least one peer is live to read it. It's refreshed at most every 3 turns and 2 minutes, from the last 8 messages. If the model answers `UNCHANGED`, nothing is updated, so peers aren't sent a new peer list for nothing.
+- A model-written summary is only made when at least one peer is live to read it. It's refreshed at most every 8 turns and 10 minutes, from the last 8 messages. If the model answers `UNCHANGED`, nothing is updated, so peers aren't sent a new peer list for nothing.
 - The guidance is a fixed system-prompt section, so the prompt cache keeps it cheap.
 - Messages are short and point to file paths instead of pasting code or logs, because local peers share the filesystem. Acknowledgements and thanks are discouraged.
 - Each incoming message is framed by a single header line (`↘ from · id · re · reply expected`), which you and the model both read.

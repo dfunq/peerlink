@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.10"
+VERSION = "0.8.11"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -121,6 +121,8 @@ DEFAULT_CONFIG = {
     "peer_ttl_s": 30,
     "auto_wake_idle": True,
     "inject_while_busy": True,
+    "wake_for": "needed",  # "needed": only questions, tasks, your messages and answers to an agent's question start a turn; "all": every message
+    "wake_delay_s": 15,    # an idle agent waits this long after a message from another agent, so ones close together share a turn
     "max_hops": 6,
     "rate_limit_per_min": 12,
     "announce_per_hour": 6,  # announcements each agent may send: each one reaches a whole space
@@ -332,6 +334,7 @@ def client_config(sid):
         "poll_interval_ms": config["poll_interval_ms"],
         "auto_wake_idle": config["auto_wake_idle"] if s["auto_wake"] is None else s["auto_wake"],
         "inject_while_busy": config["inject_while_busy"],
+        "wake_delay_s": config.get("wake_delay_s", 15),
         "guidance": config["guidance"] or DEFAULT_GUIDANCE,
         "muted": s["muted"],
         "roster_in_prompt": config["roster_in_prompt"],
@@ -655,6 +658,7 @@ def public_peer(rec):
         "reach": sorted(reach(rec)),
         "busy": rec.get("busy", False),
         "busy_since": rec.get("busy_since"),
+        "sent_hour": sent_last_hour(rec),
         # The plugin version the agent runs ('' before 0.6.6): one behind the daemon needs /reload-plugins.
         "plugin": rec.get("plugin", ""),
         "context": rec.get("context"),  # percent of the context window in use, when the agent reports it
@@ -691,6 +695,12 @@ def snapshot():
         issues = sorted(feedback.values(), key=lambda i: i["ts"])[-500:]
     return {"status": status, "peers": {"host": HOSTNAME, "peers": peers, "leads": leads_view()}, "messages": {"messages": msgs},
             "tasks": {"tasks": task_list}, "issues": {"issues": issues, "path": ISSUES_PATH}, "inbox": {"items": inbox_items(), "user": USER_NAME}}
+
+
+def sent_last_hour(rec):
+    """How many messages this agent's folder sent in the last hour: a chatty pair shows up here first."""
+    cutoff, cwd = time.time() - 3600, rec.get("cwd")
+    return sum(1 for m in reversed(messages[-500:]) if m.get("ts", 0) > cutoff and (m.get("from") == rec["id"] or (cwd and m.get("from_cwd") == cwd)))
 
 
 def local_peers():
@@ -1587,6 +1597,9 @@ def send(body):
             "status": "queued",
             "v": 2,  # logs older than this never recorded delivery, so they are not replayed
         }
+        # Worth starting a turn for: a question, a task, or the answer to a question this agent asked. An FYI, or a
+        # reply to a reply, waits for the agent's next turn (wake_for "all" wakes for everything, as before 0.8.11).
+        msg["wake"] = config.get("wake_for", "needed") == "all" or msg["expects_reply"] or bool(parent and parent.get("expects_reply"))
         next_msg[0] += 1
         if kind == "task":
             new_task(msg, {"id": sender, "name": msg["from_name"], "cwd": msg["from_cwd"]}, parent_task)
@@ -3074,7 +3087,7 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)
 #channels label.check{display:flex;gap:8px;align-items:flex-start;margin:6px 0;max-width:820px;font-size:13px}#channels label.check input{margin-top:3px}
 .legend{display:grid;grid-template-columns:auto 1fr;gap:4px 10px;font-size:13px;max-width:820px}
 .ctx{font-size:11px;color:var(--mut);font-weight:500}.ctx.hi{color:var(--warn)}
-.node .state{font-size:11px;color:var(--mut);margin-top:4px}
+.node .state{font-size:11px;color:var(--mut);margin-top:4px}.hot{color:var(--warn);font-weight:600}
 .node .sum{font-size:12px;color:var(--mut);margin-top:4px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .sbox{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 12px;min-width:160px;max-width:260px;text-align:center}
 .sbox.led{border-color:var(--acc)}.sbox .small{margin-top:2px}
@@ -3266,6 +3279,9 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 </div>
 <div class="check"><input type="checkbox" name="auto_wake_idle" id="aw"><label for="aw" style="margin:0">Wake idle agents when a message arrives</label></div>
 <div class="check"><input type="checkbox" name="inject_while_busy" id="ib"><label for="ib" style="margin:0">Deliver into a running turn</label></div>
+<div class="row"><div><label for="wf">Wake an idle agent for</label><select name="wake_for" id="wf" style="width:100%"><option value="needed">Questions, tasks, your messages and answers (saves tokens)</option><option value="all">Every message</option></select></div>
+<div><label for="wd">Wait before waking for another agent's message (s)</label><input type="number" name="wake_delay_s" id="wd" min="0" max="120"></div></div>
+<div class="mut small">Each wake-up is a full turn that re-reads the agent's context. Waiting a few seconds lets messages that arrive together share one turn; your own messages never wait.</div>
 <div class="check"><input type="checkbox" name="roster_in_prompt" id="rp"><label for="rp" style="margin:0">Show each agent the live agent list when it changes</label></div>
 <div class="check"><input type="checkbox" name="auto_summary" id="as"><label for="as" style="margin:0">Keep agent summaries current automatically</label></div>
 <div class="row"><div><label>Summary model</label><input type="text" name="summary_model"></div><div></div></div>
@@ -3330,6 +3346,7 @@ function agentPanel(x,others=[]){const sc=cfg.sessions?.[x.id]||{};const fileSpa
    ${panelTab==='tasks'&&!x.remote?panelTasks(x):`<div class="facts"><span class="k">Status</span><span>${x.busy?'working':'idle'}${x.busy_since?' for '+ago(x.busy_since):''}${x.muted?' · muted':''}</span>
     <span class="k">Space</span><span><span class="pill">${esc(x.space||'default')}</span> <span class="mut">${esc(why)}</span></span>
     <span class="k">Role</span><span>${role}${leadBtn?' '+leadBtn:''}</span>
+    <span class="k">Messages</span><span>${x.sent_hour||0} sent in the last hour${x.sent_hour>=20?' · <span style="color:var(--warn)">chatty: each one can cost its recipient a turn</span>':''}</span>
     ${x.context!=null?`<span class="k">Context</span><span>${x.context}% of its window in use${x.context>=80?' · <span style="color:var(--warn)">close to compacting</span>':''}</span>`:''}
     <span class="k">Plugin</span><span>${esc(x.plugin||'older than 0.6.6')}${x.stale&&!x.remote?' · <span style="color:var(--warn)">run /reload-plugins in this agent</span>':''}</span></div>
    ${others.length?`<div class="threads"><div class="k small">Other sessions in this folder</div>${others.map(o=>`<button class="ghost small" data-sel="${esc(o.id)}" style="text-align:left">${esc(o.name)} · ${o.busy?'working':'idle'}${o.summary?' · '+esc(o.summary.slice(0,60)):''}</button>`).join('')}</div>`:''}
@@ -3416,6 +3433,8 @@ async function refresh(force,snap){
     ...(kids[n]||[]).filter(c=>c!==n).sort().map(c=>inside[c].peer)];
   const short=d=>{const t=tilde(d).split('/');return t.length>3?'…/'+t.slice(-2).join('/'):t.join('/')};
   const state=x=>(x.busy?'working':'idle')+(x.busy_since?' '+ago(x.busy_since):'');
+  // Messages sent in the last hour, flagged from 20: each one can cost its recipient a turn.
+  const rate=x=>x.sent_hour?`<span class="${x.sent_hour>=20?'hot':'mut'}" title="messages sent in the last hour">${x.sent_hour}/h</span>`:'';
   const ctx=x=>x.context==null?'':`<span class="ctx${x.context>=80?' hi':''}" title="context window in use">${x.context}%</span>`;
   // A lead is told apart by its outline (and says which team on hover), so every card keeps its context in one place.
   // The badge sits in the name row, left of the context; an offline lead's clear link goes beneath.
@@ -3424,7 +3443,7 @@ async function refresh(force,snap){
   const clearOff=x=>x.leads&&x.offline?`<div><span class="small mut" data-clearlead="${esc(x.space)}" title="Clear this lead" style="cursor:pointer">clear</span></div>`:'';
   const node=x=>`<${x.offline?'div':'button'} class="node${x.leads?' is-lead':''}${x.offline?' off':''}${x.id&&x.id===sel?' sel':''}"${x.offline?'':` data-sel="${esc(x.id)}"`}${x.leads?` title="Leads the ${esc(x.space)} ${x.parent?'team':'space'}${x.offline?' (offline)':''}"`:''}>
     <div class="nm"><span title="${esc(x.name)}">${x.offline?'':`<span class="dot ${x.busy?'busy':''}"></span>`}${esc(x.name)}</span><span class="rt">${badge(x)}${ctx(x)}</span></div>${clearOff(x)}
-    <div class="dir">${esc(short(x.cwd))}</div>${x.branch?`<div class="dir" title="${esc(x.branch)}">⎇ ${esc(x.branch)}</div>`:''}<div class="sum"${x.role?` title="Role: ${esc(x.role)}"`:''}>${esc(x.summary||x.role)||'no summary yet'}</div>${x.open_tasks?`<div class="small" style="color:var(--acc)">${x.open_tasks} open task${x.open_tasks>1?'s':''}</div>`:''}${x.offline?'':`<div class="state">${state(x)}</div>`}</${x.offline?'div':'button'}>`;
+    <div class="dir">${esc(short(x.cwd))}</div>${x.branch?`<div class="dir" title="${esc(x.branch)}">⎇ ${esc(x.branch)}</div>`:''}<div class="sum"${x.role?` title="Role: ${esc(x.role)}"`:''}>${esc(x.summary||x.role)||'no summary yet'}</div>${x.open_tasks?`<div class="small" style="color:var(--acc)">${x.open_tasks} open task${x.open_tasks>1?'s':''}</div>`:''}${x.offline?'':`<div class="state">${state(x)}${x.sent_hour?' · '+rate(x):''}</div>`}</${x.offline?'div':'button'}>`;
   // Every live agent gets its own card, two sessions in one folder included: a hidden one can't be found to message.
   const rank=(a,b)=>(b.busy-a.busy)||(a.last_seen_s-b.last_seen_s);
   const unit=(n,seen)=>{if(seen.has(n))return '';seen.add(n);
@@ -3453,7 +3472,7 @@ async function refresh(force,snap){
     return `<${x.offline?'div':'button'} class="lrow${x.leads?' is-lead':''}${x.offline?' off':''}${x.id&&x.id===sel?' sel':''}"${x.offline?'':` data-sel="${esc(x.id)}"`}>
       <span class="ln"><span title="${esc(x.name)}">${x.offline?'':`<span class="dot ${x.busy?'busy':''}"></span>`}${esc(x.name)}</span>${badge(x)}</span>
       <span class="lw"${x.role?` title="Role: ${esc(x.role)}"`:''}><span class="mono">${where}</span>${x.summary||x.role?' — '+esc(x.summary||x.role):x.offline?' — offline':''}</span>
-      <span class="lr">${x.open_tasks?`<span style="color:var(--acc)">${x.open_tasks} task${x.open_tasks>1?'s':''}</span>`:''}${x.offline?'':`<span class="mut">${state(x)}</span>`}${ctx(x)}</span></${x.offline?'div':'button'}>`};
+      <span class="lr">${rate(x)}${x.open_tasks?`<span style="color:var(--acc)">${x.open_tasks} task${x.open_tasks>1?'s':''}</span>`:''}${x.offline?'':`<span class="mut">${state(x)}</span>`}${ctx(x)}</span></${x.offline?'div':'button'}>`};
   const lspace=(n,seen)=>{if(seen.has(n))return '';seen.add(n);
     const nested=inside[n]&&inside[n].parent!==n;
     const head=nested?(leads[n]||[]):tops(n);

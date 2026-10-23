@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.10'
+const DAEMON_VERSION = '0.8.11'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -21,6 +21,8 @@ type PeerMessage = {
   hops: number
   task?: string
   kind?: string
+  // false: nothing in it needs a turn of its own (an FYI, a reply to a reply), so it waits for the agent's next one.
+  wake?: boolean
 }
 
 type ClientConfig = {
@@ -41,6 +43,8 @@ type ClientConfig = {
   discord?: { channel_id: string; channel: string; master: boolean }[]
   poll_interval_ms: number
   auto_wake_idle: boolean
+  // How long an idle agent waits after another agent's message, so ones close together share a turn.
+  wake_delay_s?: number
   inject_while_busy: boolean
   guidance: string
   muted: boolean
@@ -56,8 +60,8 @@ const SUMMARY_SYSTEM =
   'You keep the one-line status other Claude agents see for this agent. In at most 200 characters say what it is working on, in which repo or service, and what it could answer questions about. Plain text, no preamble, no quotes. If the current status is still accurate, reply exactly UNCHANGED.'
 
 // Summaries cost a model call, and every change is resent to each peer: refresh only this often.
-const SUMMARY_EVERY_TURNS = 3
-const SUMMARY_MIN_GAP_MS = 2 * 60_000
+const SUMMARY_EVERY_TURNS = 8
+const SUMMARY_MIN_GAP_MS = 10 * 60_000
 const MANUAL_SUMMARY_HOLD_MS = 10 * 60_000
 
 const HELP = `peerlink commands:
@@ -394,10 +398,18 @@ function showStatus($: EngineInterface) {
 
 const shownWaiting = new Set<string>()
 
+// When an idle agent wakes for messages from other agents, and whether a check is already set for then.
+let wakeAt: number | undefined
+let wakeTimer = false
+
 async function deliver($: EngineInterface) {
-  if (pending.length === 0 || !cfg) return
+  if (pending.length === 0 || !cfg) {
+    wakeAt = undefined
+    return
+  }
   const batch = pending
   if (busy) {
+    wakeAt = undefined
     if (cfg.inject_while_busy === false) return
     pending = []
     const res = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: framed(batch) }] } })
@@ -420,6 +432,32 @@ async function deliver($: EngineInterface) {
     showStatus($)
     return
   }
+  // Nothing that needs a turn of its own: it's read with the agent's next turn, whatever starts it.
+  if (!batch.some(m => m.wake !== false)) {
+    for (const m of batch.filter(m => !shownWaiting.has(m.id))) {
+      shownWaiting.add(m.id)
+      $.ui.log(`${frame(m).replace('\n', ': ')}  (no reply needed: read with the next turn)`)
+    }
+    return
+  }
+  // Another agent's message waits a few seconds, so ones close together share a turn; yours never wait.
+  const fromYou = batch.some(m => m.wake !== false && (m.from === 'user' || m.from.startsWith('discord:')))
+  const delay = (cfg.wake_delay_s ?? 15) * 1000
+  if (!fromYou && delay > 0) {
+    const now = await $.clock.now()
+    wakeAt ??= now + delay
+    if (now < wakeAt) {
+      if (!wakeTimer) {
+        wakeTimer = true
+        void $.clock.sleep(wakeAt - now + 50).then(() => {
+          wakeTimer = false
+          return deliver($)
+        })
+      }
+      return
+    }
+  }
+  wakeAt = undefined
   pending = []
   busy = true
   $.ui.toast(`Message from ${batch.map(m => m.from_name).join(', ')}`)
@@ -507,8 +545,10 @@ async function rosterContext($: EngineInterface) {
   if (!res.ok) return undefined
   const peers = (res.data.peers as any[]).filter(p => !p.muted).slice(0, 12)
   const roster = peers.map(peerLine).join('\n')
-  if (roster === lastRoster) return undefined
-  lastRoster = roster
+  // Sent again only when who's there, or what they're for, changes: not each time a summary or context moves.
+  const who = peers.map(p => [p.name, p.cwd, p.space, p.role, spaceTag(p)].join('|')).join('\n')
+  if (who === lastRoster) return undefined
+  lastRoster = who
   return peers.length
     ? `Peer agents now live (send_message to reach one):\n${roster}`
     : 'peerlink: no other agents are live in your space now.'
