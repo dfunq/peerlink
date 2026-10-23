@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.1'
+const DAEMON_VERSION = '0.8.2'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -888,7 +888,10 @@ export const register: Register = on => {
       inputSchema: {
         type: 'object',
         properties: {
-          to: { type: 'string', description: 'Peer agent name or id; leave it out when replying, the reply goes back to the sender' },
+          to: {
+            type: 'string',
+            description: 'Peer agent name or id, or "user" for your user (it waits in their Inbox); leave it out when replying, the reply goes back to the sender',
+          },
           text: { type: 'string', description: 'The message: what you need and why, briefly' },
           expects_reply: { type: 'boolean', description: 'True if you need an answer' },
           reply_to: { type: 'string', description: 'Id of the peer message you are answering; the reply goes to its sender' },
