@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.9"
+VERSION = "0.8.10"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -323,6 +323,7 @@ def client_config(sid):
         "space_from": where,
         "parent": parent_of(rec) if rec else "",
         "leads": leads(rec) if rec else "",
+        "role": role_of(rec) if rec else "",
         # The space this agent's space sits inside, for members too (a lead's `parent` is the same).
         "space_parent": read_space_file(where, "parent") if rec and source == "file" else "",
         "lead": lead,
@@ -345,15 +346,56 @@ def clean_space(name):
 
 
 def find_space_file(cwd):
-    """The nearest .peerlink file at or above cwd. The home folder itself never counts: ~/.peerlink is ours."""
+    """The nearest .peerlink at or above cwd that names a space. One with only a role doesn't count: it describes
+    its folder's agent, not where it sits. The home folder itself never counts: ~/.peerlink is ours."""
     home = os.path.expanduser("~")
     d = os.path.abspath(cwd) if cwd else ""
     while d and d != home and d != os.path.dirname(d):
         path = os.path.join(d, SPACE_FILE)
-        if os.path.isfile(path):
+        if os.path.isfile(path) and read_space_file(path):
             return path
         d = os.path.dirname(d)
     return None
+
+
+ROLE_MAX = 1500
+
+
+def role_of(rec):
+    """What this agent is there for, in its own words: the `role:` lines of the .peerlink in its folder (not one above,
+    which describes another agent). Read again at most every SPACE_CACHE_S, like the space."""
+    now = time.time()
+    cached = rec.get("_role")
+    if cached and now - cached[0] < SPACE_CACHE_S:
+        return cached[1]
+    role = ""
+    try:
+        with open(os.path.join(rec.get("cwd") or "/nonexistent", SPACE_FILE)) as f:
+            role = "\n".join(m.group(1).strip() for m in (re.match(r"\s*role\s*[:=](.*)", l, re.I) for l in f) if m).strip()[:ROLE_MAX]
+    except OSError:
+        pass
+    rec["_role"] = (now, role)
+    return role
+
+
+def write_role(rec, role):
+    """Set or clear the `role:` lines in the .peerlink of this agent's own folder."""
+    cwd = rec.get("cwd", "")
+    if not cwd or os.path.abspath(cwd) == os.path.expanduser("~"):
+        raise ValueError("no project folder to put a role in")
+    path = os.path.join(cwd, SPACE_FILE)
+    lines = []
+    if os.path.exists(path):
+        with open(path) as f:
+            lines = [l for l in f.read().splitlines() if not re.match(r"\s*role\s*[:=]", l, re.I)]
+    lines += [f"role: {l.strip()}" for l in role[:ROLE_MAX].splitlines() if l.strip()]
+    if any(l.strip() and not l.strip().startswith("#") for l in lines):
+        with open(path, "w") as f:
+            f.write("\n".join(lines) + "\n")
+    elif os.path.exists(path):
+        os.remove(path)
+    rec.pop("_role", None)
+    return path
 
 
 def read_space_file(path, key="space"):
@@ -600,6 +642,7 @@ def public_peer(rec):
         "repo": rec.get("repo", ""),
         "branch": rec.get("branch", ""),
         "summary": rec.get("summary", ""),
+        "role": role_of(rec),
         "space": space,
         "space_source": source,
         "space_from": where,
@@ -611,6 +654,7 @@ def public_peer(rec):
         "open_tasks": sum(1 for t in tasks.values() if t["status"] in TASK_OPEN and t["owner_cwd"] and t["owner_cwd"] == rec.get("cwd")),
         "reach": sorted(reach(rec)),
         "busy": rec.get("busy", False),
+        "busy_since": rec.get("busy_since"),
         # The plugin version the agent runs ('' before 0.6.6): one behind the daemon needs /reload-plugins.
         "plugin": rec.get("plugin", ""),
         "context": rec.get("context"),  # percent of the context window in use, when the agent reports it
@@ -619,6 +663,34 @@ def public_peer(rec):
         "terminating": bool(rec.get("terminate")),
         "last_seen_s": round(time.time() - rec["last_seen"], 1),
     }
+
+
+def set_busy(rec, busy):
+    """Record busy or idle, and since when, so the web UI can say "idle 12m"."""
+    busy = bool(busy)
+    if rec.get("busy") != busy or "busy_since" not in rec:
+        rec["busy_since"] = time.time()
+    rec["busy"] = busy
+
+
+remote_cache = [0.0, []]  # when, peers: other machines are asked at most every 5 s, however many browsers watch
+
+
+def snapshot():
+    """Everything the web UI shows, in one answer."""
+    now = time.time()
+    if config.get("remotes") and now - remote_cache[0] > 5:
+        remote_cache[:] = [now, remote_peers()]
+    peers = local_peers() + (remote_cache[1] if config.get("remotes") else [])
+    with lock:
+        status = {"version": VERSION, "pid": os.getpid(), "host": HOSTNAME, "port": PORT,
+                  "sessions": sum(1 for r in sessions.values() if is_live(r, now)), "queued": sum(len(b) for b in inboxes.values()),
+                  "messages": len(messages), "browsers": sum(1 for e in web_sessions.values() if e > now), "home": HOME, "launcher": LAUNCHER_PATH}
+        msgs = messages[-100:]
+        task_list = sorted(tasks.values(), key=lambda t: -t["created"])[:500]
+        issues = sorted(feedback.values(), key=lambda i: i["ts"])[-500:]
+    return {"status": status, "peers": {"host": HOSTNAME, "peers": peers, "leads": leads_view()}, "messages": {"messages": msgs},
+            "tasks": {"tasks": task_list}, "issues": {"issues": issues, "path": ISSUES_PATH}, "inbox": {"items": inbox_items(), "user": USER_NAME}}
 
 
 def local_peers():
@@ -1009,6 +1081,24 @@ def discord_activity(rec, activity):
     if emoji:
         for m in discord_pending(rec):
             set_reaction(m, emoji)
+
+
+def clean_stale_reactions():
+    """Once: take 🤔, 🛠️ and ❓ off your recent Discord messages. Daemons before 0.8.8 could leave them stuck, and
+    which ones isn't recorded. A message an agent is still on gets its reaction back at the next heartbeat."""
+    if config.get("reactions_cleaned") or not discord.get("token"):
+        return
+    cutoff = time.time() - 2 * 86400
+    with lock:
+        recent = [m for m in messages if m.get("discord") and str(m.get("from", "")).startswith("discord:") and m.get("ts", 0) > cutoff][-60:]
+        for m in recent:
+            reactions.pop(m["id"], None)
+            for emoji in ACTIVITY_EMOJI.values():
+                reaction_jobs.append((m["discord"]["channel_id"], m["discord"]["message_id"], emoji, None))
+        config["reactions_cleaned"] = VERSION
+        save_config()
+    reaction_wake.set()
+    log("discord", "clearing activity reactions from", len(recent), "recent messages")
 
 
 def discord_turn_done(rec):
@@ -1508,6 +1598,33 @@ def send(body):
         record(msg)
     log("msg", msg["id"], msg["from_name"], "->", msg["to_name"])
     return 200, {"id": msg["id"], "to": msg["to_name"], "status": "queued", "task": msg.get("task")}
+
+
+def web_send(body):
+    """A message or task from you in the web UI, to an agent (name or id) or a space's lead ("space:<name>")."""
+    to, text = str(body.get("to") or "").strip(), str(body.get("text") or "").strip()
+    kind = "task" if body.get("kind") == "task" else "message"
+    if not to or not text:
+        return 400, {"error": "say who it's for and what it says"}
+    with lock:
+        word = to.lower()
+        if word.startswith("space:"):
+            target, err = lead_target(None, word, None)
+        else:
+            target, err = resolve(to)
+        if err or target is None:
+            return 404, {"error": err or f"no live agent '{to}'"}
+        msg = {"id": f"m{next_msg[0]}", "ts": time.time(), "from": "user", "from_name": f"{USER_NAME} (web UI)", "from_host": HOSTNAME,
+               "from_cwd": "", "from_space": "", "to": target["id"], "to_name": display_name(target) if target["id"] in sessions else target["name"],
+               "to_cwd": target.get("cwd", ""), "to_space": space_of(target)[0] if target["id"] in sessions else "",
+               "text": text[:20000], "expects_reply": kind == "task", "reply_to": None, "hops": 0, "status": "queued", "v": 2}
+        next_msg[0] += 1
+        if kind == "task":
+            new_task(msg, {"id": "user", "name": msg["from_name"], "cwd": ""})
+        inboxes.setdefault(target["id"], []).append(msg)
+        record(msg)
+    log("web", msg["id"], "->", msg["to_name"], kind)
+    return 200, {"id": msg["id"], "to": msg["to_name"], "task": msg.get("task")}
 
 
 def report_issue(body):
@@ -2244,6 +2361,38 @@ class Handler(BaseHTTPRequestHandler):
         html = PAGE_HTML.replace("{title}", title).replace("{text}", text)
         return self.reply(code, html, "text/html; charset=utf-8")
 
+    def stream(self, browser):
+        """Server-sent events: a fresh snapshot whenever what the page shows changes (checked each second), and a
+        comment every 15 s so proxies keep the connection. Ends when the browser leaves or is signed out."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        last, quiet = "", 0
+        try:
+            while True:
+                if browser:
+                    with lock:
+                        if not (web_sessions.get(browser, 0) > time.time()):
+                            return
+                snap = snapshot()
+                # Ages tick every second; they aren't a change worth sending.
+                for p in snap["peers"]["peers"]:
+                    p.pop("last_seen_s", None)
+                body = json.dumps(snap)
+                if body != last:
+                    self.wfile.write(f"data: {body}\n\n".encode())
+                    self.wfile.flush()
+                    last, quiet = body, 0
+                elif quiet >= 15:
+                    self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
+                    quiet = 0
+                quiet += 1
+                time.sleep(1)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
+
     def body(self):
         n = int(self.headers.get("Content-Length") or 0)
         if not n:
@@ -2337,6 +2486,11 @@ class Handler(BaseHTTPRequestHandler):
             log("key rotated")
             return self.reply(200, {"ok": True})
 
+        if rest == ["snapshot"] and method == "GET":
+            return self.reply(200, snapshot())
+        if rest == ["stream"] and method == "GET":
+            return self.stream(browser)
+
         if rest == ["status"] and method == "GET":
             with lock:
                 live = [r for r in sessions.values() if is_live(r)]
@@ -2393,7 +2547,7 @@ class Handler(BaseHTTPRequestHandler):
                     config["sessions"].setdefault(sid, {})["space"] = want
                     rec.pop("_space", None)
                     save_config()
-                rec["busy"] = bool(b.get("busy", False))
+                set_busy(rec, b.get("busy", False))
                 rec["last_seen"] = time.time()
                 sessions[sid] = rec
                 note_lone_leads()
@@ -2424,7 +2578,7 @@ class Handler(BaseHTTPRequestHandler):
                 if "busy" in b:
                     if rec.get("busy") and not b["busy"]:
                         discord_turn_done(rec)
-                    rec["busy"] = bool(b["busy"])
+                    set_busy(rec, b["busy"])
                 if b.get("activity"):
                     discord_activity(rec, b["activity"])
                 if isinstance(b.get("context"), (int, float)):
@@ -2474,9 +2628,9 @@ class Handler(BaseHTTPRequestHandler):
             if rec is None:
                 return self.reply(404, {"error": "unknown agent"})
             b = self.body()
-            field = "parent" if "parent" in b else "space"
+            field = "role" if "role" in b else "parent" if "parent" in b else "space"
             try:
-                path = write_space_file(rec, clean_space(b.get(field)), field)
+                path = write_role(rec, str(b.get("role") or "")) if field == "role" else write_space_file(rec, clean_space(b.get(field)), field)
             except (OSError, ValueError) as err:
                 return self.reply(400, {"error": str(err)})
             log("space file", path)
@@ -2512,6 +2666,12 @@ class Handler(BaseHTTPRequestHandler):
             if not browser or self.key_ok():
                 return self.reply(403, {"error": "a space's lead is set in the web UI"})
             code, out = set_lead(rest[1], str(self.body().get("cwd") or ""))
+            return self.reply(code, out)
+        if rest == ["web", "send"] and method == "POST":
+            # Only you, in the browser: it goes out in your name.
+            if not browser or self.key_ok():
+                return self.reply(403, {"error": "messages from you are sent from the web UI"})
+            code, out = web_send(self.body())
             return self.reply(code, out)
         if rest == ["inbox"] and method == "GET":
             return self.reply(200, {"items": inbox_items(), "user": USER_NAME})
@@ -2644,6 +2804,7 @@ def serve():
     file_pending_issues()
     load_discord()
     threading.Thread(target=reaction_worker, name="discord-reactions", daemon=True).start()
+    clean_stale_reactions()
     start_discord()
     try:
         write_launcher()
@@ -2913,7 +3074,7 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)
 #channels label.check{display:flex;gap:8px;align-items:flex-start;margin:6px 0;max-width:820px;font-size:13px}#channels label.check input{margin-top:3px}
 .legend{display:grid;grid-template-columns:auto 1fr;gap:4px 10px;font-size:13px;max-width:820px}
 .ctx{font-size:11px;color:var(--mut);font-weight:500}.ctx.hi{color:var(--warn)}
-.node .stale{font-size:11px;color:var(--warn);margin-top:4px}
+.node .state{font-size:11px;color:var(--mut);margin-top:4px}
 .node .sum{font-size:12px;color:var(--mut);margin-top:4px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .sbox{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 12px;min-width:160px;max-width:260px;text-align:center}
 .sbox.led{border-color:var(--acc)}.sbox .small{margin-top:2px}
@@ -2991,6 +3152,14 @@ button.ghost{background:transparent;color:var(--fg);border:1px solid var(--line)
 button:hover:not(:disabled){filter:brightness(1.06)}button.ghost:hover:not(:disabled){border-color:var(--mut);filter:none}button:disabled{opacity:.55;cursor:default}
 :focus-visible{outline:2px solid var(--acc);outline-offset:2px}input:focus-visible,select:focus-visible,textarea:focus-visible{outline-offset:0;border-color:var(--acc)}
 .fl{display:inline-flex;gap:6px;align-items:center;white-space:nowrap}.fl label{margin:0}
+input.search{width:auto;flex:1 1 220px;max-width:360px}
+.panel .role{margin-top:8px;font-size:13px;white-space:pre-wrap;overflow-wrap:anywhere;border-left:2px solid var(--acc);padding-left:8px}.panel .role .k{color:var(--mut);font-size:12px}
+.panel textarea[name=role]{min-height:64px;font:inherit;font-size:13px}
+.sendbox{display:flex;flex-direction:column;gap:8px;margin-top:12px}.sendbox textarea{min-height:64px;font:inherit;font-size:13px}.sendbox .check{margin:0;font-weight:400}
+#newtask{max-width:640px;margin:0 0 12px}#newtask[hidden]{display:none}#newtask select{width:100%}
+details.adv{margin:0;border-top:1px dashed var(--line);padding-top:8px}details.adv summary{font-size:13px;color:var(--mut)}details.adv[open]{display:flex;flex-direction:column;gap:12px}
+#cfg details.adv{margin-top:12px}#cfg details.adv[open]{gap:0}
+button.copy{padding:0 6px;font-size:11px;margin-left:4px;font-family:inherit}
 details.how{margin:-10px 0 16px;color:var(--mut)}details.how summary{font-size:13px;color:var(--acc);width:max-content}details.how p{margin:6px 0 0;max-width:760px}details.how ul{margin:6px 0 0;padding-left:18px;max-width:760px}
 details{margin-top:8px}summary{cursor:pointer;font-size:12px;color:var(--mut)}
 table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
@@ -3022,7 +3191,8 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <main><div id="stalebar" style="display:none" class="small"></div><div id="offline">Can't reach the peerlink daemon. This page reconnects once it's back.</div><div id="signedout">Signed out. Run <span class="mono">/peerlink web</span> in any agent to sign in again.</div>
 
 <section id="agents"><h1>Agents</h1><p class="lead">Your live agents, by space. Click one to see or change it.</p>
-<div class="msgbar"><span class="seg" role="group" aria-label="Layout"><button class="ghost small" data-alayout="chart">Chart</button><button class="ghost small" data-alayout="list">List</button></span></div>
+<div class="msgbar"><span class="seg" role="group" aria-label="Layout"><button class="ghost small" data-alayout="chart">Chart</button><button class="ghost small" data-alayout="list">List</button></span>
+<input id="asearch" class="search" type="search" placeholder="Search agents" title="Search by name, folder, branch or summary" aria-label="Search agents"></div>
 <details class="how"><summary>How it works</summary><ul>
 <li>Each space shows its lead first, outlined in orange, with its members beneath it. The lead of a space inside another sits with the parent's agents, with its team beneath it.</li>
 <li>Work sent to a space goes to its lead. An agent alone in a space leads it until you pick another: open an agent and choose Make lead.</li>
@@ -3030,6 +3200,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <li>The percentage is how full the agent's context window is. A yellow dot means it's working, a green one that it's idle.</li></ul></details><div class="orgwrap"><div id="peers"></div><div id="detail"></div></div></section>
 
 <section id="inbox"><h1>Inbox</h1><p class="lead">Everything waiting on you, the longest waiting first. On Discord, <span class="mono">/inbox</span> shows the same list, and you answer by number, like <span class="mono">1 done</span>.</p>
+<div class="msgbar"><button class="ghost small" id="notifybtn" data-notify>Desktop alerts: off</button></div>
 <div class="mlist" id="inboxlist"></div></section>
 
 <section id="spaces"><h1>Spaces</h1>
@@ -3046,7 +3217,8 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 
 <section id="messages"><h1>Messages</h1><p class="lead">Recent messages between agents, newest first. Click one to read it all.</p>
 <div class="msgbar"><span class="fl"><label class="small mut" for="msgspace">Space</label><select id="msgspace"><option value="">All spaces</option></select></span>
-<span class="fl"><label class="small mut" for="msgagent">Agent</label><select id="msgagent"><option value="">Everyone</option></select></span></div>
+<span class="fl"><label class="small mut" for="msgagent">Agent</label><select id="msgagent"><option value="">Everyone</option></select></span>
+<input id="msgq" class="search" type="search" placeholder="Search messages" aria-label="Search messages"></div>
 <div class="mlist" id="msgs"></div></section>
 
 <section id="tasks"><h1>Tasks</h1><p class="lead">Work handed between agents. Click a card for details, or drag it.</p>
@@ -3054,12 +3226,15 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <li>An agent hands out a task with <span class="mono">kind: task</span>. On Discord, start a post with <span class="mono">Task:</span>. A task stays open until its owner marks it done or failed, and whoever asked gets the owner's note.</li>
 <li>A task sent to a lead is the lead's to split up. Its subtasks count toward it.</li>
 <li>Drag a card to Cancelled to cancel it, from Done, Failed or Cancelled to Open to reopen it, or onto an agent to hand it over. Only the owner moves a task to In progress, Done or Failed. If the owner changed a task after the board was drawn, your move is refused.</li></ul></details>
-<div class="msgbar"><span class="seg" role="group" aria-label="Layout"><button class="ghost small" data-tlayout="board">Board</button><button class="ghost small" data-tlayout="list">List</button></span>
+<div class="msgbar"><button class="small" data-newtask>+ New task</button><span class="seg" role="group" aria-label="Layout"><button class="ghost small" data-tlayout="board">Board</button><button class="ghost small" data-tlayout="list">List</button></span>
 <span id="tstatusw" class="fl"><label class="small mut" for="tstatus">Show</label><select id="tstatus"><option value="live">Open and in progress</option><option value="done">Done</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option><option value="">All</option></select></span>
 <span class="fl"><label class="small mut" for="towner">Owner</label><select id="towner"><option value="">Everyone</option></select></span>
 <span class="fl"><label class="small mut" for="treq">Asked by</label><select id="treq"><option value="">Anyone</option></select></span>
 <span class="fl"><label class="small mut" for="tspace">Space</label><select id="tspace"><option value="">All spaces</option></select></span>
 <span id="tgroupw" class="fl"><label class="small mut" for="tgroup">Rows</label><select id="tgroup"><option value="">One board</option><option value="space">By space</option><option value="owner">By owner</option></select></span></div>
+<form id="newtask" class="card sendbox" hidden><label>To<select name="to" required></select></label>
+<label>Task<textarea name="text" rows="3" placeholder="First line is the title. Add details below it." required></textarea></label>
+<div class="addline"><button type="submit">Send task</button><button type="button" class="ghost" data-newtask>Cancel</button><span class="small" id="newtaskmsg"></span></div></form>
 <div id="tdrop" class="tdrop"></div>
 <div class="mlist" id="tasklist"></div></section>
 
@@ -3095,9 +3270,10 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <div class="check"><input type="checkbox" name="auto_summary" id="as"><label for="as" style="margin:0">Keep agent summaries current automatically</label></div>
 <div class="row"><div><label>Summary model</label><input type="text" name="summary_model"></div><div></div></div>
 <label>Guidance for every agent</label><textarea name="guidance" id="guidance"></textarea><div class="mut small">Leave empty to use the default, shown in grey.</div>
-<label>Other machines' daemons, one URL per line</label><textarea name="remotes" style="min-height:60px"></textarea>
+<details class="adv"><summary>Other machines</summary>
+<label>Their daemons, one URL per line</label><textarea name="remotes" style="min-height:60px"></textarea>
 <div class="row"><div><label>Listen host (0.0.0.0 to accept other machines; needs a restart)</label><input type="text" name="listen_host"></div>
-<div><label>Shared token for other machines</label><input type="text" name="token"></div></div>
+<div><label>Shared token</label><input type="text" name="token"></div></div></details>
 <p><button type="submit">Save</button> <span class="mut small" id="saved"></span></p>
 </form></section>
 
@@ -3147,10 +3323,11 @@ function agentPanel(x,others=[]){const sc=cfg.sessions?.[x.id]||{};const fileSpa
   const opt=(v,t)=>`<option value="${v}" ${wake===v?'selected':''}>${t}</option>`;
   return `<div class="card panel${x.leads?' is-lead':''}">
    <div class="top"><span><span class="dot ${x.busy?'busy':''}"></span><span class="name">${esc(x.name)}</span>${x.remote?` <span class="mut small">@${esc(x.host)}</span>`:''}</span><button class="ghost x" data-close title="Close">✕</button></div>
-   <div class="mono mut" style="margin-top:4px">${esc(tilde(x.cwd))}${x.branch?' · '+esc(x.branch):''}</div>
+   <div class="mono mut" style="margin-top:4px">${esc(tilde(x.cwd))}${x.branch?' · '+esc(x.branch):''} <button class="ghost small copy" data-copy="${esc(x.cwd)}" title="Copy the folder path">Copy</button></div>
+   ${x.role?`<div class="role"><span class="k">Role</span> ${esc(x.role)}</div>`:''}
    <div style="margin-top:8px">${esc(x.summary)||'<span class="mut">no summary yet</span>'}</div>
    ${x.remote?'':`<div class="ptabs"><button class="${panelTab==='tasks'?'':'on'}" data-ptab="about">Agent</button><button class="${panelTab==='tasks'?'on':''}" data-ptab="tasks">Tasks${x.open_tasks?' · '+x.open_tasks:''}</button></div>`}
-   ${panelTab==='tasks'&&!x.remote?panelTasks(x):`<div class="facts"><span class="k">Status</span><span>${x.busy?'working':'idle'}${x.muted?' · muted':''}</span>
+   ${panelTab==='tasks'&&!x.remote?panelTasks(x):`<div class="facts"><span class="k">Status</span><span>${x.busy?'working':'idle'}${x.busy_since?' for '+ago(x.busy_since):''}${x.muted?' · muted':''}</span>
     <span class="k">Space</span><span><span class="pill">${esc(x.space||'default')}</span> <span class="mut">${esc(why)}</span></span>
     <span class="k">Role</span><span>${role}${leadBtn?' '+leadBtn:''}</span>
     ${x.context!=null?`<span class="k">Context</span><span>${x.context}% of its window in use${x.context>=80?' · <span style="color:var(--warn)">close to compacting</span>':''}</span>`:''}
@@ -3159,12 +3336,16 @@ function agentPanel(x,others=[]){const sc=cfg.sessions?.[x.id]||{};const fileSpa
    ${(x.threads&&(x.threads.owes.length||x.threads.waiting.length))?`<div class="threads"><div class="k small">Open requests</div>
     ${x.threads.owes.map(t=>`<div class="small">owes <b>${esc(t.with)}</b> a reply · <span class="mut">${esc(t.id)}: ${esc(t.text.slice(0,90))}</span></div>`).join('')}
     ${x.threads.waiting.map(t=>`<div class="small">waiting on <b>${esc(t.with)}</b> · <span class="mut">${esc(t.id)}: ${esc(t.text.slice(0,90))}</span></div>`).join('')}</div>`:''}
-   ${x.remote?'<div class="small mut">This agent runs on another machine; change it there.</div>':`<form id="agentform" data-id="${esc(x.id)}" data-nick="${esc(sc.nickname||'')}" data-spacefile="${esc(fileSpace)}" data-parent="${esc(x.file_parent||'')}" data-override="${esc(sc.space||'')}" data-wake="${wake}" data-muted="${x.muted?'1':''}">
+   ${x.remote?'':`<form id="msgform" class="sendbox" data-to="${esc(x.id)}"><label>Message ${esc(x.name)}<textarea name="text" rows="3" placeholder="It arrives as a message from you; its reply shows in Messages."></textarea></label>
+    <div class="addline"><label class="check"><input type="checkbox" name="astask"> Send as a task</label><button type="submit">Send</button><span class="small ${sentNote.err?'err':'ok'}" id="sendmsg">${sentNote.to===x.id?esc(sentNote.text):''}</span></div></form>`}
+   ${x.remote?'<div class="small mut">This agent runs on another machine; change it there.</div>':`<form id="agentform" data-id="${esc(x.id)}" data-nick="${esc(sc.nickname||'')}" data-spacefile="${esc(fileSpace)}" data-parent="${esc(x.file_parent||'')}" data-override="${esc(sc.space||'')}" data-wake="${wake}" data-muted="${x.muted?'1':''}" data-role="${esc(x.role||'')}">
     <label>Name<input name="nickname" type="text" value="${esc(sc.nickname||'')}" placeholder="${esc(x.name)}"><span class="hint">What other agents call it. Kept for this folder.</span></label>
+    <label>Role<textarea name="role" rows="3" placeholder="What this agent is here for, e.g. Owns the billing API: invoices, payments, the Stripe webhook.">${esc(x.role||'')}</textarea><span class="hint">Saved as role: in this folder's .peerlink. The agent gets it as its brief, and other agents see it.</span></label>
     <label>Space for this folder<input name="spacefile" type="text" value="${esc(fileSpace)}" placeholder="none"><span class="hint">Saved in the folder's .peerlink, for every agent there.</span></label>
     <label>Inside space<input name="parent" type="text" value="${esc(x.file_parent||'')}" placeholder="none (top level)"><span class="hint">The space ${esc(x.space||'default')} sits inside. Moves every agent in it.</span></label>
+    <details class="adv"${sc.space||wake!=='default'?' open':''}><summary>Advanced</summary>
     <label>Space for this agent only<input name="override" type="text" value="${esc(sc.space||'')}" placeholder="none"><span class="hint">Overrides the folder's space for this agent.</span></label>
-    <label>When a message arrives<select name="wake">${opt('default','Use the default')}${opt('on','Start a turn')}${opt('off','Wait for the next prompt')}</select></label>
+    <label>When a message arrives<select name="wake">${opt('default','Use the default')}${opt('on','Start a turn')}${opt('off','Wait for the next prompt')}</select></label></details>
     <label class="check"><input name="muted" type="checkbox" ${x.muted?'checked':''}> Mute: hold every message for this agent</label>
     <div><button type="submit">Save</button> <span id="agentmsg" class="small"></span></div></form>
     <div class="threads"><div class="k small">End this agent</div><div class="small mut">It finishes its current turn, then closes. If it's still running a minute later, it's stopped.</div>
@@ -3178,7 +3359,8 @@ function renderMessages(list){
   opts($('#msgspace'),'All spaces',[...new Set(list.flatMap(spacesOf))].sort());
   const inSpace=list.filter(x=>!spaceFilter||spacesOf(x).includes(spaceFilter));
   opts($('#msgagent'),'Everyone',[...new Set(inSpace.flatMap(x=>[x.from_name,x.to_name]))].sort());
-  const shown=inSpace.filter(x=>!msgFilter||x.from_name===msgFilter||x.to_name===msgFilter);
+  const q=($('#msgq').value||'').trim().toLowerCase();
+  const shown=inSpace.filter(x=>(!msgFilter||x.from_name===msgFilter||x.to_name===msgFilter)&&(!q||[x.text,x.from_name,x.to_name,x.id].join(' ').toLowerCase().includes(q)));
   const byId=Object.fromEntries(shown.map(x=>[x.id,x]));const kids={};
   for(const x of shown)if(x.reply_to&&byId[x.reply_to])(kids[x.reply_to]??=[]).push(x);
   const card=(x,inthread)=>{const st=x.status==='delivered'?'':`<span class="chip ${esc(x.status)}">${esc(x.status)}</span>`;
@@ -3199,9 +3381,12 @@ document.addEventListener('change',e=>{
   if(e.target.id==='msgspace'){spaceFilter=e.target.value;msgFilter='';$('#msgagent').value='';renderMessages(lastMsgs)}});
 // What a render shows; the page is redrawn only when this changes, so it never flickers or loses your place.
 let lastView='',lastPanel='';
-async function refresh(force){
+// What the page shows comes in one snapshot: pushed by /api/stream as it changes, or fetched when the stream is down.
+let lastSnap=null,streamOk=false,live=null;
+async function refresh(force,snap){
   if(signedOut)return;
-  const [st,p,m,tk,fb,ib]=await Promise.all([api('/api/status'),api('/api/peers'),api('/api/messages?limit=100'),api('/api/tasks'),api('/api/issues'),api('/api/inbox')]);
+  if(!snap){snap=await api('/api/snapshot');lastSnap=snap}
+  const {status:st,peers:p,messages:m,tasks:tk,issues:fb,inbox:ib}=snap;
   allTasks=tk.tasks||[];allFeedback=fb.issues||[];inbox=ib.items||[];
   const view=JSON.stringify([p.peers.map(({last_seen_s,...x})=>x),p.leads,m.messages.map(x=>[x.id,x.status]),allTasks.map(t=>[t.id,t.status,t.owner,t.note]),allFeedback.map(f=>[f.id,f.status,f.note]),inbox.map(i=>i.id),sel,panelTab,cfg.sessions]);
   if(view===lastView&&!force)return;lastView=view;
@@ -3230,6 +3415,7 @@ async function refresh(force){
   const members=n=>[...groups[n].filter(x=>!isLead(x,n)&&!(x.leads&&!x.parent)).sort(rank).sort((a,b)=>a.name.localeCompare(b.name)),
     ...(kids[n]||[]).filter(c=>c!==n).sort().map(c=>inside[c].peer)];
   const short=d=>{const t=tilde(d).split('/');return t.length>3?'…/'+t.slice(-2).join('/'):t.join('/')};
+  const state=x=>(x.busy?'working':'idle')+(x.busy_since?' '+ago(x.busy_since):'');
   const ctx=x=>x.context==null?'':`<span class="ctx${x.context>=80?' hi':''}" title="context window in use">${x.context}%</span>`;
   // A lead is told apart by its outline (and says which team on hover), so every card keeps its context in one place.
   // The badge sits in the name row, left of the context; an offline lead's clear link goes beneath.
@@ -3238,7 +3424,7 @@ async function refresh(force){
   const clearOff=x=>x.leads&&x.offline?`<div><span class="small mut" data-clearlead="${esc(x.space)}" title="Clear this lead" style="cursor:pointer">clear</span></div>`:'';
   const node=x=>`<${x.offline?'div':'button'} class="node${x.leads?' is-lead':''}${x.offline?' off':''}${x.id&&x.id===sel?' sel':''}"${x.offline?'':` data-sel="${esc(x.id)}"`}${x.leads?` title="Leads the ${esc(x.space)} ${x.parent?'team':'space'}${x.offline?' (offline)':''}"`:''}>
     <div class="nm"><span title="${esc(x.name)}">${x.offline?'':`<span class="dot ${x.busy?'busy':''}"></span>`}${esc(x.name)}</span><span class="rt">${badge(x)}${ctx(x)}</span></div>${clearOff(x)}
-    <div class="dir">${esc(short(x.cwd))}</div>${x.branch?`<div class="dir" title="${esc(x.branch)}">⎇ ${esc(x.branch)}</div>`:''}<div class="sum">${esc(x.summary)||'no summary yet'}</div>${x.open_tasks?`<div class="small" style="color:var(--acc)">${x.open_tasks} open task${x.open_tasks>1?'s':''}</div>`:''}${x.stale&&!x.remote?'<div class="stale">reload needed</div>':''}</${x.offline?'div':'button'}>`;
+    <div class="dir">${esc(short(x.cwd))}</div>${x.branch?`<div class="dir" title="${esc(x.branch)}">⎇ ${esc(x.branch)}</div>`:''}<div class="sum"${x.role?` title="Role: ${esc(x.role)}"`:''}>${esc(x.summary||x.role)||'no summary yet'}</div>${x.open_tasks?`<div class="small" style="color:var(--acc)">${x.open_tasks} open task${x.open_tasks>1?'s':''}</div>`:''}${x.offline?'':`<div class="state">${state(x)}</div>`}</${x.offline?'div':'button'}>`;
   // Every live agent gets its own card, two sessions in one folder included: a hidden one can't be found to message.
   const rank=(a,b)=>(b.busy-a.busy)||(a.last_seen_s-b.last_seen_s);
   const unit=(n,seen)=>{if(seen.has(n))return '';seen.add(n);
@@ -3266,8 +3452,8 @@ async function refresh(force){
   const lrow=x=>{const where=[short(x.cwd),x.branch?'⎇ '+x.branch:''].filter(Boolean).map(esc).join(' · ');
     return `<${x.offline?'div':'button'} class="lrow${x.leads?' is-lead':''}${x.offline?' off':''}${x.id&&x.id===sel?' sel':''}"${x.offline?'':` data-sel="${esc(x.id)}"`}>
       <span class="ln"><span title="${esc(x.name)}">${x.offline?'':`<span class="dot ${x.busy?'busy':''}"></span>`}${esc(x.name)}</span>${badge(x)}</span>
-      <span class="lw"><span class="mono">${where}</span>${x.summary?' — '+esc(x.summary):x.offline?' — offline':''}</span>
-      <span class="lr">${x.open_tasks?`<span style="color:var(--acc)">${x.open_tasks} task${x.open_tasks>1?'s':''}</span>`:''}${x.stale&&!x.remote?'<span style="color:var(--warn)">reload</span>':''}${ctx(x)}</span></${x.offline?'div':'button'}>`};
+      <span class="lw"${x.role?` title="Role: ${esc(x.role)}"`:''}><span class="mono">${where}</span>${x.summary||x.role?' — '+esc(x.summary||x.role):x.offline?' — offline':''}</span>
+      <span class="lr">${x.open_tasks?`<span style="color:var(--acc)">${x.open_tasks} task${x.open_tasks>1?'s':''}</span>`:''}${x.offline?'':`<span class="mut">${state(x)}</span>`}${ctx(x)}</span></${x.offline?'div':'button'}>`};
   const lspace=(n,seen)=>{if(seen.has(n))return '';seen.add(n);
     const nested=inside[n]&&inside[n].parent!==n;
     const head=nested?(leads[n]||[]):tops(n);
@@ -3279,8 +3465,12 @@ async function refresh(force){
     return `<div class="lspace"><div class="lspace-h">${esc(n)}${nested?' team':''} · ${count}${nested?` <span class="small">inside ${esc(inside[n].parent)}</span>`:''}</div>
       ${head.slice().sort(rank).map(lrow).join('')}${!body?'':head.length?`<div class="lsub led">${body}</div>`:`<div class="lflat">${body}</div>`}</div>`};
   document.querySelectorAll('[data-alayout]').forEach(b=>b.classList.toggle('on',b.dataset.alayout===aLayout));
-  $('#peers').classList.toggle('charts',aLayout==='chart');
+  $('#peers').classList.toggle('charts',aLayout==='chart'&&!($('#asearch').value||'').trim());
+  // A search shows the matching agents as a flat list, whichever view is on.
+  const aq=($('#asearch').value||'').trim().toLowerCase();
+  const hits=aq?p.peers.filter(x=>[x.name,x.cwd,x.branch,x.summary,x.space].join(' ').toLowerCase().includes(aq)):null;
   $('#peers').innerHTML=!p.peers.length?'<div class="empty">No live agents. Start Claude Code with the peerlink plugin.</div>'
+    :hits?`<div class="lspace-h">${hits.length} match${hits.length===1?'':'es'}</div><div class="lflat">${hits.map(lrow).join('')||'<div class="empty">No agent matches.</div>'}</div>`
     :aLayout==='list'?`<div class="ltree">${all(lspace)}</div>`
     :all((n,seen)=>{const u=unit(n,seen);return u?`<div class="chart">${u}</div>`:''});
   // Agents still on older plugin code: they keep working, but get fixes only after /reload-plugins.
@@ -3300,8 +3490,16 @@ async function refresh(force){
 }
 // The Inbox: one row per thing waiting on you, with the action it needs.
 let inbox=[];
+let seenInbox=null;
 function renderInbox(){
   $('#n-inbox').textContent=inbox.length||'';
+  document.title=inbox.length?`(${inbox.length}) Peerlink`:'Peerlink';
+  // A desktop alert for each new item, when you've turned them on and the page isn't in front.
+  const ids=new Set(inbox.map(i=>i.kind+i.id));
+  if(seenInbox&&notifyOn()&&document.hidden)for(const i of inbox)if(!seenInbox.has(i.kind+i.id)){
+    try{const n=new Notification(`Peerlink · ${i.who||'an agent'}`,{body:i.title,tag:i.kind+i.id});n.onclick=()=>{focus();location.hash='#inbox';n.close()}}catch{}}
+  seenInbox=ids;
+  $('#notifybtn').textContent=notifyOn()?'Desktop alerts: on':'Desktop alerts: off';
   if(document.activeElement?.closest?.('#inboxlist'))return;
   const label={approval:'wants a new agent',task:'task for you',question:'waiting on your answer',feedback:'feedback'};
   const btn=(a,t)=>`<button class="ghost small" data-iact="${a}">${t}</button>`;
@@ -3366,6 +3564,13 @@ const withSubs=list=>{const ids=new Set(list.map(t=>t.id));return byLive(list.fi
 // The board's layout, rows and open cards are this browser's own; storage can be missing (a private window), so every use is guarded.
 const pref=(k,d)=>{try{return localStorage.getItem('peerlink.'+k)??d}catch{return d}};
 var aLayout=pref('alayout','list');
+const notifyOn=()=>pref('notify','')==='1'&&window.Notification&&Notification.permission==='granted';
+document.addEventListener('click',async e=>{if(!e.target.closest('[data-notify]'))return;
+  if(notifyOn()){try{localStorage.setItem('peerlink.notify','')}catch{}}
+  else if(!window.Notification)alert('This browser has no desktop notifications.');
+  else if(await Notification.requestPermission()==='granted'){try{localStorage.setItem('peerlink.notify','1')}catch{}}
+  else alert('Notifications are blocked for this page. Allow them in the browser\'s site settings.');
+  renderInbox()});
 document.addEventListener('click',e=>{const b=e.target.closest('[data-alayout]');if(!b)return;aLayout=b.dataset.alayout;try{localStorage.setItem('peerlink.alayout',aLayout)}catch{};refresh(true)});
 const keep=(k,v)=>{try{localStorage.setItem('peerlink.'+k,v)}catch{}};
 let tLayout=pref('tlayout','board'),dragging=null;const openCards=new Set();
@@ -3436,8 +3641,29 @@ document.addEventListener('change',async e=>{const t=e.target;
   if(['tstatus','towner','treq','tspace','tgroup'].includes(t.id)){if(t.id==='tgroup')keep('tgroup',t.value);renderTasks();return}
   if(t.dataset.treassign!==undefined&&t.value){const id=t.closest('[data-task]').dataset.task;
     const r=await post('/api/tasks/'+encodeURIComponent(id),{owner:t.value});if(r.error)alert(r.error);t.blur();refresh(true)}});
-document.addEventListener('input',e=>{if(e.target.closest('#agentform'))editing=true});
-document.addEventListener('change',e=>{if(e.target.closest('#agentform'))editing=true});
+// You, to an agent or a space's lead, from the panel's message box or the Tasks page's New task form.
+// The panel's note outlives the redraw a send causes.
+let sentNote={};
+document.addEventListener('submit',async e=>{const f=e.target;if(f.id!=='msgform'&&f.id!=='newtask')return;e.preventDefault();
+  const text=f.elements.text.value.trim(),out=f.id==='msgform'?$('#sendmsg'):$('#newtaskmsg');if(!text)return;
+  const body=f.id==='msgform'?{to:f.dataset.to,text,kind:f.elements.astask.checked?'task':'message'}:{to:f.elements.to.value,text,kind:'task'};
+  const r=await post('/api/web/send',body);
+  const note=r.error||`Sent to ${r.to}${r.task?` as task ${r.task}`:''}.`;
+  if(f.id==='msgform'){sentNote={to:body.to,text:note,err:!!r.error};setTimeout(()=>{if(sentNote.text===note){sentNote={};refresh(true,lastSnap||undefined)}},4000)}
+  if(r.error){out.className='small err';out.textContent=r.error;return}
+  f.elements.text.value='';editing=false;out.className='small ok';out.textContent=note;
+  if(f.id==='newtask')setTimeout(()=>{f.hidden=true;out.textContent=''},1500);refresh(true)});
+document.addEventListener('click',e=>{const b=e.target.closest('[data-newtask]');if(!b)return;const f=$('#newtask');f.hidden=!f.hidden;if(f.hidden)return;
+  // Agents by name, and each space that has a lead, which hands the work on.
+  const spaces=Object.entries(leadOf).filter(([n])=>n!=='default').sort();
+  f.elements.to.innerHTML=`<option value="">Choose who it's for…</option>`+(spaces.length?`<optgroup label="A space's lead">${spaces.map(([n,l])=>`<option value="space:${esc(n)}">${esc(n)} (lead: ${esc(l.name)}${l.live?'':', offline'})</option>`).join('')}</optgroup>`:'')
+    +`<optgroup label="An agent">${livePeers.filter(x=>!x.remote).sort((a,b)=>a.name.localeCompare(b.name)).map(x=>`<option value="${esc(x.id)}">${esc(x.name)} · ${esc(x.space||'default')}</option>`).join('')}</optgroup>`;
+  f.elements.text.focus()});
+document.addEventListener('click',async e=>{const b=e.target.closest('[data-copy]');if(!b)return;e.stopPropagation();
+  try{await navigator.clipboard.writeText(b.dataset.copy);b.textContent='Copied'}catch{b.textContent='Copy failed'}setTimeout(()=>{b.textContent='Copy'},1200)});
+document.addEventListener('input',e=>{if(e.target.closest('#agentform,#msgform'))editing=true;
+  if(e.target.id==='asearch'&&lastSnap)refresh(true,lastSnap);if(e.target.id==='msgq')renderMessages(lastMsgs)});
+document.addEventListener('change',e=>{if(e.target.closest('#agentform,#msgform'))editing=true});
 // Save applies only what changed, in one go, and says what happened.
 document.addEventListener('submit',async e=>{if(e.target.id!=='agentform')return;e.preventDefault();
   const f=e.target,d=f.dataset,id=d.id,msg=$('#agentmsg'),v=n=>f.elements[n].value.trim();
@@ -3448,7 +3674,7 @@ document.addEventListener('submit',async e=>{if(e.target.id!=='agentform')return
   if(f.elements.muted.checked!==!!d.muted)patch.muted=f.elements.muted.checked;
   msg.className='small';msg.textContent='Saving…';
   if(Object.keys(patch).length){const r=await post(`/api/sessions/${encodeURIComponent(id)}/config`,patch);if(r.error)errs.push(r.error);else cfg.sessions=r.sessions}
-  for(const [field,key] of [['spacefile','space'],['parent','parent']])if(v(field)!==d[field]){
+  for(const [field,key] of [['role','role'],['spacefile','space'],['parent','parent']])if(v(field)!==d[field]){
     const r=await post(`/api/sessions/${encodeURIComponent(id)}/space-file`,{[key]:v(field)});if(r.error)errs.push(r.error)}
   editing=false;lastPanel='';await refresh(true);
   const m2=$('#agentmsg');if(m2){m2.className='small '+(errs.length?'err':'ok');m2.textContent=errs.length?errs.join(' '):'Saved'}});
@@ -3562,11 +3788,20 @@ $('#rules').addEventListener('submit',async e=>{e.preventDefault();
   $('#rulesaved').textContent='Saved '+new Date().toLocaleTimeString();refresh()});
 // Poll every 2 s; while the daemon is unreachable say so, back off to 10 s, and pick up again once it's back.
 let misses=0;
+function connect(){if(!window.EventSource||signedOut)return;live?.close();live=new EventSource('/api/stream');
+  live.onopen=()=>{streamOk=true};
+  live.onmessage=e=>{const d=JSON.parse(e.data);lastSnap=d;
+    if(misses){misses=0;$('#offline').style.display='none';loadCfg().catch(()=>{})}
+    refresh(false,d).catch(()=>{})};
+  // The browser retries the stream by itself; until it's back, tick() polls.
+  live.onerror=()=>{streamOk=false}}
+// With the stream up, tick only redraws now and then, so "idle 12m" stays true; without it, it polls.
 async function tick(){
-  try{await refresh();if(misses){misses=0;$('#offline').style.display='none';await loadCfg();await refresh(true)}}
+  try{if(streamOk&&lastSnap)await refresh(true,lastSnap);else{await refresh();if(misses){misses=0;$('#offline').style.display='none';await loadCfg();await refresh(true)}}}
   catch(e){if(!signedOut){misses++;$('#offline').style.display='block'}}
-  if(!signedOut)setTimeout(tick,misses?10000:2000)}
-show();loadCfg().then(()=>refresh(true)).then(()=>{if(location.hash==='#discord')location.hash='#channels';else if(location.hash==='#channels')loadDiscord()}).catch(()=>{misses=1;$('#offline').style.display='block'}).finally(()=>setTimeout(tick,2000));
+  if(signedOut){live?.close();return}
+  setTimeout(tick,streamOk?30000:misses?10000:2000)}
+show();loadCfg().then(()=>refresh(true)).then(()=>{if(location.hash==='#discord')location.hash='#channels';else if(location.hash==='#channels')loadDiscord()}).catch(()=>{misses=1;$('#offline').style.display='block'}).finally(()=>{connect();setTimeout(tick,2000)});
 </script></body></html>
 """
 
