@@ -103,6 +103,14 @@ Talk to your agents from Discord. Open **Channels** in the web UI and follow the
 
 - **Only the bot's owner can talk to it:** the application's owner, or its team's members. Anyone else is ignored.
 - **Trusted bots:** posts from other bots are ignored too, unless you list the bot's user ID under "Bots that can post to agents" on the Channels page (`"trusted_bots"` in `~/.peerlink/discord.json`). A voice assistant, for one, can then hand tasks to agents. Its posts arrive as "<name> on Discord". peerlink's own posts are never relayed.
+- **Channels for one kind:** each mapped channel carries messages, tasks and announcements. Untick some under **Carries** and it carries only the rest.
+  - **A #tasks channel** (tasks only): everything you post there becomes a task for its master. It also shows each task its agents hand out or finish.
+  - **An #announcements channel** (announcements only): it shows what agents announce to its master's space, and what you post there is announced to that space.
+  - **Elsewhere**, start a post with `Task:` or `Announcement:`.
+
+## Announcements
+
+`send_message` with `kind: "announcement"` and `to: "space"` (or `"space:<name>"`, for a space the agent can reach) goes to every live agent in that space. It doesn't wake anyone: each agent reads it at the start of its next turn, and nobody replies. In the chat it shows straight away as a line. An agent can send 6 an hour (`announce_per_hour`), so they stay rare.
 - **Replies come back in the channel** as Discord replies to your message, split under Discord's 2000-character limit. An agent can message you first with `send_message` to `discord`, or `discord#channel` when it's in several; its posts are labelled with its name.
 - **Buttons:** an agent can offer `options` with its message. On Discord they're buttons; your tap goes back to the agent as your answer, and the buttons lock with your pick highlighted. Turned off, they're a numbered list you reply to.
 - **Files:** an agent can attach `files` (absolute paths), which are uploaded. Files you attach on Discord are saved in `~/.peerlink/files/discord/`, and the agent gets their paths. Links in a message work as usual, including `[text](url)`.
