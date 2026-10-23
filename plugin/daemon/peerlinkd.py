@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.8"
+VERSION = "0.8.9"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -2864,6 +2864,19 @@ nav a{display:flex;justify-content:space-between;align-items:center;padding:7px 
 nav a:hover{background:var(--line)}nav a.on{background:var(--card);box-shadow:0 0 0 1px var(--line);font-weight:600}
 nav .count{font-size:11px;color:var(--mut);font-weight:400}nav .grp{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);padding:14px 10px 4px}
 main{flex:1;min-width:0;max-width:1100px;padding:22px 24px 60px}
+body.wide main{max-width:none}
+#peers.charts{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start}#peers.charts>.chart{margin:0;max-width:100%}
+.ltree{display:flex;flex-direction:column;gap:14px}
+.lspace-h{display:flex;gap:8px;align-items:baseline;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin-bottom:6px}.lspace-h .small{text-transform:none;letter-spacing:0;font-weight:400}
+.lsub{margin-left:14px;border-left:2px solid var(--line);padding-left:12px;display:flex;flex-direction:column;gap:6px;margin-top:6px}.lsub.led{border-left-color:var(--acc)}
+.lsub>.lspace,.lflat>.lspace{margin-top:8px}.lflat{display:flex;flex-direction:column;gap:6px}
+.lrow{display:grid;grid-template-columns:minmax(150px,220px) minmax(0,1fr) auto;gap:4px 14px;align-items:baseline;width:100%;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:7px 12px;text-align:left;font:inherit;color:inherit;cursor:pointer}
+.lrow:hover{border-color:var(--mut)}.lrow.is-lead{border-color:var(--acc)}.lrow.sel{box-shadow:0 0 0 2px var(--acc)}.lrow.off{opacity:.5;cursor:default;border-style:dashed}
+.lrow .ln{font-weight:600;display:flex;align-items:center;gap:6px;min-width:0}.lrow .ln>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lrow .lw{font-size:12px;color:var(--mut);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.lrow .lw .mono{font-size:11px}
+.lrow .lr{display:flex;gap:10px;align-items:baseline;white-space:nowrap;font-size:12px}
+.lrow .badge{font-size:10px;font-weight:600;color:var(--acc);border:1px solid var(--acc);border-radius:4px;padding:0 4px}.lrow .badge.only{border-style:dashed}
+@media (max-width:720px){.lrow{grid-template-columns:1fr auto}.lrow .lw{grid-column:1/-1;grid-row:2;white-space:normal}}
 section{display:none}section.on{display:block}
 h1{font-size:20px;margin:0 0 4px}.lead{color:var(--mut);margin:0 0 18px}
 h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:22px 0 10px}
@@ -2946,7 +2959,7 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)
 .msg.open .mt{display:block}.msg .chip{font-size:11px;border-radius:999px;padding:1px 8px;border:1px solid var(--line);color:var(--mut)}
 .chip.queued{border-color:var(--warn);color:var(--warn)}.chip.expired{border-color:var(--bad);color:var(--bad)}.chip.reply{color:var(--acc);border-color:var(--acc)}
 .msg.inthread{margin-left:22px;border-left:3px solid var(--acc)}
-@media (min-width:721px){body.drawer main{padding-right:404px;max-width:1504px}}
+@media (min-width:721px){body.drawer main{padding-right:404px;max-width:1504px}body.drawer.wide main{max-width:none}}
 @media (max-width:720px){#detail{width:100%;border-left:0}}
 .branch{display:flex;align-items:flex-start;justify-content:safe center}
 .branch>.ocol{position:relative;padding:14px 6px 0}
@@ -3009,8 +3022,9 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <main><div id="stalebar" style="display:none" class="small"></div><div id="offline">Can't reach the peerlink daemon. This page reconnects once it's back.</div><div id="signedout">Signed out. Run <span class="mono">/peerlink web</span> in any agent to sign in again.</div>
 
 <section id="agents"><h1>Agents</h1><p class="lead">Your live agents, by space. Click one to see or change it.</p>
-<details class="how"><summary>How the chart works</summary><ul>
-<li>Each box is a space. Its lead, outlined in orange, sits at the top, with its members beneath it. The lead of a space inside another sits in the parent's box, with its team beneath it.</li>
+<div class="msgbar"><span class="seg" role="group" aria-label="Layout"><button class="ghost small" data-alayout="chart">Chart</button><button class="ghost small" data-alayout="list">List</button></span></div>
+<details class="how"><summary>How it works</summary><ul>
+<li>Each space shows its lead first, outlined in orange, with its members beneath it. The lead of a space inside another sits with the parent's agents, with its team beneath it.</li>
 <li>Work sent to a space goes to its lead. An agent alone in a space leads it until you pick another: open an agent and choose Make lead.</li>
 <li>An agent only sees and messages agents in its own space. A lead also sees its parent's.</li>
 <li>The percentage is how full the agent's context window is. A yellow dot means it's working, a green one that it's idle.</li></ul></details><div class="orgwrap"><div id="peers"></div><div id="detail"></div></div></section>
@@ -3113,7 +3127,8 @@ const tilde=p=>String(p||'').replace(/^\/Users\/[^/]+/,'~');
 let signedOut=false;
 async function api(p,o){const r=await fetch(p,o);if(r.status===401){signedOut=true;$('#signedout').style.display='block';throw new Error('signed out')}return r.json()}
 const post=(p,b)=>api(p,{method:'POST',headers:J,body:JSON.stringify(b||{})});
-function show(){const id=(location.hash||'#agents').slice(1);
+// Agents and Tasks lay out across the whole window; the reading pages keep a comfortable line length.
+function show(){const id=(location.hash||'#agents').slice(1);document.body.classList.toggle('wide',id==='agents'||id==='tasks');
   document.querySelectorAll('section').forEach(s=>s.classList.toggle('on',s.id===id));
   document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('on',a.dataset.nav===id))}
 // Leaving Agents, or Escape, closes the agent panel: it should never linger over another page.
@@ -3247,8 +3262,27 @@ async function refresh(force){
   $('#n-agents').textContent=p.peers.length||'';$('#n-spaces').textContent=names.length||'';$('#n-msgs').textContent=m.messages.length||'';
   // Spaces caught in a parent loop have no root; they are shown at the top level after the rest.
   const all=(fn)=>{const seen=new Set();let out=roots.map(n=>fn(n,seen)).join('');for(const n of Object.keys(groups).sort())if(!seen.has(n))out+=fn(n,seen);return out};
-  $('#peers').innerHTML=p.peers.length?all((n,seen)=>{const u=unit(n,seen);return u?`<div class="chart">${u}</div>`:''})
-    :'<div class="empty">No live agents. Start Claude Code with the peerlink plugin.</div>';
+  // The list view: the same tree as the chart, one row per agent, each space indented under the lead that speaks for it.
+  const lrow=x=>{const where=[short(x.cwd),x.branch?'⎇ '+x.branch:''].filter(Boolean).map(esc).join(' · ');
+    return `<${x.offline?'div':'button'} class="lrow${x.leads?' is-lead':''}${x.offline?' off':''}${x.id&&x.id===sel?' sel':''}"${x.offline?'':` data-sel="${esc(x.id)}"`}>
+      <span class="ln"><span title="${esc(x.name)}">${x.offline?'':`<span class="dot ${x.busy?'busy':''}"></span>`}${esc(x.name)}</span>${badge(x)}</span>
+      <span class="lw"><span class="mono">${where}</span>${x.summary?' — '+esc(x.summary):x.offline?' — offline':''}</span>
+      <span class="lr">${x.open_tasks?`<span style="color:var(--acc)">${x.open_tasks} task${x.open_tasks>1?'s':''}</span>`:''}${x.stale&&!x.remote?'<span style="color:var(--warn)">reload</span>':''}${ctx(x)}</span></${x.offline?'div':'button'}>`};
+  const lspace=(n,seen)=>{if(seen.has(n))return '';seen.add(n);
+    const nested=inside[n]&&inside[n].parent!==n;
+    const head=nested?(leads[n]||[]):tops(n);
+    const own=groups[n].filter(x=>!isLead(x,n)&&!(x.leads&&!x.parent)).sort(rank).sort((a,b)=>a.name.localeCompare(b.name));
+    const ch=(kids[n]||[]).filter(c=>c!==n&&!seen.has(c)).sort();
+    const body=own.map(lrow).join('')+ch.map(c=>lspace(c,seen)).join('');
+    // Counted as the chart counts: a top-level lead and the leads of teams inside sit with this space; a team's own lead sits with its parent.
+    const count=own.length+(nested?0:head.filter(x=>!x.offline).length)+ch.reduce((t,c)=>t+(leads[c]||[]).filter(x=>!x.offline).length,0);
+    return `<div class="lspace"><div class="lspace-h">${esc(n)}${nested?' team':''} · ${count}${nested?` <span class="small">inside ${esc(inside[n].parent)}</span>`:''}</div>
+      ${head.slice().sort(rank).map(lrow).join('')}${!body?'':head.length?`<div class="lsub led">${body}</div>`:`<div class="lflat">${body}</div>`}</div>`};
+  document.querySelectorAll('[data-alayout]').forEach(b=>b.classList.toggle('on',b.dataset.alayout===aLayout));
+  $('#peers').classList.toggle('charts',aLayout==='chart');
+  $('#peers').innerHTML=!p.peers.length?'<div class="empty">No live agents. Start Claude Code with the peerlink plugin.</div>'
+    :aLayout==='list'?`<div class="ltree">${all(lspace)}</div>`
+    :all((n,seen)=>{const u=unit(n,seen);return u?`<div class="chart">${u}</div>`:''});
   // Agents still on older plugin code: they keep working, but get fixes only after /reload-plugins.
   const behind=p.peers.filter(x=>x.stale&&!x.remote);
   $('#stalebar').style.display=behind.length?'block':'none';
@@ -3331,6 +3365,8 @@ const byLive=list=>list.slice().sort((a,b)=>(isLive(b)-isLive(a))||(b.created-a.
 const withSubs=list=>{const ids=new Set(list.map(t=>t.id));return byLive(list.filter(t=>!t.parent||!ids.has(t.parent))).map(t=>taskRow(t,false)+byLive(list.filter(k=>k.parent===t.id)).map(k=>taskRow(k,true)).join('')).join('')};
 // The board's layout, rows and open cards are this browser's own; storage can be missing (a private window), so every use is guarded.
 const pref=(k,d)=>{try{return localStorage.getItem('peerlink.'+k)??d}catch{return d}};
+var aLayout=pref('alayout','list');
+document.addEventListener('click',e=>{const b=e.target.closest('[data-alayout]');if(!b)return;aLayout=b.dataset.alayout;try{localStorage.setItem('peerlink.alayout',aLayout)}catch{};refresh(true)});
 const keep=(k,v)=>{try{localStorage.setItem('peerlink.'+k,v)}catch{}};
 let tLayout=pref('tlayout','board'),dragging=null;const openCards=new Set();
 $('#tgroup').value=pref('tgroup','');
