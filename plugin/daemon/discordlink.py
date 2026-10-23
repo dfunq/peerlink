@@ -322,6 +322,7 @@ class Bot:
         self.user_id = ""
         self.user = ""
         self.owner_ids = set()
+        self.trusted_bots = set()  # bot user IDs whose posts count as the owner's; empty by default
         self.reads_messages = False
         self.guild_channels = {}  # guild id -> {"name", "channels": {id: name}}
         self.stop = threading.Event()
@@ -426,7 +427,9 @@ class Bot:
             self.guild_channels.pop(str(d.get("id")), None)
         elif kind == "MESSAGE_CREATE":
             author = d.get("author") or {}
-            if author.get("bot") or str(author.get("id")) not in self.owner_ids:
+            aid = str(author.get("id"))
+            # The owner, or a bot the owner trusts by ID; never this bot itself, so its own posts can't loop.
+            if aid == self.user_id or aid not in (self.trusted_bots if author.get("bot") else self.owner_ids):
                 return
             mentioned = any(str(m.get("id")) == self.user_id for m in d.get("mentions", []))
             text = d.get("content") or ""
@@ -442,7 +445,7 @@ class Bot:
                     "channel_id": str(d["channel_id"]), "message_id": str(d["id"]),
                     "guild_id": str(d.get("guild_id") or ""), "author": author.get("global_name") or author.get("username", "you"),
                     "author_id": str(author["id"]), "text": text, "dm": not d.get("guild_id"), "mentioned": mentioned,
-                    "files": files,
+                    "files": files, "bot": bool(author.get("bot")),
                 })
             except Exception as err:  # one bad message must not drop the connection
                 self.log("discord", "message handler failed:", err)

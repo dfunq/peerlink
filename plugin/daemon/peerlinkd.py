@@ -28,7 +28,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.7.4"
+VERSION = "0.7.5"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -604,7 +604,9 @@ def expire(box):
 # restart, /clear or a new session. Direct messages go to `dm`.
 discord = {"token": "", "app_id": "", "user": "", "enabled": True, "routes": [], "dm": "",
            # What agents may do beyond text, each a switch on the Channels page.
-           "buttons": True, "files_out": True, "files_in": True, "max_file_mb": 10}
+           "buttons": True, "files_out": True, "files_in": True, "max_file_mb": 10,
+           # Bot user IDs whose posts reach agents as yours do (a voice assistant, say); other bots are ignored.
+           "trusted_bots": []}
 DISCORD_FILES = os.path.join(HOME, "files", "discord")  # what you attach on Discord, for the agent to read
 discord_bot = [None]
 
@@ -631,6 +633,7 @@ def start_discord():
     discord_bot[0] = None
     if discord.get("token") and discord.get("enabled", True):
         discord_bot[0] = discordlink.Bot(discord["token"], on_discord, log, on_press)
+        discord_bot[0].trusted_bots = set(discord.get("trusted_bots") or [])
 
 
 def folder_name(cwd):
@@ -1183,6 +1186,7 @@ class Handler(BaseHTTPRequestHandler):
                 "routes": discord.get("routes", []), "dm": discord.get("dm", ""),
                 "buttons": discord.get("buttons", True), "files_out": discord.get("files_out", True),
                 "files_in": discord.get("files_in", True), "max_file_mb": discord.get("max_file_mb", 10),
+                "trusted_bots": discord.get("trusted_bots", []),
             })
         if rest == [] and method == "PUT":
             b = self.body()
@@ -1205,6 +1209,12 @@ class Handler(BaseHTTPRequestHandler):
                     discord[k] = bool(b[k])
             if "max_file_mb" in b:
                 discord["max_file_mb"] = max(1, min(500, float(b["max_file_mb"] or 10)))
+            if "trusted_bots" in b:
+                raw = b["trusted_bots"]
+                ids = re.findall(r"\d{15,22}", raw if isinstance(raw, str) else " ".join(map(str, raw or [])))
+                discord["trusted_bots"] = list(dict.fromkeys(ids))
+                if bot:
+                    bot.trusted_bots = set(discord["trusted_bots"])
             save_discord()
             if "token" in b or "enabled" in b:
                 start_discord()
@@ -2204,6 +2214,9 @@ function renderDiscord(){if(!dState)return;const d=dState,invited=(dGuilds||[]).
     <label class="check"><input type="checkbox" data-dopt="files_out" ${d.files_out?'checked':''}> <span><b>Files from agents:</b> an agent can attach files from this machine to its messages.</span></label>
     <label class="check"><input type="checkbox" data-dopt="files_in" ${d.files_in?'checked':''}> <span><b>Files to agents:</b> what you attach on Discord is saved here, in <span class="mono">~/.peerlink/files/discord</span>, and the agent gets the paths.</span></label>
     <div class="addline" style="margin-top:8px"><label class="small mut" for="dmaxmb">Largest file, either way</label><input id="dmaxmb" type="number" min="1" max="500" step="1" value="${esc(d.max_file_mb)}" style="width:90px" data-dopt="max_file_mb"> <span class="small mut">MB (Discord allows 10 MB without Nitro)</span></div>
+    <h2>Bots that can post to agents</h2>
+    <p class="meta">Messages from other bots are ignored, except from bots listed here by user ID (comma separated; in Discord, turn on Developer Mode, then right-click the bot and Copy User ID). Their posts reach agents the way yours do, labelled with the bot's name, so list only bots you control. This bot's own posts never do.</p>
+    <div class="addline"><input id="dbots" class="mono" placeholder="e.g. 1562000000000000000" value="${esc((d.trusted_bots||[]).join(', '))}" data-dbots style="flex:1;min-width:0"></div>
     <h2>Bot</h2>
     <label class="check"><input type="checkbox" data-dact="enabled" ${d.enabled?'checked':''}> Bot running</label>`}
 document.addEventListener('submit',async e=>{if(e.target.id!=='dtoken')return;e.preventDefault();const t=e.target.token.value.trim();if(!t)return;
@@ -2214,6 +2227,7 @@ document.addEventListener('change',e=>{const t=e.target;if(!dDraft)return;
   if(t.dataset.daddmember!==undefined&&t.value){const r=dDraft.routes[+t.dataset.daddmember];r.members=r.members||[];if(t.value!==r.master&&!r.members.includes(t.value))r.members.push(t.value);renderDiscord()}
   if(t.dataset.ddm!==undefined){dDraft.dm=t.value}
   if(t.dataset.dopt){const v=t.type==='checkbox'?t.checked:Number(t.value);api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({[t.dataset.dopt]:v})}).then(()=>loadDiscord())}
+  if(t.dataset.dbots!==undefined)api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({trusted_bots:t.value})}).then(()=>loadDiscord());
   if(t.dataset.dact==='enabled')api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({enabled:t.checked})}).then(()=>loadDiscord())});
 document.addEventListener('click',async e=>{const t=e.target.closest('button');if(!t||!dDraft&&!t.dataset.dact)return;
   if(t.dataset.dremove!==undefined){dDraft.routes.splice(+t.dataset.dremove,1);renderDiscord()}
