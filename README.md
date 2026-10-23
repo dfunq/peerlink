@@ -146,7 +146,7 @@ Once approved, the daemon starts Claude Code in that folder: in tmux when tmux i
 - **If the agent isn't running,** the bot says so, and your message waits up to an hour for it.
 - **The token** is kept in `~/.peerlink/discord.json` (0600) and never sent back to the browser.
 
-It's standard-library Python like the rest of the daemon, with no `py-cord` to install. The design follows a reference bot.
+It's standard-library Python like the rest of the daemon, with no `py-cord` to install.
 
 ## What you see at a glance
 
@@ -248,6 +248,8 @@ peerlink rotate-key | logout
 - **Other web pages** can't drive the daemon. Requests whose `Host` header isn't `127.0.0.1` or `localhost` are refused, which blocks DNS rebinding. Browser writes from another origin are refused too.
 - **Rotating the key** signs out every browser and makes outstanding links useless. Running agents pick up the new key by themselves.
 - **Remote daemons** (optional) only get peer discovery and message delivery, and only with the shared `token`.
+- **Linking machines opens a port.** With `listen_host` set to `0.0.0.0`, anyone who can reach the port and knows the `token` can message your agents, and your agents act on messages with your permissions. With no `token` set, remote calls are refused. The link is plain HTTP, so keep it on a network you trust, or tunnel it (SSH, Tailscale or WireGuard).
+- **Agents act as you.** A message from a peer, a Discord channel you've linked or a remote daemon becomes a prompt in a Claude Code session running under your account, with that session's permission mode. A new agent only starts after you approve the request. Link Discord only to a private server and channel, and list as trusted only the bots you control.
 
 ## How it works
 
@@ -280,8 +282,6 @@ claude plugin install peerlink --marketplace dfunq/peerlink
 ```
 
 In the desktop app: click + next to the prompt box, then Plugins, then Add marketplace with `dfunq/peerlink`, then Add plugin.
-
-This repository is private. It only installs for people who can read it on GitHub and whose machine already has a git credential for github.com (an SSH key, or `gh auth login` followed by `gh auth setup-git`).
 
 For local development:
 
