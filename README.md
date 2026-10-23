@@ -56,7 +56,7 @@ parent: acme
 - **The lead** is the agent running in the folder that holds that `.peerlink`, here `~/Repos/acme/storefront`. It's in both spaces: it sees the agents in `storefront` and the agents in `acme`.
 - **Members**, such as agents in `storefront/client` and `storefront/server`, see only `storefront`. Agents in `acme` see the lead but not the members. The daemon enforces this.
 - **Guidance follows the shape.** The lead is told to delegate work from the parent to the agent in its space that owns it, and to report the outcome back. Members are told to report to the lead. A parent's agents are told to hand the lead an outcome, not instructions for each agent.
-- In the peer list a lead shows as `storefront [leads storefront]`. The web UI's Agents page is an org chart: each space is a box, a lead sits in its parent's box, and its team hangs beneath it. `/peerlink-spaces` prints the same chart in the terminal.
+- In the peer list a lead shows as `storefront [leads storefront]`. On the web UI's Agents page, the chart shows each space as a box: a lead sits in its parent's box, and its team hangs beneath it. Top-level spaces sit side by side across the window. The page opens in **List**, the same tree as nested rows, one per agent. Switch to **Chart** for the org chart, and each browser remembers your choice. `/peerlink-spaces` prints the same chart in the terminal.
 - Click an agent in the web UI to open its settings: its name, the space for its folder, the space that one sits inside, a space for this agent only, wake and mute. Save changes only what you edited.
 
 Spaces can nest to any depth. `/peerlink-spaces parent <name>` writes the key for you, and `/peerlink-spaces` prints the tree.
