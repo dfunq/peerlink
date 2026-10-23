@@ -28,7 +28,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.0"
+VERSION = "0.8.1"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -97,7 +97,9 @@ that comes to you ("task t3") is yours until you call update_task with \
 done or failed and a short note; the note goes to whoever asked.
 - If peerlink itself misbehaves (a reply that never comes, a message that \
 reached the wrong agent, an error from these tools), call report_issue with \
-the message ids and agent names, then carry on with your task."""
+the message ids and agent names, then carry on with your task. When \
+peerlink gets in your way or could work better, report_issue with type \
+"idea"."""
 
 DEFAULT_CONFIG = {
     "poll_interval_ms": 3000,
@@ -128,6 +130,7 @@ messages = []   # recent log, newest last
 sent_times = {} # sender id -> [timestamps]
 next_msg = [1]
 tasks = {}      # id -> task, see new_task()
+feedback = {}   # id -> a bug report or idea about peerlink, see report_issue()
 next_task = [1]
 config = {}
 key = [""]
@@ -1024,15 +1027,15 @@ def report_issue(body):
     text = (body.get("text") or "").strip()
     if not text:
         return 400, {"error": "text is required"}
+    kind = "idea" if body.get("type") == "idea" else "bug"
     with lock:
         sender = sessions.get(body.get("from", ""))
-        try:
-            with open(ISSUES_PATH) as f:
-                n = sum(1 for _ in f) + 1
-        except OSError:
-            n = 1
+        n = max([int(i[1:]) for i in feedback if i[1:].isdigit()] or [0]) + 1
         issue = {
             "id": f"i{n}",
+            "type": kind,
+            "status": "new",
+            "note": "",
             "ts": body.get("ts") or time.time(),
             "from": body.get("from", ""),
             "from_name": body.get("from_name") or (display_name(sender) if sender else ""),
@@ -1047,8 +1050,9 @@ def report_issue(body):
                 f.write(json.dumps(issue) + "\n")
         except OSError as err:
             return 500, {"error": f"could not write {ISSUES_PATH}: {err}"}
-        want = clean_space(config.get("issue_agent")) if config.get("issue_agent") else ""
-        agent = next((r for r in sessions.values() if want and is_live(r) and r["id"] != issue["from"] and display_name(r).lower() == want), None)
+        feedback[issue["id"]] = issue
+        # A bug goes to the maintainer at once, to fix while it's fresh; an idea waits for you to accept it.
+        agent = maintainer(exclude=issue["from"]) if kind == "bug" else None
         if agent:
             msg = {
                 "id": f"m{next_msg[0]}",
@@ -1058,7 +1062,7 @@ def report_issue(body):
                 "from_host": HOSTNAME,
                 "to": agent["id"],
                 "to_name": display_name(agent),
-                "text": f"peerlink issue {issue['id']} from {issue['from_name'] or 'an agent'} (space {issue['space'] or '?'}, plugin {issue['plugin'] or '?'}, daemon {VERSION}):\n{text}"
+                "text": f"peerlink bug {issue['id']} from {issue['from_name'] or 'an agent'} (space {issue['space'] or '?'}, plugin {issue['plugin'] or '?'}, daemon {VERSION}):\n{text}"
                 + (f"\n\ncontext: {issue['context']}" if issue["context"] else "")
                 + f"\n\nLogged in {ISSUES_PATH}.",
                 "expects_reply": False,
@@ -1072,6 +1076,91 @@ def report_issue(body):
             record(msg)
     log("issue", issue["id"], issue["from_name"], "->", display_name(agent) if agent else "log only")
     return 200, {"id": issue["id"], "logged": ISSUES_PATH, "sent_to": display_name(agent) if agent else None}
+
+
+def maintainer(exclude=""):
+    """The live agent that works on peerlink: the one named by the issue_agent setting."""
+    want = clean_space(config.get("issue_agent")) if config.get("issue_agent") else ""
+    return next((r for r in sessions.values() if want and is_live(r) and r["id"] != exclude and display_name(r).lower() == want), None)
+
+
+def maintainer_folder():
+    """Where peerlink's maintainer works, live or not: accepted feedback becomes a task there."""
+    agent = maintainer()
+    if agent:
+        return agent.get("cwd", "")
+    want = clean_space(config.get("issue_agent") or "")
+    named = [cwd for cwd, name in (config.get("folder_names") or {}).items() if clean_space(name) == want]
+    seen = [cwd for cwd, d in dir_summaries.items() if clean_space(d.get("name") or os.path.basename(cwd)) == want]
+    return (named or seen or [""])[0]
+
+
+def load_feedback():
+    """issues.jsonl holds each report, then a line for every change to its status or note."""
+    try:
+        with open(ISSUES_PATH) as f:
+            lines = f.readlines()
+    except OSError:
+        return
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if "text" in entry:
+            feedback[entry["id"]] = {"type": "bug", "status": "new", "note": "", **entry}
+        elif entry.get("id") in feedback:
+            feedback[entry["id"]].update(entry)
+
+
+def update_feedback(iid, body):
+    """Triage from the web UI: accept (it becomes a task for the maintainer), dismiss, mark done, or note."""
+    status = body.get("status") or ""
+    if status and status not in ("new", "accepted", "done", "dismissed"):
+        return 400, {"error": "status is new, accepted, done or dismissed"}
+    with lock:
+        item = feedback.get(iid)
+        if item is None:
+            return 404, {"error": f"no feedback {iid}"}
+        change = {"id": iid, "updated": time.time()}
+        if "note" in body:
+            change["note"] = str(body.get("note") or "").strip()[:2000]
+        if status:
+            change["status"] = status
+        if status == "accepted" and not item.get("task"):
+            cwd = maintainer_folder()
+            if not cwd:
+                return 409, {"error": f"no folder is known for the peerlink maintainer ('{config.get('issue_agent')}'): start it once, or set issue_agent in Settings"}
+            note = change.get("note", item.get("note", ""))
+            msg = {"id": f"m{next_msg[0]}", "ts": time.time(), "from": "peerlink", "from_name": "peerlink", "from_host": HOSTNAME,
+                   "from_cwd": "", "to_cwd": cwd, "from_space": "", "to_space": "",
+                   "text": f"Feedback {iid} ({item['type']}, from {item.get('from_name') or 'an agent'}), accepted by your user"
+                           + (f": {note}" if note else "") + f"\n\n{item['text']}",
+                   "expects_reply": True, "reply_to": None, "hops": 0, "status": "queued", "v": 2}
+            next_msg[0] += 1
+            t = new_task(msg, {"id": "", "name": f"feedback {iid}", "cwd": ""})
+            t["title"], t["feedback"] = f"{iid}: {task_title_of(item['text'])}"[:120], iid
+            agent = queue_for_folder(cwd, msg)
+            t["owner"], t["space"] = msg["to_name"], space_of(agent)[0] if agent else ""
+            save_tasks()
+            change["task"] = t["id"]
+        item.update(change)
+        append_log_to(ISSUES_PATH, change)
+        out = dict(item)
+    log("feedback", iid, "->", out["status"], out.get("task") or "")
+    return 200, {"feedback": out}
+
+
+def task_title_of(text):
+    return next((line.strip() for line in text.splitlines() if line.strip()), "")
+
+
+def append_log_to(path, entry):
+    try:
+        with open(path, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except OSError:
+        pass
 
 
 def file_pending_issues():
@@ -1292,6 +1381,11 @@ def update_task(tid, body, web=False):
 
 def task_closed(t, web=False):
     """Tell whoever asked how the task ended; Discord hears about every failure."""
+    if t.get("feedback") in feedback and t["status"] == "done":
+        with lock:
+            change = {"id": t["feedback"], "status": "done", "updated": time.time()}
+            feedback[t["feedback"]].update(change)
+            append_log_to(ISSUES_PATH, change)
     mark = {"done": "✅ done", "failed": "❌ failed", "cancelled": "cancelled"}[t["status"]]
     line = f"Task {t['id']} {mark}: {t['title']}" + (f"\n{t['note']}" if t["note"] else "")
     req = t["requester"]
@@ -1689,14 +1783,14 @@ class Handler(BaseHTTPRequestHandler):
         if rest and rest[0] == "discord":
             return self.discord_api(rest[1:], method, q)
 
+        if len(rest) == 2 and rest[0] == "issues" and method == "POST":
+            code, out = update_feedback(rest[1], self.body())
+            return self.reply(code, out)
         if rest == ["issues"]:
             if method == "GET":
-                try:
-                    with open(ISSUES_PATH) as f:
-                        lines = f.readlines()[-int(q.get("limit", ["50"])[0]):]
-                except OSError:
-                    lines = []
-                return self.reply(200, {"issues": [json.loads(l) for l in lines if l.strip()], "path": ISSUES_PATH})
+                with lock:
+                    items = sorted(feedback.values(), key=lambda i: i["ts"])[-int(q.get("limit", ["500"])[0]):]
+                return self.reply(200, {"issues": items, "path": ISSUES_PATH})
             if method == "POST":
                 code, res = report_issue(self.body())
                 return self.reply(code, res)
@@ -1788,6 +1882,7 @@ def serve():
     load_web_sessions()
     load_messages()
     load_tasks()
+    load_feedback()
     load_dirs()
     file_pending_issues()
     load_discord()
@@ -1866,7 +1961,7 @@ def cli_issues(args):
     if not res["issues"]:
         print(f"No issues reported. ({res['path']})")
     for i in res["issues"][-20:]:
-        print(f"{i['id']:<5} {time.strftime('%m-%d %H:%M', time.localtime(i['ts']))}  {i['from_name'] or '?'} ({i['space'] or '?'})  {i['text'][:100]}")
+        print(f"{i['id']:<5} {time.strftime('%m-%d %H:%M', time.localtime(i['ts']))}  {i.get('type', 'bug'):<4} {i.get('status', 'new'):<9} {i['from_name'] or '?'} ({i['space'] or '?'})  {i['text'][:100]}")
     return 0
 
 
@@ -2063,7 +2158,8 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)
 .task{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px}
 .task .mh{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;font-size:13px}.task .mh .when{margin-left:auto;color:var(--mut);font-size:12px}
 .task .note{margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}.task .tact{margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}.task .tact select{width:auto}
-.task.sub{margin-left:24px}.tchip{font-size:11px;border-radius:999px;padding:1px 8px;border:1px solid var(--line);color:var(--mut)}
+.task.sub{margin-left:24px}.task .ftext{margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;max-height:9em;overflow:auto}
+.task .tact input{flex:1;min-width:160px}.tchip.new,.tchip.bug{color:var(--warn);border-color:var(--warn)}.tchip.accepted,.tchip.idea{color:var(--acc);border-color:var(--acc)}.tchip{font-size:11px;border-radius:999px;padding:1px 8px;border:1px solid var(--line);color:var(--mut)}
 .tchip.open,.tchip.in_progress{color:var(--acc);border-color:var(--acc)}.tchip.done{color:#2e8b57;border-color:#2e8b57}.tchip.failed{color:#c0392b;border-color:#c0392b}
 .ptabs{display:flex;gap:4px;margin-top:12px;border-bottom:1px solid var(--line)}.ptabs button{background:transparent;color:var(--mut);border:0;border-bottom:2px solid transparent;border-radius:0;padding:6px 10px}
 .ptabs button.on{color:var(--fg);border-bottom-color:var(--acc)}.ptasks{margin-top:12px;display:flex;flex-direction:column;gap:8px}.ptasks .k{color:var(--mut)}
@@ -2118,6 +2214,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <a href="#spaces" data-nav="spaces">Spaces <span class="count" id="n-spaces"></span></a>
 <a href="#messages" data-nav="messages">Messages <span class="count" id="n-msgs"></span></a>
 <a href="#tasks" data-nav="tasks">Tasks <span class="count" id="n-tasks"></span></a>
+<a href="#feedback" data-nav="feedback">Feedback <span class="count" id="n-feedback"></span></a>
 <a href="#channels" data-nav="channels">Channels <span class="count" id="n-discord"></span></a>
 <a href="#settings" data-nav="settings">Settings</a>
 <a href="#controls" data-nav="controls">Controls</a>
@@ -2147,6 +2244,11 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <label class="small mut" for="towner">Owner</label><select id="towner"><option value="">Everyone</option></select>
 <label class="small mut" for="tspace">Space</label><select id="tspace"><option value="">All spaces</option></select></div>
 <div class="mlist" id="tasklist"></div></section>
+
+<section id="feedback"><h1>Feedback</h1><p class="lead">Bugs and ideas agents report about peerlink itself, from any space. Accepting one makes it a task for the agent that works on peerlink; when that task is done, so is the feedback.</p>
+<div class="msgbar"><label class="small mut" for="fstatus">Show</label><select id="fstatus"><option value="new">New</option><option value="accepted">Accepted</option><option value="done">Done</option><option value="dismissed">Dismissed</option><option value="">All</option></select>
+<label class="small mut" for="ftype">Type</label><select id="ftype"><option value="">Bugs and ideas</option><option value="bug">Bugs</option><option value="idea">Ideas</option></select></div>
+<div class="mlist" id="fblist"></div></section>
 
 <section id="channels"><h1>Channels</h1>
 <p class="lead">Places outside your terminal where you can talk to your agents.</p>
@@ -2273,9 +2375,9 @@ document.addEventListener('change',e=>{
 let lastView='',lastPanel='';
 async function refresh(force){
   if(signedOut)return;
-  const [st,p,m,tk]=await Promise.all([api('/api/status'),api('/api/peers'),api('/api/messages?limit=100'),api('/api/tasks')]);
-  allTasks=tk.tasks||[];
-  const view=JSON.stringify([p.peers.map(({last_seen_s,...x})=>x),m.messages.map(x=>[x.id,x.status]),allTasks.map(t=>[t.id,t.status,t.owner,t.note]),sel,panelTab,cfg.sessions]);
+  const [st,p,m,tk,fb]=await Promise.all([api('/api/status'),api('/api/peers'),api('/api/messages?limit=100'),api('/api/tasks'),api('/api/issues')]);
+  allTasks=tk.tasks||[];allFeedback=fb.issues||[];
+  const view=JSON.stringify([p.peers.map(({last_seen_s,...x})=>x),m.messages.map(x=>[x.id,x.status]),allTasks.map(t=>[t.id,t.status,t.owner,t.note]),allFeedback.map(f=>[f.id,f.status,f.note]),sel,panelTab,cfg.sessions]);
   if(view===lastView&&!force)return;lastView=view;
   $('#hostline').textContent=`${st.host} · daemon ${st.version}`;
   $('#browsers').textContent=`${st.browsers} signed in · links work once and expire after 60 s`;
@@ -2336,8 +2438,31 @@ async function refresh(force){
   // The default space is always listed: it's where every agent with no space set lands.
   const dflt=groups.default?'':`<div class="chart"><div class="orow" style="justify-content:flex-start"><div class="ocol"><div class="sbox"><div class="name">default</div><div class="small mut">agents with no space set · none live</div></div></div></div></div>`;
   $('#spacelist').innerHTML=all((n,seen)=>{const u=sunit(n,seen);return u?`<div class="chart"><div class="orow" style="justify-content:flex-start">${u}</div></div>`:''})+dflt;
-  livePeers=p.peers;lastMsgs=m.messages;renderMessages(lastMsgs);renderTasks();
+  livePeers=p.peers;lastMsgs=m.messages;renderMessages(lastMsgs);renderTasks();renderFeedback();
 }
+// Feedback: newest first; accepting one opens a task for peerlink's maintainer.
+let allFeedback=[];
+function renderFeedback(){
+  $('#n-feedback').textContent=allFeedback.filter(f=>f.status==='new').length||'';
+  if(document.activeElement?.closest?.('#fblist'))return;
+  const st=$('#fstatus').value,ty=$('#ftype').value;
+  const shown=allFeedback.filter(f=>(!st||f.status===st)&&(!ty||f.type===ty)).sort((a,b)=>b.ts-a.ts);
+  const btn=(s,label)=>`<button class="ghost small" data-fact="${s}">${label}</button>`;
+  $('#fblist').innerHTML=shown.map(f=>{const task=allTasks.find(t=>t.id===f.task);let [head,...rest]=f.text.split('\n');
+    // A long first line is cut to a headline; the rest of it reads below.
+    if(head.length>120){const cut=head.lastIndexOf(' ',120)>60?head.lastIndexOf(' ',120):120;rest=[head.slice(cut).trim(),...rest];head=head.slice(0,cut)+'…'}
+    return `<div class="task" data-fb="${esc(f.id)}"><div class="mh"><span class="tchip ${esc(f.type)}">${esc(f.type)}</span><span class="tchip ${esc(f.status)}">${esc(f.status)}</span><b>${esc(head)}</b><span class="when">${esc(f.id)} · ${ago(f.ts)} ago</span></div>
+      <div class="small mut">${esc(f.from_name||'an agent')}${f.space?' · '+esc(f.space):''} · plugin ${esc(f.plugin||'?')}, daemon ${esc(f.daemon||'?')}${task?` · task ${esc(task.id)} ${esc(TSTATE[task.status]||task.status)} with <b>${esc(task.owner)}</b>`:''}</div>
+      ${rest.join('\n').trim()?`<div class="ftext">${esc(rest.join('\n').trim())}</div>`:''}
+      <div class="tact"><input class="small" data-fnote placeholder="Note (optional)" value="${esc(f.note||'')}">
+      ${f.status==='new'?btn('accepted','Accept')+btn('dismissed','Dismiss'):f.status==='accepted'?btn('done','Mark done')+btn('dismissed','Dismiss'):btn('new','Back to new')}</div></div>`}).join('')
+    ||`<div class="empty">${allFeedback.length?'Nothing here.':'No feedback yet. Agents send it with report_issue.'}</div>`}
+document.addEventListener('click',async e=>{const b=e.target.closest('[data-fact]');if(!b)return;const row=b.closest('[data-fb]');
+  const r=await post('/api/issues/'+encodeURIComponent(row.dataset.fb),{status:b.dataset.fact,note:row.querySelector('[data-fnote]').value});
+  if(r.error)alert(r.error);document.activeElement?.blur();refresh(true)});
+document.addEventListener('change',async e=>{const t=e.target;
+  if(t.id==='fstatus'||t.id==='ftype'){renderFeedback();return}
+  if(t.dataset.fnote!==undefined){const r=await post('/api/issues/'+encodeURIComponent(t.closest('[data-fb]').dataset.fb),{note:t.value});if(r.error)alert(r.error);t.blur();refresh(true)}});
 // Tasks: one row each, its subtasks under it. The Tasks page and an agent's Tasks tab share the row.
 let allTasks=[],panelTab='about';
 const TSTATE={open:'open',in_progress:'in progress',done:'done',failed:'failed',cancelled:'cancelled'};

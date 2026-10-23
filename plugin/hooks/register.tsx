@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.0'
+const DAEMON_VERSION = '0.8.1'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -715,13 +715,14 @@ async function spaceTree($: EngineInterface) {
 }
 
 // A report reaches the daemon if it can be started; otherwise it waits in a file the daemon files when it next starts.
-async function reportIssue($: EngineInterface, what: string, details: string) {
-  if (!what.trim()) return 'Not reported: say what went wrong.'
+async function reportIssue($: EngineInterface, what: string, details: string, type = 'bug') {
+  if (!what.trim()) return `Not reported: say ${type === 'idea' ? 'what you suggest' : 'what went wrong'}.`
   const context = `agent ${myName}, ${spaceLine()}, cwd ${await $.session.cwd()}`
-  const body = { from: sessionId, from_name: myName, text: details ? `${what}\n\n${details}` : what, context, plugin: DAEMON_VERSION, space: cfg?.space ?? '' }
+  const body = { from: sessionId, from_name: myName, type, text: details ? `${what}\n\n${details}` : what, context, plugin: DAEMON_VERSION, space: cfg?.space ?? '' }
   if (await ensureDaemon($).catch(() => false)) {
     const res = await call($, 'POST', '/api/issues', body).catch(() => undefined)
-    if (res?.ok) return `Reported as ${res.data.id}${res.data.sent_to ? ` and sent to ${res.data.sent_to}` : ''}. Logged in ${res.data.logged}.`
+    if (res?.ok)
+      return `${type === 'idea' ? 'Suggested' : 'Reported'} as ${res.data.id}${res.data.sent_to ? ` and sent to ${res.data.sent_to}` : ''}; it's in the feedback queue your user reviews.`
   }
   const now = await $.clock.now()
   const path = `${await peerlinkHome($)}/issues-pending/${now}-${sessionId.slice(0, 8)}.json`
@@ -931,11 +932,12 @@ export const register: Register = on => {
     await $.tool.register({
       name: 'report_issue',
       description:
-        "Report a problem with peerlink itself: a message that never arrived or reached the wrong agent, a peer you expected that isn't listed, an error from these tools. It's logged for the people fixing peerlink and sent to the agent working on peerlink when one is live. Not for problems with your own task or a peer's work.",
+        "Report a problem with peerlink itself (a message that never arrived or reached the wrong agent, a peer you expected that isn't listed, an error from these tools), or suggest how peerlink could work better for you. It goes into the feedback queue your user reviews; a bug also goes straight to the agent working on peerlink when one is live. Not for problems with your own task or a peer's work.",
       inputSchema: {
         type: 'object',
         properties: {
-          what: { type: 'string', description: 'What went wrong and what you expected, briefly' },
+          type: { type: 'string', enum: ['bug', 'idea'], description: 'bug (the default): something broke. idea: an improvement you would like' },
+          what: { type: 'string', description: 'What went wrong and what you expected, or the improvement, briefly' },
           details: { type: 'string', description: 'Message ids, agent names, exact error text' },
         },
         required: ['what'],
@@ -1084,7 +1086,7 @@ export const register: Register = on => {
     return text(`Task ${t.id} is ${t.status.replace('_', ' ')}.${t.status === 'done' || t.status === 'failed' ? ` ${t.requester?.name || 'Whoever asked'} gets your note.` : ''}`)
   }).catch(daemonDown)
 
-  on('tool.call', { tool: 'mcp__peerlink__report_issue' }, async ($, e) => text(await reportIssue($, String((e as any).what ?? ''), String((e as any).details ?? ''))))
+  on('tool.call', { tool: 'mcp__peerlink__report_issue' }, async ($, e) => text(await reportIssue($, String((e as any).what ?? ''), String((e as any).details ?? ''), (e as any).type === 'idea' ? 'idea' : 'bug')))
 
   on('tool.call', { tool: 'mcp__peerlink__set_summary' }, async ($, e) => {
     manualSummaryAt = await $.clock.now()

@@ -132,9 +132,15 @@ Compaction, `/clear` and `/resume` reset what an agent remembers, but not what i
 - **Nothing goes to a dead session.** A reply to a session that's gone goes to the live agent in the same folder. A new session in a folder picks up messages still queued for the last one there, for up to an hour.
 - **Open requests come back.** At the start of a conversation, after compaction and after `/clear`, the agent's context lists the peer requests it still owes an answer to and the ones it's waiting on, with message ids. They are taken from the last 8 hours of messages that expect a reply and haven't had one.
 
-## Reporting problems
+## Feedback: bugs and ideas
 
-Agents call `report_issue` when peerlink itself misbehaves. Each report is logged to `~/.peerlink/issues.jsonl`. If an agent named `peerlink` is live (the `issue_agent` setting), the report is also sent to it as a message, whatever space it's in. Run an agent in the peerlink repo while you develop peerlink, and problems come to it as they happen. If the daemon is down, the report waits in `~/.peerlink/issues-pending/` until the daemon next starts. `/peerlink issues` and `peerlink issues` list recent reports.
+Agents call `report_issue` when peerlink itself misbehaves (a `bug`), or when it could work better for them (an `idea`). Every agent can, whatever its space. Each one lands in the **Feedback** page of the web UI, and the menu counts the new ones.
+
+- **Triage:** mark each one accepted, dismissed or done, with an optional note.
+- **Accepting one** makes it a task for the agent that works on peerlink (the `issue_agent` setting, `peerlink` by default). It goes to that agent's folder, so it waits even when that agent isn't running. When the task is done, the feedback is too.
+- **Bugs arrive straight away:** if the peerlink agent is live, a bug is also sent to it as a message as soon as it's reported. Run an agent in the peerlink repo while you develop peerlink, and problems come to it as they happen.
+
+Everything is kept in `~/.peerlink/issues.jsonl`. If the daemon is down, a report waits in `~/.peerlink/issues-pending/` until the daemon next starts. `/peerlink issues` and `peerlink issues` list recent ones.
 
 ## Keeping token costs down
 
