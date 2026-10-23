@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.7"
+VERSION = "0.8.8"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -987,16 +987,35 @@ def reaction_worker():
                 discordlink.react(discord["token"], channel, message, new)
 
 
-def discord_activity(rec, activity):
-    """Show an agent's activity on the Discord messages it still has to answer."""
-    emoji = ACTIVITY_EMOJI.get(activity)
-    if not emoji:
-        return
+# Activity shows on a Discord message only during the turn that handles it: once that turn ends it's settled,
+# answered or not (a button pick, or one reply to several messages, never gets a reply_to of its own).
+ACTIVITY_MAX_AGE_S = 1800  # and never on one delivered longer ago than this, as settled marks don't survive a restart
+
+
+def discord_pending(rec):
+    """The Discord messages rec is working on now. Called with the lock held."""
     answered = {m.get("reply_to") for m in messages if m.get("to", "").startswith("discord:")}
+    now = time.time()
     for m in messages[-200:]:
         closed = tasks.get(m.get("task") or "", {}).get("status") in TASK_CLOSED
-        if m.get("discord") and m.get("to") == rec["id"] and m.get("status") == "delivered" and m["id"] not in answered and not closed:
+        if (m.get("discord") and m.get("to") == rec["id"] and m.get("status") == "delivered" and not m.get("settled")
+                and now - m.get("delivered_ts", m["ts"]) < ACTIVITY_MAX_AGE_S and m["id"] not in answered and not closed):
+            yield m
+
+
+def discord_activity(rec, activity):
+    """Show an agent's activity on the Discord messages it's working on."""
+    emoji = ACTIVITY_EMOJI.get(activity)
+    if emoji:
+        for m in discord_pending(rec):
             set_reaction(m, emoji)
+
+
+def discord_turn_done(rec):
+    """The agent's turn ended: what it didn't answer goes back to 👀 (delivered) and stays there."""
+    for m in list(discord_pending(rec)):
+        m["settled"] = True
+        set_reaction(m, "👀")
 
 
 def read_files(paths):
@@ -2403,6 +2422,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(404, {"error": "unknown agent; register again"})
                 rec["last_seen"] = time.time()
                 if "busy" in b:
+                    if rec.get("busy") and not b["busy"]:
+                        discord_turn_done(rec)
                     rec["busy"] = bool(b["busy"])
                 if b.get("activity"):
                     discord_activity(rec, b["activity"])
@@ -2857,9 +2878,10 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)
 .down{width:2px;height:14px;background:var(--acc);flex:none}
 .node{width:190px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 10px;cursor:pointer;text-align:left;font:inherit;color:inherit}
 .node:hover{border-color:var(--mut)}.node.is-lead{border-color:var(--acc)}.node.sel{box-shadow:0 0 0 2px var(--acc)}
-.node .nm{font-weight:600;display:flex;align-items:center;gap:6px;justify-content:space-between}.node .nm>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.node .nm .ctx{flex:none}
+.node .nm{font-weight:600;display:flex;align-items:center;gap:6px;justify-content:space-between}.node .nm>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .node .tag{font-size:11px;font-weight:500;color:var(--acc);white-space:nowrap}
-.node .badge{display:inline-block;font-size:10px;font-weight:600;color:var(--acc);border:1px solid var(--acc);border-radius:4px;padding:0 4px;margin-top:4px}
+.node .badge{display:inline-block;font-size:10px;font-weight:600;color:var(--acc);border:1px solid var(--acc);border-radius:4px;padding:0 4px;white-space:nowrap}
+.node .nm .rt{flex:none;display:inline-flex;align-items:center;gap:6px}.node .badge.only{border-style:dashed}
 .node.off{opacity:.5;cursor:default;border-style:dashed}.node.off:hover{border-color:var(--acc)}
 .under{margin-left:14px;border-left:2px solid var(--acc);padding-left:12px;margin-top:8px}
 .node .dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--mut);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -3195,9 +3217,12 @@ async function refresh(force){
   const short=d=>{const t=tilde(d).split('/');return t.length>3?'…/'+t.slice(-2).join('/'):t.join('/')};
   const ctx=x=>x.context==null?'':`<span class="ctx${x.context>=80?' hi':''}" title="context window in use">${x.context}%</span>`;
   // A lead is told apart by its outline (and says which team on hover), so every card keeps its context in one place.
-  const badge=x=>x.leads?`<div><span class="badge">${x.leads==='only'?'Lead (only agent)':'Lead'}</span>${x.offline?` <span class="small mut" data-clearlead="${esc(x.space)}" title="Clear this lead" style="cursor:pointer">clear</span>`:''}</div>`:'';
+  // The badge sits in the name row, left of the context; an offline lead's clear link goes beneath.
+  // An implicit lead (it was alone in the space) has a dashed badge, and says so on hover, so the name keeps its room.
+  const badge=x=>x.leads?`<span class="badge${x.leads==='only'?' only':''}" title="${x.leads==='only'?'Lead (only agent): it was the only agent in the space':'Lead'}">Lead</span>`:'';
+  const clearOff=x=>x.leads&&x.offline?`<div><span class="small mut" data-clearlead="${esc(x.space)}" title="Clear this lead" style="cursor:pointer">clear</span></div>`:'';
   const node=x=>`<${x.offline?'div':'button'} class="node${x.leads?' is-lead':''}${x.offline?' off':''}${x.id&&x.id===sel?' sel':''}"${x.offline?'':` data-sel="${esc(x.id)}"`}${x.leads?` title="Leads the ${esc(x.space)} ${x.parent?'team':'space'}${x.offline?' (offline)':''}"`:''}>
-    <div class="nm"><span title="${esc(x.name)}">${x.offline?'':`<span class="dot ${x.busy?'busy':''}"></span>`}${esc(x.name)}</span>${ctx(x)}</div>${badge(x)}
+    <div class="nm"><span title="${esc(x.name)}">${x.offline?'':`<span class="dot ${x.busy?'busy':''}"></span>`}${esc(x.name)}</span><span class="rt">${badge(x)}${ctx(x)}</span></div>${clearOff(x)}
     <div class="dir">${esc(short(x.cwd))}</div>${x.branch?`<div class="dir" title="${esc(x.branch)}">⎇ ${esc(x.branch)}</div>`:''}<div class="sum">${esc(x.summary)||'no summary yet'}</div>${x.open_tasks?`<div class="small" style="color:var(--acc)">${x.open_tasks} open task${x.open_tasks>1?'s':''}</div>`:''}${x.stale&&!x.remote?'<div class="stale">reload needed</div>':''}</${x.offline?'div':'button'}>`;
   // Every live agent gets its own card, two sessions in one folder included: a hidden one can't be found to message.
   const rank=(a,b)=>(b.busy-a.busy)||(a.last_seen_s-b.last_seen_s);
