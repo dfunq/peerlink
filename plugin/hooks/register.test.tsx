@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.8.10', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.8.11', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (state.forget && path.endsWith('/heartbeat') && 'busy' in body) {
       state.forget = false
       return { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'unknown agent; register again' }) } }
@@ -104,17 +104,22 @@ function engine(on: any, { turns = 0, readme = '', claudeMd = '', installed = ''
   })
   on('tool.register', (_: any, e: any) => ({ value: { tool: `mcp__peerlink__${e.name}` } }))
   on('command.register', () => ({ value: { command: 'peerlink' } }))
-  on('prompt.submit', (_: any, e: any) => ({ text: e.text, context: e.context }))
+  // What the plugin submitted as a prompt of its own: a peer message waking this agent.
+  const woke: string[] = []
+  on('prompt.submit', (_: any, e: any) => {
+    if (e.text.includes('(Reply with send_message')) woke.push(e.text)
+    return { text: e.text, context: e.context }
+  })
   on('turn.complete', (_: any, e: any) => ({ text: e.text }))
   const answer = (text: string) =>
     on('model.complete', () => {
       calls.model++
       return { value: { isAnswered: true, text, usage: {} } }
     })
-  return { clock, calls, answer, writes, ids, pinned, git, where }
+  return { clock, calls, answer, writes, ids, pinned, git, where, woke }
 }
 
-test('the model is told about peers beside the prompt, once per change', async ($, on) => {
+test('the model is told about peers beside the prompt, again only when who is there changes', async ($, on) => {
   engine(on)
   const daemon = fakeDaemon(on)
   await $.session.start(START)
@@ -125,9 +130,15 @@ test('the model is told about peers beside the prompt, once per change', async (
   const second: any = await $.prompt.submit({ text: 'now style it' })
   expect(second.context).toBeUndefined()
 
+  // A new summary alone isn't worth resending the list for; list_peers has it.
   daemon.peers[0].summary = 'Migrating invoices to v2'
   const third: any = await $.prompt.submit({ text: 'next' })
-  expect(third.context?.join('\n')).toContain('Migrating invoices to v2')
+  expect(third.context).toBeUndefined()
+
+  daemon.peers.push({ id: 'p2', name: 'search', host: 'Mac', cwd: '/Users/x/r/search', branch: 'main', summary: 'Indexing', busy: false, muted: false })
+  const fourth: any = await $.prompt.submit({ text: 'and now' })
+  expect(fourth.context?.join('\n')).toContain('search: ~/r/search [main] — Indexing')
+  expect(fourth.context?.join('\n')).toContain('Migrating invoices to v2')
 })
 
 test('a new session describes itself from its README, with no model call', async ($, on) => {
@@ -189,7 +200,7 @@ test('with no peers to read it, no summary is paid for', async ($, on) => {
   expect(calls.model).toBe(0)
 })
 
-test('summaries refresh every few turns, and an unchanged one is not resent', async ($, on) => {
+test('summaries refresh every 8 turns and 10 minutes, and an unchanged one is not resent', async ($, on) => {
   const { calls, answer, clock } = engine(on, { turns: 4 })
   answer('UNCHANGED')
   const daemon = fakeDaemon(on)
@@ -197,12 +208,11 @@ test('summaries refresh every few turns, and an unchanged one is not resent', as
   await settle()
   expect(calls.model).toBe(1)
 
-  await $.turn.complete(TURN)
-  await $.turn.complete(TURN)
+  for (let i = 0; i < 7; i++) await $.turn.complete(TURN)
+  await clock.advance(11 * 60_000)
   await settle()
   expect(calls.model).toBe(1)
 
-  await clock.advance(3 * 60_000)
   await $.turn.complete(TURN)
   await settle()
   expect(calls.model).toBe(2)
@@ -446,13 +456,56 @@ test('with wake off, a message still shows once, and says it waits for the next 
   expect(toasts.some(t => t.includes('api'))).toBe(true)
 })
 
+test("a message that needs no reply waits for the agent's next turn instead of starting one", async ($, on) => {
+  const { clock, woke } = engine(on)
+  const logged: string[] = []
+  on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
+  const inbox: any[] = []
+  fakeDaemon(on, 1, null, inbox)
+  await $.session.start(START)
+  await settle()
+  inbox.push({ id: 'm7', from: 'api-id', from_name: 'api', from_host: 'Mac', text: 'Thanks, merged.', expects_reply: false, reply_to: 'm6', hops: 1, wake: false })
+  await clock.advance(600000)
+  for (let i = 0; i < 10; i++) await settle()
+  expect(woke).toEqual([])
+  expect(logged.filter(l => l.includes('m7'))).toEqual(['↘ api · m7 · re m6: Thanks, merged.  (no reply needed: read with the next turn)'])
+})
+
+test("another agent's question wakes an idle agent after a short wait, and yours at once", async ($, on) => {
+  const { clock, woke } = engine(on)
+  const inbox: any[] = []
+  fakeDaemon(on, 1, null, inbox, { wake_delay_s: 15 })
+  await $.session.start(START)
+  await settle()
+  inbox.push({ id: 'm8', from: 'api-id', from_name: 'api', from_host: 'Mac', text: 'Which file has the schema?', expects_reply: true, reply_to: null, hops: 0, wake: true })
+  await clock.advance(600000)
+  for (let i = 0; i < 10; i++) await settle()
+  expect(woke).toEqual([])
+  await clock.advance(16000)
+  for (let i = 0; i < 10; i++) await settle()
+  expect(woke.length).toBe(1)
+  expect(woke[0]).toContain('Which file has the schema?')
+})
+
+test('your own message wakes an idle agent without waiting', async ($, on) => {
+  const { clock, woke } = engine(on)
+  const inbox: any[] = []
+  fakeDaemon(on, 1, null, inbox, { wake_delay_s: 15 })
+  await $.session.start(START)
+  await settle()
+  inbox.push({ id: 'm9', from: 'discord:123', from_name: 'dillon on Discord', from_host: 'discord', text: 'Status?', expects_reply: false, reply_to: null, hops: 0 })
+  await clock.advance(600000)
+  for (let i = 0; i < 10; i++) await settle()
+  expect(woke.length).toBe(1)
+})
+
 test('a session says which plugin and daemon versions it runs', async ($, on) => {
   engine(on)
   const logged: string[] = []
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.8.10 · daemon 0.8.10 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.8.11 · daemon 0.8.11 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the team is listed once', async ($, on) => {
@@ -485,7 +538,7 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.8.10')
+  expect(reg.plugin).toBe('0.8.11')
 })
 
 test('an agent registers again under the folder it started in, wherever the host has moved its root since', async ($, on) => {
@@ -552,7 +605,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.8.11', true], ['0.8.10', false]] as const)
+for (const [installed, reloads] of [['0.8.12', true], ['0.8.11', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     fakeDaemon(on)
