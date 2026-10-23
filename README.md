@@ -7,7 +7,7 @@ Each agent gets four tools:
 | Tool | What it does |
 | --- | --- |
 | `list_peers` | Lists the other live agents: name, folder, branch, what each is working on, and whether it's busy |
-| `send_message` | Sends a message to a peer agent by name. The message is delivered into a turn that's running, or starts a turn in an idle agent |
+| `send_message` | Sends a message to a peer agent by name, or to a space's lead with `space:<name>`. The message is delivered into a turn that's running, or starts a turn in an idle agent |
 | `set_summary` | Sets the one-line summary that peers see for this agent |
 | `report_issue` | Reports a problem with peerlink itself, such as a reply that never arrived. See [Reporting problems](#reporting-problems) |
 
@@ -59,7 +59,17 @@ parent: acme
 - In the peer list a lead shows as `storefront [leads storefront]`. The web UI's Agents page is an org chart: each space is a box, a lead sits in its parent's box, and its team hangs beneath it. `/peerlink-spaces` prints the same chart in the terminal.
 - Click an agent in the web UI to open its settings: its name, the space for its folder, the space that one sits inside, a space for this agent only, wake and mute. Save changes only what you edited.
 
-Spaces can nest to any depth. `/peerlink-spaces parent <name>` writes the key for you, and `/peerlink-spaces` prints the tree. An agent with a space override is never a lead.
+Spaces can nest to any depth. `/peerlink-spaces parent <name>` writes the key for you, and `/peerlink-spaces` prints the tree.
+
+### Space leads
+
+Any named space can have a lead, nested or not. Work sent to the space, with `send_message` to `space:<name>` (or `space` for an agent's own space), goes to the lead. The lead decides who owns the work and delegates it.
+
+- **An agent alone in a space leads it.** The web UI shows it as "Lead (only agent)". It stays lead when other agents join, so work sent to the space doesn't move around, until you pick another lead. The `default` space has no lead.
+- **You pick a lead in the web UI.** Open an agent and choose **Make lead**. To remove the lead, choose **Clear lead**. Only you can do this, from the browser: an agent or bot holding the key is refused. A lead you pick wins over the folder of a nesting `.peerlink`, and that folder's lead wins over an implicit one. The old lead and the new one are both told.
+- **The lead belongs to a folder,** so it survives `/clear` and restarts. While it's offline it stays pinned at the top of its space, greyed. Work sent to the space waits for the next agent in that folder.
+- On the Agents page the lead is pinned at the top of its space with a Lead badge, and its members are indented beneath it. A nested space hangs under its lead. Peers see the lead as `name [leads <space>]`.
+- Each card and agent panel shows the agent's git branch: the branch name, plus the worktree's name in a linked worktree, or `detached @ <sha>`. It's re-read every 10 seconds, so a branch switch shows up. Folders that aren't git repos show none.
 
 ## What you see in the chat
 
