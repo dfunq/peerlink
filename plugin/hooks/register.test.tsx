@@ -12,7 +12,7 @@ async function settle() {
 // A daemon in memory: what the plugin posts, and the peers it answers.
 function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unknown[] = [], config: Record<string, unknown> = {}, code = '') {
   const posted: { path: string; body: any }[] = []
-  const state = { down: false, threads: { owes: [] as any[], waiting: [] as any[] } }
+  const state = { down: false, forget: false, threads: { owes: [] as any[], waiting: [] as any[] } }
   const peers = [
     { id: 'p1', name: 'billing-api', host: 'Mac', cwd: '/Users/x/r/billing', branch: 'main', summary: 'Owns the invoice schema', busy: false, muted: false },
   ]
@@ -22,7 +22,11 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.8.5', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.8.6', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (state.forget && path.endsWith('/heartbeat') && 'busy' in body) {
+      state.forget = false
+      return { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'unknown agent; register again' }) } }
+    }
     if (path === '/api/sessions') return ok({ id: body.id, name: body.name, config: { poll_interval_ms: 600000, ...config }, previous })
     if (path === '/api/peers') return ok({ peers })
     if (path.endsWith('/threads')) return ok(state.threads)
@@ -49,7 +53,14 @@ function engine(on: any, { turns = 0, readme = '', claudeMd = '', installed = ''
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: ids.current }))
   on('session.cwd', () => ({ value: '/Users/x/r/web' }))
-  on('session.root', () => ({ value: '/Users/x/r/web' }))
+  const where = { root: '/Users/x/r/web' }
+  on('session.root', () => ({ value: where.root }))
+  const store: Record<string, unknown> = {}
+  on('store.get', (_: any, e: any) => ({ value: store[e.key ?? e] }))
+  on('store.set', (_: any, e: any) => {
+    store[e.key] = e.value
+    return { value: undefined }
+  })
   on('session.repo', () => ({ value: { root: '/Users/x/r/web', remote: null, internal: false, name: null } }))
   on('session.model', () => ({ value: 'opus' }))
   on('session.usage', () => ({ value: { context: { window: 200000, tokens: 170000, percent: 85 } } }))
@@ -100,7 +111,7 @@ function engine(on: any, { turns = 0, readme = '', claudeMd = '', installed = ''
       calls.model++
       return { value: { isAnswered: true, text, usage: {} } }
     })
-  return { clock, calls, answer, writes, ids, pinned, git }
+  return { clock, calls, answer, writes, ids, pinned, git, where }
 }
 
 test('the model is told about peers beside the prompt, once per change', async ($, on) => {
@@ -441,7 +452,7 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.8.5 · daemon 0.8.5 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.8.6 · daemon 0.8.6 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the team is listed once', async ($, on) => {
@@ -474,7 +485,20 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.8.5')
+  expect(reg.plugin).toBe('0.8.6')
+})
+
+test('an agent registers again under the folder it started in, wherever the host has moved its root since', async ($, on) => {
+  const { clock, where } = engine(on)
+  const daemon = fakeDaemon(on)
+  await $.session.start(START)
+  where.root = '/Users/x/r'
+  daemon.state.forget = true
+  await clock.advance(600000)
+  for (let i = 0; i < 10; i++) await settle()
+  const regs = daemon.posted.filter(p => p.path === '/api/sessions').map(p => [p.body.cwd, p.body.name])
+  expect(regs.length).toBe(2)
+  expect(regs[1]).toEqual(['/Users/x/r/web', 'web'])
 })
 
 test('plain /peerlink shows status, not the web UI', async ($, on) => {
@@ -516,7 +540,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.8.6', true], ['0.8.5', false]] as const)
+for (const [installed, reloads] of [['0.8.7', true], ['0.8.6', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     fakeDaemon(on)
