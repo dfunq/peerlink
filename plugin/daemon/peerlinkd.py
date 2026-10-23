@@ -28,7 +28,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.7.5"
+VERSION = "0.7.6"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -946,6 +946,9 @@ def send(body):
                 back = successor(parent.get("from_cwd") or (back or {}).get("cwd", ""))
             if back:
                 target = back
+            elif parent.get("from_cwd"):
+                # Nobody there right now (a daemon restart, an agent reloading): it waits for the folder's next agent.
+                target = {"id": f"folder:{parent['from_cwd']}", "cwd": parent["from_cwd"], "name": parent.get("from_name") or ""}
             else:
                 err = f"{parent.get('from_name') or 'the sender'} of {parent['id']} is no longer live and no agent runs in its folder now"
         elif not to:
@@ -2094,24 +2097,21 @@ async function refresh(force){
   const roots=Object.keys(groups).filter(n=>!inside[n]||n===inside[n].parent).sort(order);
   // A space's box: its members, then the leads of the spaces under it.
   const isLead=(x,n)=>!!(inside[n]&&inside[n].parent!==n&&x.parent&&x.space===n);
-  const members=n=>[...primary(groups[n].filter(x=>!isLead(x,n)).sort(rank)).sort((a,b)=>a.name.localeCompare(b.name)),
+  const members=n=>[...groups[n].filter(x=>!isLead(x,n)).sort(rank).sort((a,b)=>a.name.localeCompare(b.name)),
     ...(kids[n]||[]).filter(c=>c!==n).sort().map(c=>inside[c].peer)];
   const short=d=>{const t=tilde(d).split('/');return t.length>3?'…/'+t.slice(-2).join('/'):t.join('/')};
   const ctx=x=>x.context==null?'':`<span class="ctx${x.context>=80?' hi':''}" title="context window in use">${x.context}%</span>`;
-  // Sessions open in the same folder show as one card; its panel lists the others.
-  const twins=x=>p.peers.filter(y=>y.id!==x.id&&y.cwd===x.cwd&&y.space===x.space);
   // A lead is told apart by its outline (and says which team on hover), so every card keeps its context in one place.
-  const node=x=>{const more=twins(x).length;return `<button class="node${x.parent?' is-lead':''}${x.id===sel?' sel':''}" data-sel="${esc(x.id)}"${x.parent?` title="Leads the ${esc(x.space)} team"`:''}>
+  const node=x=>`<button class="node${x.parent?' is-lead':''}${x.id===sel?' sel':''}" data-sel="${esc(x.id)}"${x.parent?` title="Leads the ${esc(x.space)} team"`:''}>
     <div class="nm"><span><span class="dot ${x.busy?'busy':''}"></span>${esc(x.name)}</span>${ctx(x)}</div>
-    <div class="dir">${esc(short(x.cwd))}</div><div class="sum">${esc(x.summary)||'no summary yet'}</div>${more?`<div class="small mut">+${more} more session${more>1?'s':''} here</div>`:''}${x.stale&&!x.remote?'<div class="stale">reload needed</div>':''}</button>`};
-  // One card per folder: the busiest, else most recently active, session stands for the rest.
-  const primary=list=>{const seen=new Set();return list.filter(x=>{const k=x.space+'\u0000'+x.cwd;if(seen.has(k))return false;seen.add(k);return true})};
+    <div class="dir">${esc(short(x.cwd))}</div><div class="sum">${esc(x.summary)||'no summary yet'}</div>${x.stale&&!x.remote?'<div class="stale">reload needed</div>':''}</button>`;
+  // Every live agent gets its own card, two sessions in one folder included: a hidden one can't be found to message.
   const rank=(a,b)=>(b.busy-a.busy)||(a.last_seen_s-b.last_seen_s);
   const unit=(n,seen)=>{if(seen.has(n))return '';seen.add(n);
     const list=members(n),branches=list.some(x=>x.parent&&x.space!==n);
-    const count=list.reduce((t,x)=>t+(x.parent&&x.space!==n?primary(leads[x.space]).length:1),0);
+    const count=list.reduce((t,x)=>t+(x.parent&&x.space!==n?leads[x.space].length:1),0);
     const cols=list.map(x=>x.parent&&x.space!==n&&!seen.has(x.space)
-      ?`<div class="ocol"><div class="orow stack">${primary(leads[x.space].slice().sort(rank)).map(node).join('')}</div><div class="down"></div>${unit(x.space,seen)}</div>`:`<div class="ocol">${node(x)}</div>`);
+      ?`<div class="ocol"><div class="orow stack">${leads[x.space].slice().sort(rank).map(node).join('')}</div><div class="down"></div>${unit(x.space,seen)}</div>`:`<div class="ocol">${node(x)}</div>`);
     // A team with no teams under it stacks, so each lead's column stays one card wide.
     const stack=inside[n]&&inside[n].parent!==n&&!branches;
     return `<div class="unit"><div class="unit-h">${esc(n)}${inside[n]&&inside[n].parent!==n?' team':''} · ${count}</div><div class="orow${stack?' stack':''}">${cols.join('')||'<span class="mut small">no live agents</span>'}</div></div>`};
