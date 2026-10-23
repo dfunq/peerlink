@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.11"
+VERSION = "0.8.12"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -1037,7 +1037,7 @@ def on_discord(d):
         discordlink.post(discord["token"], d["channel_id"], f"{folder_name(cwd)} isn't running right now. Your message waits up to an hour for it.", d["message_id"])
 
 
-# A message from Discord shows where it's at, as a bot does: 👀 heard, 🤔 thinking, 🛠️ using tools,
+# A message from Discord shows where it's at: 👀 heard, 🤔 thinking, 🛠️ using tools,
 # ❓ asked you something, ✅ answered. The agent's plugin reports its activity with each heartbeat; the daemon
 # swaps the reaction on every open Discord message to that agent. Discord calls go through a queue on their own
 # thread, so a heartbeat never waits on Discord.
@@ -3705,7 +3705,7 @@ document.addEventListener('click',async e=>{const t=e.target.closest('button');i
   if(act==='logout-all'&&confirm('Sign out every browser, including this one?')){await post('/api/web/logout',{all:true});location.reload()}
   if(act==='rotate'&&confirm('Rotate the key? Every browser is signed out; agents pick up the new key by themselves.')){await post('/api/key/rotate');location.reload()}
   if(act==='restart'){await post('/api/restart');$('#ctlmsg').textContent='Restarting…';setTimeout(()=>location.reload(),2500)}});
-// -- Discord: the setup walkthrough (a reference bot's three steps) and the channel-to-agent mapping --------
+// -- Discord: the setup walkthrough and the channel-to-agent mapping --------
 let dState=null,dGuilds=null,dDraft=null,dBusy=false;
 const agentFolders=()=>{const m=new Map();for(const p of livePeers)if(!p.remote&&!m.has(p.cwd))m.set(p.cwd,{cwd:p.cwd,name:p.name,space:p.space});return [...m.values()].sort((a,b)=>a.name.localeCompare(b.name))};
 const folderLabel=cwd=>{const a=agentFolders().find(x=>x.cwd===cwd);return a?`${a.name} · ${a.space}`:`${(cfg.folder_names||{})[cwd]||cwd.split('/').filter(Boolean).pop()||cwd} (not running)`};

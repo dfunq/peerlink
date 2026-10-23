@@ -1,7 +1,6 @@
 """peerlink's Discord bot: a channel per agent, so you can talk to your agents from your phone.
 
-The design follows a reference bot, rewritten
-for the standard library because the daemon installs nothing: REST over urllib, and the gateway over a small
+Written for the standard library because the daemon installs nothing: REST over urllib, and the gateway over a small
 WebSocket client below instead of py-cord.
 
 **Setup is one paste.** Given a bot token, the daemon asks Discord who the bot is and which application it
