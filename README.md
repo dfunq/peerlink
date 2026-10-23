@@ -89,7 +89,9 @@ A message asks for something, and a reply is optional. A task is a piece of work
 - **Handing one out:** `send_message` with `kind: "task"`, or a Discord post that starts with `Task:` (a trusted bot's too). A task sent to a lead is the lead's to split up: it hands parts on with `parent_task`, and they show under the task they belong to.
 - **Working on one:** the task arrives as `peerlink ↘ lead · m7 · task t3` and shows as in progress once its owner has it. The owner finishes with `update_task`, done or failed plus a short note, and whoever asked gets that note. On Discord it's a reply under your post, with a ✅ or ❌ reaction. Any failed task is also posted to Discord.
 - **Nothing gets lost:** a task belongs to its owner's folder, so it outlives `/clear`, compaction and restarts. Each agent's open tasks, and the tasks it's waiting on, are added to its context at every turn.
-- **In the web UI:** the **Tasks** page lists every task with its status, owner, requester and age, and has filters. You can cancel, reopen or reassign any task. Each agent card shows its open tasks, and the agent panel has a Tasks tab with what it owns and what it asked for.
+- **In the web UI:** the **Tasks** page is a board with Open, In progress, Done and Failed columns. Cancelled is a collapsed column. Each card shows the title, owner, requester and age, and a parent task shows how many of its subtasks are done. Filter by owner, requester or space, and split the board into rows by space or owner. **List** switches to the list view, and each browser remembers your choice.
+  - Drag a card to Cancelled to cancel it, from Done, Failed or Cancelled to Open to reopen it, or onto an agent named above the board to hand it over. Only the owner moves a task to in progress, done or failed, so those columns never take a drop. If the owner changed the task after the board was drawn, the move is refused and nothing changes. Click a card for its note and the same buttons the list has.
+  - Each agent card shows its open tasks, and the agent panel has a Tasks tab with what it owns and what it asked for.
 
 Tasks are saved in `~/.peerlink/tasks.json`.
 
