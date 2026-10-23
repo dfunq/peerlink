@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.5'
+const DAEMON_VERSION = '0.8.6'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -267,16 +267,31 @@ async function freshBranch($: EngineInterface) {
   const now = await $.clock.now()
   if (now - branchAt < BRANCH_EVERY_MS) return undefined
   branchAt = now
-  const next = await branchOf($, await $.session.root())
+  const next = await branchOf($, await agentFolder($))
   if (next === branch) return undefined
   branch = next
   return next
 }
 
+// The folder each session started in, kept across plugin reloads: the newest sessions only, to stay small.
+const FOLDERS_KEPT = 50
+
+// The folder this agent is, for its whole session. $.session.root() follows the host when it moves the session's
+// directory (it can follow a shell cd), and an agent that re-registers from ~/Repos must not become "Repos".
+// `succeeds`: the session this one continues after a /clear or resume, whose folder it keeps.
+async function agentFolder($: EngineInterface, succeeds?: string) {
+  const folders = ((await $.store.get('folders').catch(() => undefined)) ?? {}) as Record<string, string>
+  if (folders[sessionId]) return folders[sessionId]
+  const cwd = (succeeds && folders[succeeds]) || (await $.session.root())
+  folders[sessionId] = cwd
+  await $.store.set('folders', Object.fromEntries(Object.entries(folders).slice(-FOLDERS_KEPT))).catch(() => undefined)
+  return cwd
+}
+
 // `succeeds`: the session id this conversation ran under before a /clear or resume, whose messages it takes over.
 async function announce($: EngineInterface, succeeds?: string) {
-  // The project root, not the shell's directory: an agent that cds into a subfolder is still the same agent.
-  const cwd = await $.session.root()
+  // Where the session started, not where the shell or host moved it since: an agent that cds elsewhere is still the same agent.
+  const cwd = await agentFolder($, succeeds)
   const repo = await $.session.repo()
   branch = await branchOf($, cwd)
   branchAt = await $.clock.now()
