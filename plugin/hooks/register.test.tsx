@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.8.4', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.8.5', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (path === '/api/sessions') return ok({ id: body.id, name: body.name, config: { poll_interval_ms: 600000, ...config }, previous })
     if (path === '/api/peers') return ok({ peers })
     if (path.endsWith('/threads')) return ok(state.threads)
@@ -55,6 +55,8 @@ function engine(on: any, { turns = 0, readme = '', claudeMd = '', installed = ''
   on('session.usage', () => ({ value: { context: { window: 200000, tokens: 170000, percent: 85 } } }))
   on('session.turns', () => ({ value: turns }))
   on('session.messages', () => ({ value: [{ role: 'user', text: 'build the invoice page', toolUses: [] }] }))
+  // What git says about the agent's folder: dirs are git-dir, common dir and top level; null outside a repo.
+  const git = { dirs: ['/Users/x/r/web/.git', '/Users/x/r/web/.git', '/Users/x/r/web'] as string[] | null, head: 'main', sha: '1a2b3c4' }
   const pinned: unknown[] = []
   on('ui.status', (_: any, e: any) => {
     pinned.push(e)
@@ -63,14 +65,20 @@ function engine(on: any, { turns = 0, readme = '', claudeMd = '', installed = ''
   on('process.run', (_: any, e: any) => {
     const [cmd, ...args] = e.argv
     let stdout = ''
-    if (cmd === 'git' && args[0] === 'rev-parse') stdout = 'main\n'
+    let exitCode = 0
+    if (cmd === 'git') {
+      if (!git.dirs) exitCode = 128
+      else if (args.includes('--git-dir')) stdout = git.dirs.join('\n') + '\n'
+      else if (args[0] === 'symbolic-ref') git.head ? (stdout = git.head + '\n') : (exitCode = 1)
+      else if (args[0] === 'rev-parse') stdout = git.sha + '\n'
+    }
     if (cmd === 'git' && args[0] === 'log') stdout = commits
     if (cmd === 'python3' && args[1] === 'fingerprint') stdout = fingerprint
     if (cmd === 'grep') {
       const t = transcripts.find(t => args.at(-1).endsWith(t.name))
       if (t) stdout = JSON.stringify({ type: 'ai-title', aiTitle: t.title }) + '\n'
     }
-    return { value: { exitCode: 0, stdout, stderr: '' } }
+    return { value: { exitCode, stdout, stderr: '' } }
   })
   on('fs.read', (_: any, e: any) => {
     if (readme && e.path.endsWith('/README.md')) return { value: readme }
@@ -92,7 +100,7 @@ function engine(on: any, { turns = 0, readme = '', claudeMd = '', installed = ''
       calls.model++
       return { value: { isAnswered: true, text, usage: {} } }
     })
-  return { clock, calls, answer, writes, ids, pinned }
+  return { clock, calls, answer, writes, ids, pinned, git }
 }
 
 test('the model is told about peers beside the prompt, once per change', async ($, on) => {
@@ -335,6 +343,19 @@ test('a parent space sees its child leads, tagged, and is told to hand them outc
   expect(text).toContain('billing-api (leads "billing")')
 })
 
+test('a lead of a top-level space is told work sent to the space comes to it, and members see it tagged', async ($, on) => {
+  engine(on)
+  const daemon = fakeDaemon(on, 1, null, [], { space: 'acme', space_source: 'file', space_from: '/Users/x/r/.peerlink', leads: 'only' })
+  Object.assign(daemon.peers[0], { space: 'acme', leads: 'set' })
+  on('prompt.compose', () => ({ sections: [] }))
+  await $.session.start(START)
+  const first: any = await $.prompt.submit({ text: 'go' })
+  expect(first.context?.join('\n')).toContain('billing-api [leads acme]: ~/r/billing')
+  const composed: any = await $.prompt.compose(COMPOSE)
+  const text = composed.sections.find((s: any) => s.id === 'peerlink:guidance').text
+  expect(text).toContain('You lead the "acme" space. Work sent to the space (to "space:acme") comes to you')
+})
+
 test('/peerlink-spaces draws an org chart: a lead in its parent, its team beneath', async ($, on) => {
   engine(on)
   const daemon = fakeDaemon(on, 1, null, [], { space: 'billing', space_source: 'file', space_from: '/Users/x/r/web/.peerlink', parent: 'acme' })
@@ -420,7 +441,7 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.8.4 · daemon 0.8.4 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.8.5 · daemon 0.8.5 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the team is listed once', async ($, on) => {
@@ -453,7 +474,7 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.8.4')
+  expect(reg.plugin).toBe('0.8.5')
 })
 
 test('plain /peerlink shows status, not the web UI', async ($, on) => {
@@ -495,7 +516,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.8.5', true], ['0.8.4', false]] as const)
+for (const [installed, reloads] of [['0.8.6', true], ['0.8.5', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     fakeDaemon(on)
@@ -520,6 +541,30 @@ test('each heartbeat says how full the context is, and a nearly full peer is fla
   expect(daemon.posted.find(p => p.path.endsWith('/heartbeat') && 'busy' in p.body)!.body.context).toBe(85)
   const first: any = await $.prompt.submit({ text: 'go' })
   expect(first.context?.join('\n')).toContain('billing-api (context 91% full): ~/r/billing')
+})
+
+test('the branch is sent on registering, and again when it changes', async ($, on) => {
+  const { clock, git } = engine(on)
+  const daemon = fakeDaemon(on)
+  await $.session.start(START)
+  expect(daemon.posted.find(p => p.path === '/api/sessions')!.body.branch).toBe('main')
+  const beats = () => daemon.posted.filter(p => p.path.endsWith('/heartbeat') && 'busy' in p.body).map(p => p.body.branch)
+  const beat = async () => {
+    await clock.advance(600000)
+    for (let i = 0; i < 10; i++) await settle()
+    return beats().at(-1)
+  }
+  expect(await beat()).toBeUndefined()
+  git.head = 'feat/invoices'
+  expect(await beat()).toBe('feat/invoices')
+  expect(await beat()).toBeUndefined()
+  git.head = ''
+  expect(await beat()).toBe('detached @ 1a2b3c4')
+  git.head = 'fix'
+  git.dirs = ['/Users/x/r/web/.git/worktrees/wt-2', '/Users/x/r/web/.git', '/Users/x/r/wt-2']
+  expect(await beat()).toBe('fix (worktree wt-2)')
+  git.dirs = null
+  expect(await beat()).toBe('')
 })
 
 test('in the terminal, the peerlink line is a clickable row under the hint row that opens the web UI', async ($, on) => {

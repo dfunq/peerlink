@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.4'
+const DAEMON_VERSION = '0.8.5'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -27,8 +27,10 @@ type ClientConfig = {
   space: string
   space_source: 'override' | 'file' | 'rule' | 'default'
   space_from: string
-  // Set when this agent leads its space: the space it also sits in and speaks for its own.
+  // Set when this agent leads a space nested in another: the space it also sits in and speaks for its own.
   parent?: string
+  // How this agent leads its space: you picked it, its folder holds the nesting .peerlink, or it was alone there.
+  leads?: '' | 'set' | 'file' | 'only'
   space_parent?: string
   // The agent that leads this agent's space, and the leads of spaces nested inside it.
   lead?: string
@@ -242,18 +244,49 @@ async function git($: EngineInterface, cwd: string, args: string[]) {
   return run.exitCode === 0 ? run.stdout.trim() : ''
 }
 
+// What the agent's folder has checked out: "main", "feat (worktree wt-2)", "detached @ 1a2b3c4", or '' outside a repo.
+// Asks git itself, so a subfolder of a repo counts, whatever $.session.repo() makes of it.
+async function branchOf($: EngineInterface, cwd: string) {
+  const dirs = (await git($, cwd, ['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir', '--show-toplevel'])).split('\n')
+  if (dirs.length < 2) return ''
+  // Exits 1 on a detached HEAD; works on a branch with no commits yet, where rev-parse HEAD fails.
+  const name = await git($, cwd, ['symbolic-ref', '--short', '-q', 'HEAD'])
+  const sha = name ? '' : await git($, cwd, ['rev-parse', '--short', 'HEAD'])
+  const head = name || (sha ? `detached @ ${sha}` : 'detached')
+  // A linked worktree keeps its git dir apart from the main checkout's.
+  const worktree = dirs[0] !== dirs[1] ? dirs[2]?.split('/').filter(Boolean).at(-1) : ''
+  return worktree ? `${head} (worktree ${worktree})` : head
+}
+
+// Agents switch branches mid-session, so the heartbeat re-reads it, at most this often.
+const BRANCH_EVERY_MS = 10_000
+let branch = ''
+let branchAt = -Infinity
+
+async function freshBranch($: EngineInterface) {
+  const now = await $.clock.now()
+  if (now - branchAt < BRANCH_EVERY_MS) return undefined
+  branchAt = now
+  const next = await branchOf($, await $.session.root())
+  if (next === branch) return undefined
+  branch = next
+  return next
+}
+
 // `succeeds`: the session id this conversation ran under before a /clear or resume, whose messages it takes over.
 async function announce($: EngineInterface, succeeds?: string) {
   // The project root, not the shell's directory: an agent that cds into a subfolder is still the same agent.
   const cwd = await $.session.root()
   const repo = await $.session.repo()
+  branch = await branchOf($, cwd)
+  branchAt = await $.clock.now()
   const res = await call($, 'POST', '/api/sessions', {
     succeeds,
     id: sessionId,
     name: cwd.split('/').filter(Boolean).at(-1) ?? 'agent',
     cwd,
     repo: repo?.remote ?? repo?.root ?? '',
-    branch: repo ? await git($, cwd, ['rev-parse', '--abbrev-ref', 'HEAD']) : '',
+    branch,
     model: await $.session.model(),
     busy,
     summary: summary || undefined,
@@ -324,7 +357,7 @@ function framed(batch: PeerMessage[]) {
 function placeText() {
   if (!cfg?.space || cfg.space === 'default') return ''
   const inside = cfg.space_parent || cfg.parent
-  return ` · ${cfg.parent ? 'leads ' : ''}${cfg.space}${inside ? ` (in ${inside})` : ''}`
+  return ` · ${cfg.leads ? 'leads ' : ''}${cfg.space}${inside ? ` (in ${inside})` : ''}`
 }
 
 // The terminal draws peerlink's line at the end of the hint row under the prompt; other surfaces don't draw a
@@ -389,7 +422,7 @@ async function poll($: EngineInterface) {
   }
   let res
   try {
-    res = await call($, 'POST', `/api/sessions/${sessionId}/heartbeat`, { busy, activity: busy ? activity : undefined, context: await contextPercent($) })
+    res = await call($, 'POST', `/api/sessions/${sessionId}/heartbeat`, { busy, activity: busy ? activity : undefined, context: await contextPercent($), branch: await freshBranch($) })
   } catch {
     await ensureDaemon($)
     await announce($)
@@ -600,13 +633,14 @@ function spaceLine() {
     : cfg.space_source === 'file' ? `from ${cfg.space_from}`
     : cfg.space_source === 'rule' ? `folder rule ${cfg.space_from}`
     : 'no space set'
-  const nest = cfg.parent ? `, leads it inside "${cfg.parent}"` : cfg.lead ? `, led by ${cfg.lead}` : ''
+  const nest = cfg.parent ? `, leads it inside "${cfg.parent}"` : cfg.leads ? ', leads it' : cfg.lead ? `, led by ${cfg.lead}` : ''
   return `space: ${cfg.space} (${from}${nest})`
 }
 
 // Where a peer sits relative to this agent: a lead speaks for its space; a peer in another space is the lead's parent.
 function spaceTag(p: any) {
-  if (p.parent) return ` [leads ${p.space}]`
+  // `parent` alone: a peer on another machine whose daemon predates `leads`.
+  if (p.leads || p.parent) return ` [leads ${p.space}]`
   return cfg && p.space && p.space !== cfg.space ? ` [${p.space}]` : ''
 }
 
@@ -639,6 +673,10 @@ function hierarchyGuidance() {
   if (cfg.parent)
     lines.push(
       `You lead the "${cfg.space}" space and speak for it in the "${cfg.parent}" space. Agents in "${cfg.parent}" can only reach "${cfg.space}" through you. When one asks for something, decide which agent in "${cfg.space}" owns it, delegate with send_message (or do it yourself if it is yours), and when the work is done report the outcome back to whoever asked, with reply_to their message id.`,
+    )
+  else if (cfg.leads)
+    lines.push(
+      `You lead the "${cfg.space}" space. Work sent to the space (to "space:${cfg.space}") comes to you: decide which agent in it owns the work, delegate with send_message (or do it yourself if it is yours), and report the outcome to whoever asked, with reply_to their message id.`,
     )
   else if (cfg.lead)
     lines.push(`${cfg.lead} leads the "${cfg.space}" space and relays work from outside it. Report results to ${cfg.lead}, and ask it for anything that lives outside your space.`)
@@ -721,13 +759,15 @@ async function spaceTree($: EngineInterface) {
     seen.add(space)
     // Every lead of a space sits with its parent (two sessions in a lead's folder are both leads).
     const isLead = (p: any) => !!lead[space] && lead[space].parent !== space && p.parent && p.space === space
-    const own = (groups[space] ?? []).filter(p => !isLead(p)).sort((a, b) => a.name.localeCompare(b.name))
+    // A space's own lead comes first.
+    const own = (groups[space] ?? []).filter(p => !isLead(p)).sort((a, b) => Number(!!b.leads && !b.parent) - Number(!!a.leads && !a.parent) || a.name.localeCompare(b.name))
     const leads = (kids[space] ?? []).filter(c => c !== space).sort().flatMap(c => (groups[c] ?? []).filter(p => p.parent && p.space === c))
     const all = [...own, ...leads]
     const width = Math.max(0, ...all.map(p => p.name.length))
     for (const p of all) {
       const tag = p.parent && p.space !== space ? `  leads ${p.space}` : ''
-      lines.push(`${pad}${p.name.padEnd(width)}  ${p.cwd.replace(/^\/Users\/[^/]+/, '~')}${tag}${p.id === sessionId ? '  ← you' : ''}`)
+      const own = p.leads && !p.parent ? (p.leads === 'only' ? '  lead (only agent)' : '  lead') : ''
+      lines.push(`${pad}${p.name.padEnd(width)}  ${p.cwd.replace(/^\/Users\/[^/]+/, '~')}${tag}${own}${p.id === sessionId ? '  ← you' : ''}`)
       if (tag && !seen.has(p.space) && p === leads.filter(l => l.space === p.space).at(-1)) {
         lines.push(`${pad}  └ ${p.space} team`)
         tier(p.space, `${pad}      `)
@@ -919,7 +959,8 @@ export const register: Register = on => {
         properties: {
           to: {
             type: 'string',
-            description: 'Peer agent name or id, or "user" for your user (it waits in their Inbox); leave it out when replying, the reply goes back to the sender',
+            description:
+              'Peer agent name or id; "space:<name>" for that space\'s lead (or "space" for your own); or "user" for your user (it waits in their Inbox). Leave it out when replying, the reply goes back to the sender',
           },
           text: { type: 'string', description: 'The message: what you need and why, briefly' },
           expects_reply: { type: 'boolean', description: 'True if you need an answer' },

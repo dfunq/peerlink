@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.4"
+VERSION = "0.8.5"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -322,6 +322,7 @@ def client_config(sid):
         "space_source": source,
         "space_from": where,
         "parent": parent_of(rec) if rec else "",
+        "leads": leads(rec) if rec else "",
         # The space this agent's space sits inside, for members too (a lead's `parent` is the same).
         "space_parent": read_space_file(where, "parent") if rec and source == "file" else "",
         "lead": lead,
@@ -396,18 +397,114 @@ def space_of(rec):
         found = (read_space_file(path), "file", path)
     elif rule:
         found = (rule[1], "rule", rule[0])
-    # The agent in the folder of a .peerlink that names a `parent:` leads that space and also sits in the parent.
-    parent = ""
-    if found[1] == "file" and os.path.dirname(found[2]) == os.path.abspath(cwd or "/"):
-        parent = read_space_file(found[2], "parent")
+    # The space this one sits inside, from its .peerlink's `parent:`. Only the space's lead also sits there.
+    parent = read_space_file(found[2], "parent") if found[1] == "file" else ""
     rec["_space"] = (now, found, "" if parent == found[0] else parent)
     return found
 
 
+def file_lead(space):
+    """The folder of the .peerlink that nests `space` inside another, when an agent runs there."""
+    for r in sessions.values():
+        found = space_of(r)
+        if is_live(r) and found[0] == space and found[1] == "file" and r["_space"][2] \
+                and os.path.dirname(found[2]) == os.path.abspath(r.get("cwd") or "/"):
+            return r["cwd"]
+    return ""
+
+
+def space_lead(space):
+    """(folder, how) of a space's lead: 'set' by you, else 'file' (the folder of the .peerlink that nests it),
+    else 'only' (the first agent alone in it, see note_lone_leads); ('', '') when it has none."""
+    chosen = (config.get("space_leads") or {}).get(space) or {}
+    if chosen.get("how") == "set":
+        return chosen["cwd"], "set"
+    folder = file_lead(space)
+    if folder:
+        return folder, "file"
+    return (chosen["cwd"], "only") if chosen.get("cwd") else ("", "")
+
+
+def leads(rec):
+    """How rec leads its space ('set', 'file' or 'only'), or '' when it doesn't."""
+    folder, how = space_lead(space_of(rec)[0])
+    return how if folder and rec.get("cwd") == folder else ""
+
+
+def space_parent(space):
+    """The space `space` sits inside, from any of its agents' .peerlink; '' at the top."""
+    for r in sessions.values():
+        if is_live(r) and space_of(r)[0] == space and r["_space"][2]:
+            return r["_space"][2]
+    return ""
+
+
 def parent_of(rec):
-    """The parent space this agent speaks for, if it leads its own space; else ''."""
+    """The parent space this agent speaks for, if it leads a space nested in another; else ''."""
+    if not leads(rec):
+        return ""
     space_of(rec)
-    return rec["_space"][2]
+    return rec["_space"][2] or space_parent(rec["_space"][1][0])
+
+
+def note_lone_leads():
+    """An agent alone in its space leads it, and keeps leading when others join, until you pick another.
+    The default space is where unsorted agents land, not a team, so it has no lead. Called with the lock held."""
+    folders = {}
+    for r in sessions.values():
+        if is_live(r):
+            folders.setdefault(space_of(r)[0], set()).add(r.get("cwd", ""))
+    for space, cwds in folders.items():
+        if space == DEFAULT_SPACE or len(cwds) != 1 or "" in cwds:
+            continue
+        cwd = next(iter(cwds))
+        # A lead you set or a nesting .peerlink always wins; an implicit lead elsewhere is gone, as only cwd is live here.
+        folder, how = space_lead(space)
+        if folder == cwd or how in ("set", "file"):
+            continue
+        config.setdefault("space_leads", {})[space] = {"cwd": cwd, "how": "only", "ts": time.time()}
+        save_config()
+        log("lead", space, "->", cwd, "(only agent)")
+
+
+def set_lead(space, cwd):
+    """You pick who leads a space (or clear it, cwd ''), in the web UI. Old and new lead are told."""
+    space = clean_space(space)
+    if not space or space == DEFAULT_SPACE:
+        return 400, {"error": "pick a named space; the default space has no lead"}
+    with lock:
+        if cwd and not any(is_live(r) and r.get("cwd") == cwd and space_of(r)[0] == space for r in sessions.values()):
+            return 409, {"error": f"no live agent in {tilde_path(cwd)} is in the {space} space"}
+        old = space_lead(space)[0]
+        chosen = config.setdefault("space_leads", {})
+        if cwd:
+            chosen[space] = {"cwd": cwd, "how": "set", "ts": time.time()}
+        else:
+            chosen.pop(space, None)
+        save_config()
+        new = space_lead(space)[0]
+        if old != new:
+            if old:
+                task_message(None, old, f"You no longer lead the {space} space: {folder_name(new) + ' does' if new else 'it has no lead now'}, as your user set in the web UI. Hand anything you were coordinating for the space to {folder_name(new) if new else 'the agent that owns it'}.")
+            if new:
+                parent = space_parent(space)
+                task_message(None, new, f"You now lead the {space} space, as your user set in the web UI{' and speak for it in ' + parent if parent else ''}. Work sent to the space comes to you: decide which agent owns it, delegate with send_message, and report the outcome to whoever asked.")
+        log("lead", space, "->", new or "(none)", "set in the web UI")
+    return 200, {"space": space, "lead": new, "how": space_lead(space)[1]}
+
+
+def leads_view():
+    """Every space's lead for the web UI, an offline one too, so it stays pinned (greyed) at the top of its space."""
+    with lock:
+        spaces = {space_of(r)[0] for r in sessions.values() if is_live(r)} | set(config.get("space_leads") or {})
+        out = {}
+        for space in spaces:
+            folder, how = space_lead(space)
+            if folder:
+                agent = successor(folder)
+                out[space] = {"cwd": folder, "how": how, "name": display_name(agent) if agent else folder_name(folder),
+                              "live": bool(agent and space_of(agent)[0] == space), "parent": space_parent(space)}
+        return out
 
 
 def reach(rec):
@@ -425,7 +522,7 @@ def hierarchy(rec):
     space = space_of(rec)[0]
     lead, children = "", []
     for r in sessions.values():
-        if r["id"] == rec["id"] or not is_live(r) or not parent_of(r):
+        if r["id"] == rec["id"] or not is_live(r) or not leads(r):
             continue
         if space_of(r)[0] == space:
             lead = display_name(r)
@@ -507,6 +604,7 @@ def public_peer(rec):
         "space_source": source,
         "space_from": where,
         "parent": parent_of(rec),
+        "leads": leads(rec),  # 'set', 'file' or 'only' when it leads its space
         "file_parent": read_space_file(where, "parent") if source == "file" else "",
         # Without ages, which change every second and would redraw the page each poll.
         "threads": {k: [{f: t[f] for f in ("id", "with", "text")} for t in v] for k, v in open_threads(rec, limit=5).items()},
@@ -1236,6 +1334,25 @@ def ago_text(s):
     return f"{int(s)}s" if s < 90 else f"{round(s / 60)}m" if s < 5400 else f"{round(s / 3600)}h" if s < 129600 else f"{round(s / 86400)}d"
 
 
+def lead_target(sender_rec, word, spaces):
+    """(target, error) for a message or task sent to a space ("space", "space:<name>", or "lead:<name>"): its lead,
+    or the lead's folder when it's offline, where it waits. Called with the lock held."""
+    name = word.partition(":")[2]
+    space = clean_space(name) if name else space_of(sender_rec)[0] if sender_rec else ""
+    if not space:
+        return None, "say which space, as space:<name>"
+    # A space's lead also sits in its parent, so the parent's agents reach the space through it.
+    if spaces is not None and not {space, space_parent(space)} & spaces:
+        return None, f"you can reach {' and '.join(sorted(spaces))}, not the {space} space"
+    folder = space_lead(space)[0]
+    if not folder:
+        return None, f"the {space} space has no lead: message one of its agents by name (list_peers), or ask your user to pick a lead in the web UI"
+    agent = successor(folder)
+    if agent and space_of(agent)[0] == space:
+        return agent, None
+    return {"id": f"folder:{folder}", "cwd": folder, "name": folder_name(folder)}, None
+
+
 def send(body):
     sender = body.get("from", "")
     text = (body.get("text") or "").strip()
@@ -1325,6 +1442,8 @@ def send(body):
                 err = f"{parent.get('from_name') or 'the sender'} of {parent['id']} is no longer live and no agent runs in its folder now"
         elif not to:
             err = "to is required unless reply_to names a message sent to you"
+        elif word in ("space", "lead") or word.startswith(("space:", "lead:")):
+            target, err = lead_target(sender_rec, word, spaces)
         if target is None and err is None:
             target, err = resolve(to, spaces)
         if err:
@@ -1664,7 +1783,8 @@ def new_task(msg, requester, parent_task=""):
 
 
 def task_message(t, to_cwd, text, sender=None, reply_to=None, kind="message"):
-    """A note about a task from its owner (or peerlink), queued for an agent's folder. Called with the lock held."""
+    """A note about a task from its owner (or peerlink), or from peerlink about a change of role (t None),
+    queued for an agent's folder. Called with the lock held."""
     msg = {"id": f"m{next_msg[0]}", "ts": time.time(), "from": sender["id"] if sender else "peerlink",
            "from_name": display_name(sender) if sender else "peerlink", "from_host": HOSTNAME,
            "from_cwd": sender.get("cwd", "") if sender else "", "to_cwd": to_cwd,
@@ -2229,7 +2349,7 @@ class Handler(BaseHTTPRequestHandler):
                 space = space_of(me)[0] if me else None
                 mine = reach(me) if me else None
             peers = [p for p in peers if p["id"] != exclude and (mine is None or peer_reach(p) & mine)]
-            return self.reply(200, {"host": HOSTNAME, "space": space, "peers": peers})
+            return self.reply(200, {"host": HOSTNAME, "space": space, "peers": peers, "leads": leads_view()})
 
         if rest == ["sessions"] and method == "POST":
             b = self.body()
@@ -2254,6 +2374,7 @@ class Handler(BaseHTTPRequestHandler):
                 rec["busy"] = bool(b.get("busy", False))
                 rec["last_seen"] = time.time()
                 sessions[sid] = rec
+                note_lone_leads()
                 old = b.get("succeeds")
                 if old and old != sid:
                     # The same conversation after a /clear or resume: keep its name, settings and messages.
@@ -2284,6 +2405,9 @@ class Handler(BaseHTTPRequestHandler):
                     discord_activity(rec, b["activity"])
                 if isinstance(b.get("context"), (int, float)):
                     rec["context"] = max(0, min(100, int(b["context"])))
+                if isinstance(b.get("branch"), str):
+                    rec["branch"] = b["branch"][:200]
+                note_lone_leads()
                 if b.get("summary") is not None:
                     rec["summary"] = b["summary"][:500]
                     if b.get("summary_kind") in ("model", "manual"):
@@ -2358,6 +2482,12 @@ class Handler(BaseHTTPRequestHandler):
             if not browser or self.key_ok():
                 return self.reply(403, {"error": "agents are ended from the web UI or Discord"})
             code, out = terminate(rest[1], "the web UI")
+            return self.reply(code, out)
+        if len(rest) == 3 and rest[0] == "spaces" and rest[2] == "lead" and method == "POST":
+            # Only you, in the browser: no agent or bot makes itself, or another, a lead.
+            if not browser or self.key_ok():
+                return self.reply(403, {"error": "a space's lead is set in the web UI"})
+            code, out = set_lead(rest[1], str(self.body().get("cwd") or ""))
             return self.reply(code, out)
         if rest == ["inbox"] and method == "GET":
             return self.reply(200, {"items": inbox_items(), "user": USER_NAME})
@@ -2726,6 +2856,9 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)
 .node:hover{border-color:var(--mut)}.node.is-lead{border-color:var(--acc)}.node.sel{box-shadow:0 0 0 2px var(--acc)}
 .node .nm{font-weight:600;display:flex;align-items:center;gap:4px;justify-content:space-between}
 .node .tag{font-size:11px;font-weight:500;color:var(--acc);white-space:nowrap}
+.node .badge{display:inline-block;font-size:10px;font-weight:600;color:var(--acc);border:1px solid var(--acc);border-radius:4px;padding:0 4px;margin-top:4px}
+.node.off{opacity:.5;cursor:default;border-style:dashed}.node.off:hover{border-color:var(--acc)}
+.under{margin-left:14px;border-left:2px solid var(--acc);padding-left:12px;margin-top:8px}
 .node .dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--mut);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .steps{list-style:none;padding:0;margin:8px 0 16px;display:flex;flex-direction:column;gap:12px;max-width:820px}
 .step{display:flex;gap:12px;align-items:flex-start;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
@@ -2826,7 +2959,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 </nav>
 <main><div id="stalebar" style="display:none" class="small"></div><div id="offline">Can't reach the peerlink daemon. It restarts when an agent next needs it; this page reconnects by itself.</div><div id="signedout">This page is signed out. Run <span class="mono">/peerlink web</span> in any agent to open it again.</div>
 
-<section id="agents"><h1>Agents</h1><p class="lead">Live Claude Code sessions as an org chart. Each box is a space; a lead (outlined in orange) sits in its parent's box with its team beneath it. The percentage is how full each agent's context is. An agent only sees and messages agents in its own space, and a lead also its parent's. Click an agent to see and change its settings.</p><div class="orgwrap"><div id="peers"></div><div id="detail"></div></div></section>
+<section id="agents"><h1>Agents</h1><p class="lead">Live Claude Code sessions as an org chart. Each box is a space. Its lead (outlined in orange) is pinned at the top with its members beneath it, and the lead of a space inside another sits in the parent's box with its team beneath it. An agent alone in a space leads it until you pick another: open an agent and choose Make lead. Work sent to a space goes to its lead. The percentage is how full each agent's context is. An agent only sees and messages agents in its own space, and a lead also its parent's. Click an agent to see and change its settings.</p><div class="orgwrap"><div id="peers"></div><div id="detail"></div></div></section>
 
 <section id="inbox"><h1>Inbox</h1><p class="lead">Everything waiting on you: agents asking to start another agent, tasks agents handed you, questions they're waiting on, and new feedback about peerlink. The longest waiting is first. On Discord, send <span class="mono">/inbox</span> for the same list and answer by number, like <span class="mono">1 done</span>.</p>
 <div class="mlist" id="inboxlist"></div></section>
@@ -2927,16 +3060,20 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape')closePanel()});
 function agentPanel(x,others=[]){const sc=cfg.sessions?.[x.id]||{};const fileSpace=x.space_source==='file'?x.space:'';
   const wake=sc.auto_wake===true?'on':sc.auto_wake===false?'off':'default';
   const why=x.space_source==='override'?'set for this agent only':x.space_source==='file'?'from '+tilde(x.space_from):x.space_source==='rule'?'folder rule '+tilde(x.space_from):'no space set';
-  const role=x.parent?`Leads the <b>${esc(x.space)}</b> team inside <b>${esc(x.parent)}</b>`:'Member';
+  const how={set:'you picked it',file:"its folder holds the space's .peerlink",only:'it was the only agent in the space'}[x.leads]||'';
+  const led=leadOf[x.space];
+  const role=x.leads?`Leads the <b>${esc(x.space)}</b> ${x.parent?`team inside <b>${esc(x.parent)}</b>`:'space'} <span class="mut">· ${how}</span>`:`Member${led?` · led by ${esc(led.name)}${led.live?'':' (offline)'}`:''}`;
+  // Only you, here, pick a lead: the daemon refuses it from agents and bots.
+  const leadBtn=x.remote||!x.space||x.space==='default'?'':x.leads==='file'?'':x.leads?`<button class="ghost small" data-clearlead="${esc(x.space)}">Clear lead</button>`:`<button class="ghost small" data-makelead="${esc(x.space)}" data-cwd="${esc(x.cwd)}">${led?'Make lead instead of '+esc(led.name):'Make lead of '+esc(x.space)}</button>`;
   const opt=(v,t)=>`<option value="${v}" ${wake===v?'selected':''}>${t}</option>`;
-  return `<div class="card panel${x.parent?' is-lead':''}">
+  return `<div class="card panel${x.leads?' is-lead':''}">
    <div class="top"><span><span class="dot ${x.busy?'busy':''}"></span><span class="name">${esc(x.name)}</span>${x.remote?` <span class="mut small">@${esc(x.host)}</span>`:''}</span><button class="ghost x" data-close title="Close">✕</button></div>
    <div class="mono mut" style="margin-top:4px">${esc(tilde(x.cwd))}${x.branch?' · '+esc(x.branch):''}</div>
    <div style="margin-top:8px">${esc(x.summary)||'<span class="mut">no summary yet</span>'}</div>
    ${x.remote?'':`<div class="ptabs"><button class="${panelTab==='tasks'?'':'on'}" data-ptab="about">Agent</button><button class="${panelTab==='tasks'?'on':''}" data-ptab="tasks">Tasks${x.open_tasks?' · '+x.open_tasks:''}</button></div>`}
    ${panelTab==='tasks'&&!x.remote?panelTasks(x):`<div class="facts"><span class="k">Status</span><span>${x.busy?'working':'idle'}${x.muted?' · muted':''}</span>
     <span class="k">Space</span><span><span class="pill">${esc(x.space||'default')}</span> <span class="mut">${esc(why)}</span></span>
-    <span class="k">Role</span><span>${role}</span>
+    <span class="k">Role</span><span>${role}${leadBtn?' '+leadBtn:''}</span>
     ${x.context!=null?`<span class="k">Context</span><span>${x.context}% of its window in use${x.context>=80?' · <span style="color:var(--warn)">close to compacting</span>':''}</span>`:''}
     <span class="k">Plugin</span><span>${esc(x.plugin||'older than 0.6.6')}${x.stale&&!x.remote?' · <span style="color:var(--warn)">run /reload-plugins in this agent</span>':''}</span></div>
    ${others.length?`<div class="threads"><div class="k small">Other sessions in this folder</div>${others.map(o=>`<button class="ghost small" data-sel="${esc(o.id)}" style="text-align:left">${esc(o.name)} · ${o.busy?'working':'idle'}${o.summary?' · '+esc(o.summary.slice(0,60)):''}</button>`).join('')}</div>`:''}
@@ -2946,15 +3083,15 @@ function agentPanel(x,others=[]){const sc=cfg.sessions?.[x.id]||{};const fileSpa
    ${x.remote?'<div class="small mut">This agent runs on another machine; change it there.</div>':`<form id="agentform" data-id="${esc(x.id)}" data-nick="${esc(sc.nickname||'')}" data-spacefile="${esc(fileSpace)}" data-parent="${esc(x.file_parent||'')}" data-override="${esc(sc.space||'')}" data-wake="${wake}" data-muted="${x.muted?'1':''}">
     <label>Name<input name="nickname" type="text" value="${esc(sc.nickname||'')}" placeholder="${esc(x.name)}"><span class="hint">What peers call this agent. It stays with this folder.</span></label>
     <label>Space for this folder<input name="spacefile" type="text" value="${esc(fileSpace)}" placeholder="none"><span class="hint">Saved in this repo's .peerlink. Every agent in the folder joins it.</span></label>
-    <label>Inside space<input name="parent" type="text" value="${esc(x.file_parent||'')}" placeholder="none (top level)"><span class="hint">Where the whole ${esc(x.space||'default')} space sits. Changing it moves every agent in that space; the agent in the .peerlink's folder leads it.</span></label>
-    <label>Space for this agent only<input name="override" type="text" value="${esc(sc.space||'')}" placeholder="none"><span class="hint">Overrides the folder's space. An agent with its own space never leads a team.</span></label>
+    <label>Inside space<input name="parent" type="text" value="${esc(x.file_parent||'')}" placeholder="none (top level)"><span class="hint">Where the whole ${esc(x.space||'default')} space sits. Changing it moves every agent in that space; the agent in the .peerlink's folder leads it unless you pick another lead.</span></label>
+    <label>Space for this agent only<input name="override" type="text" value="${esc(sc.space||'')}" placeholder="none"><span class="hint">Overrides the folder's space.</span></label>
     <label>When a message arrives<select name="wake">${opt('default','Use the default')}${opt('on','Start a turn')}${opt('off','Wait for the next prompt')}</select></label>
     <label class="check"><input name="muted" type="checkbox" ${x.muted?'checked':''}> Mute: hold every message for this agent</label>
     <div><button type="submit">Save</button> <span id="agentmsg" class="small"></span></div></form>
     <div class="threads"><div class="k small">End this agent</div><div class="small mut">It finishes the turn it's in, then its session ends. If it's still running a minute later, its process is stopped.</div>
     <div><button class="ghost small danger" data-terminate="${esc(x.id)}" ${x.terminating?'disabled':''}>${x.terminating?'Ending…':'Terminate'}</button></div></div>`}`}</div>`}
 // Messages as a conversation: newest first, each reply under the message it answers.
-let msgFilter='',spaceFilter='',livePeers=[];
+let msgFilter='',spaceFilter='',livePeers=[],leadOf={};
 // A message's spaces: what it recorded when sent, else (older messages) the space of a live agent on either end.
 const spacesOf=x=>{const by=n=>livePeers.find(p=>p.name===n)?.space;return [x.from_space||by(x.from_name),x.to_space||by(x.to_name)].filter(Boolean)};
 function renderMessages(list){
@@ -2987,7 +3124,7 @@ async function refresh(force){
   if(signedOut)return;
   const [st,p,m,tk,fb,ib]=await Promise.all([api('/api/status'),api('/api/peers'),api('/api/messages?limit=100'),api('/api/tasks'),api('/api/issues'),api('/api/inbox')]);
   allTasks=tk.tasks||[];allFeedback=fb.issues||[];inbox=ib.items||[];
-  const view=JSON.stringify([p.peers.map(({last_seen_s,...x})=>x),m.messages.map(x=>[x.id,x.status]),allTasks.map(t=>[t.id,t.status,t.owner,t.note]),allFeedback.map(f=>[f.id,f.status,f.note]),inbox.map(i=>i.id),sel,panelTab,cfg.sessions]);
+  const view=JSON.stringify([p.peers.map(({last_seen_s,...x})=>x),p.leads,m.messages.map(x=>[x.id,x.status]),allTasks.map(t=>[t.id,t.status,t.owner,t.note]),allFeedback.map(f=>[f.id,f.status,f.note]),inbox.map(i=>i.id),sel,panelTab,cfg.sessions]);
   if(view===lastView&&!force)return;lastView=view;
   $('#hostline').textContent=`${st.host} · daemon ${st.version}`;
   $('#browsers').textContent=`${st.browsers} signed in · links work once and expire after 60 s`;
@@ -2997,37 +3134,47 @@ async function refresh(force){
   // An org chart. A space is a box of its own agents; the lead of a space inside it sits in that box too, with
   // its team's box hanging beneath it. Charts with teams in them come first, so the top of the org is at the top.
   // Two sessions open in a lead's folder are both leads: all sit in the parent's box, the team under the first.
-  const inside={},kids={},leads={};for(const x of p.peers)if(x.parent){(leads[x.space]??=[]).push(x);if(!inside[x.space]){inside[x.space]={parent:x.parent,lead:x.name,peer:x};(kids[x.parent]??=[]).push(x.space)}}
+  // A lead that's offline keeps its place at the top of its space, greyed, so you can see who work waits for.
+  leadOf=p.leads||{};
+  const ghost=(n,l)=>({id:'',name:l.name,cwd:l.cwd,space:n,parent:l.parent&&l.parent!==n?l.parent:'',leads:l.how,offline:true,summary:'offline; work for the space waits for it'});
+  const ghosts=Object.entries(leadOf).filter(([n,l])=>!l.live).map(([n,l])=>ghost(n,l));
+  const inside={},kids={},leads={};for(const x of [...p.peers,...ghosts])if(x.parent){(leads[x.space]??=[]).push(x);if(!inside[x.space]){inside[x.space]={parent:x.parent,lead:x.name,peer:x};(kids[x.parent]??=[]).push(x.space)}}
   for(const n in inside)inside[n].lead=leads[n].map(x=>x.name).join(', ');
   for(const n of Object.keys(kids))if(!groups[n])groups[n]=[];
   const size=(n,seen=new Set())=>{if(seen.has(n))return 0;seen.add(n);return (groups[n]||[]).length+(kids[n]||[]).reduce((t,c)=>t+size(c,seen),0)};
   const order=(a,b)=>a==='default'?1:b==='default'?-1:((kids[b]||[]).length>0)-((kids[a]||[]).length>0)||size(b)-size(a)||a.localeCompare(b);
   const roots=Object.keys(groups).filter(n=>!inside[n]||n===inside[n].parent).sort(order);
+  // A lead of a space at the top sits pinned above its members, who hang beneath it.
+  const tops=n=>[...(groups[n]||[]).filter(x=>x.leads&&!x.parent),...ghosts.filter(x=>x.space===n&&!x.parent)].sort(rank);
   // A space's box: its members, then the leads of the spaces under it.
   const isLead=(x,n)=>!!(inside[n]&&inside[n].parent!==n&&x.parent&&x.space===n);
-  const members=n=>[...groups[n].filter(x=>!isLead(x,n)).sort(rank).sort((a,b)=>a.name.localeCompare(b.name)),
+  const members=n=>[...groups[n].filter(x=>!isLead(x,n)&&!(x.leads&&!x.parent)).sort(rank).sort((a,b)=>a.name.localeCompare(b.name)),
     ...(kids[n]||[]).filter(c=>c!==n).sort().map(c=>inside[c].peer)];
   const short=d=>{const t=tilde(d).split('/');return t.length>3?'…/'+t.slice(-2).join('/'):t.join('/')};
   const ctx=x=>x.context==null?'':`<span class="ctx${x.context>=80?' hi':''}" title="context window in use">${x.context}%</span>`;
   // A lead is told apart by its outline (and says which team on hover), so every card keeps its context in one place.
-  const node=x=>`<button class="node${x.parent?' is-lead':''}${x.id===sel?' sel':''}" data-sel="${esc(x.id)}"${x.parent?` title="Leads the ${esc(x.space)} team"`:''}>
-    <div class="nm"><span><span class="dot ${x.busy?'busy':''}"></span>${esc(x.name)}</span>${ctx(x)}</div>
-    <div class="dir">${esc(short(x.cwd))}</div><div class="sum">${esc(x.summary)||'no summary yet'}</div>${x.open_tasks?`<div class="small" style="color:var(--acc)">${x.open_tasks} open task${x.open_tasks>1?'s':''}</div>`:''}${x.stale&&!x.remote?'<div class="stale">reload needed</div>':''}</button>`;
+  const badge=x=>x.leads?`<div><span class="badge">${x.leads==='only'?'Lead (only agent)':'Lead'}</span>${x.offline?` <span class="small mut" data-clearlead="${esc(x.space)}" title="Clear this lead" style="cursor:pointer">clear</span>`:''}</div>`:'';
+  const node=x=>`<${x.offline?'div':'button'} class="node${x.leads?' is-lead':''}${x.offline?' off':''}${x.id&&x.id===sel?' sel':''}"${x.offline?'':` data-sel="${esc(x.id)}"`}${x.leads?` title="Leads the ${esc(x.space)} ${x.parent?'team':'space'}${x.offline?' (offline)':''}"`:''}>
+    <div class="nm"><span>${x.offline?'':`<span class="dot ${x.busy?'busy':''}"></span>`}${esc(x.name)}</span>${ctx(x)}</div>${badge(x)}
+    <div class="dir">${esc(short(x.cwd))}</div>${x.branch?`<div class="dir" title="${esc(x.branch)}">⎇ ${esc(x.branch)}</div>`:''}<div class="sum">${esc(x.summary)||'no summary yet'}</div>${x.open_tasks?`<div class="small" style="color:var(--acc)">${x.open_tasks} open task${x.open_tasks>1?'s':''}</div>`:''}${x.stale&&!x.remote?'<div class="stale">reload needed</div>':''}</${x.offline?'div':'button'}>`;
   // Every live agent gets its own card, two sessions in one folder included: a hidden one can't be found to message.
   const rank=(a,b)=>(b.busy-a.busy)||(a.last_seen_s-b.last_seen_s);
   const unit=(n,seen)=>{if(seen.has(n))return '';seen.add(n);
     const list=members(n),branches=list.some(x=>x.parent&&x.space!==n);
-    const count=list.reduce((t,x)=>t+(x.parent&&x.space!==n?leads[x.space].length:1),0);
+    const top=tops(n);
+    const count=top.filter(x=>!x.offline).length+list.reduce((t,x)=>t+(x.parent&&x.space!==n?leads[x.space].filter(l=>!l.offline).length:x.offline?0:1),0);
     const cols=list.map(x=>x.parent&&x.space!==n&&!seen.has(x.space)
       ?`<div class="ocol"><div class="orow stack">${leads[x.space].slice().sort(rank).map(node).join('')}</div><div class="down"></div>${unit(x.space,seen)}</div>`:`<div class="ocol">${node(x)}</div>`);
     // A team with no teams under it stacks, so each lead's column stays one card wide.
     const stack=inside[n]&&inside[n].parent!==n&&!branches;
-    return `<div class="unit"><div class="unit-h">${esc(n)}${inside[n]&&inside[n].parent!==n?' team':''} · ${count}</div><div class="orow${stack?' stack':''}">${cols.join('')||'<span class="mut small">no live agents</span>'}</div></div>`};
+    const row=`<div class="orow${stack?' stack':''}">${cols.join('')||'<span class="mut small">no other live agents</span>'}</div>`;
+    return `<div class="unit"><div class="unit-h">${esc(n)}${inside[n]&&inside[n].parent!==n?' team':''} · ${count}</div>${top.length?`<div class="orow stack">${top.map(node).join('')}</div>${cols.length?`<div class="under">${row}</div>`:''}`:row}</div>`};
   const sunit=(n,seen)=>{if(seen.has(n))return '';seen.add(n);
-    const own=groups[n].filter(x=>!isLead(x,n)).map(x=>esc(x.name));
+    const own=groups[n].filter(x=>!isLead(x,n)&&!(x.leads&&!x.parent)).map(x=>esc(x.name));
+    const ledBy=inside[n]?inside[n].lead:tops(n).map(x=>x.name+(x.offline?' (offline)':'')).join(', ');
     const ch=(kids[n]||[]).filter(c=>c!==n&&!seen.has(c)).sort();
-    return `<div class="ocol"><div class="sbox${inside[n]?' led':''}"><div class="name">${esc(n)}</div>
-      ${inside[n]?`<div class="small" style="color:var(--acc)">led by ${esc(inside[n].lead)}${inside[n].parent!==n?' · inside '+esc(inside[n].parent):''}</div>`:''}
+    return `<div class="ocol"><div class="sbox${ledBy?' led':''}"><div class="name">${esc(n)}</div>
+      ${ledBy?`<div class="small" style="color:var(--acc)">led by ${esc(ledBy)}${inside[n]&&inside[n].parent!==n?' · inside '+esc(inside[n].parent):''}</div>`:''}
       <div class="small mut">${own.join(', ')||'no other agents'}</div></div>
       ${ch.length?`<div class="down"></div><div class="branch">${ch.map(c=>sunit(c,seen)).join('')}</div>`:''}</div>`};
   $('#n-agents').textContent=p.peers.length||'';$('#n-spaces').textContent=names.length||'';$('#n-msgs').textContent=m.messages.length||'';
@@ -3070,6 +3217,10 @@ document.addEventListener('click',async e=>{const b=e.target.closest('[data-iact
   if(b.dataset.iact==='approve'&&!confirm('Start a new Claude Code session in that folder?'))return;
   const r=await post('/api/inbox',{kind:row.dataset.ikind,id:row.dataset.iid,action:b.dataset.iact,text});
   if(r.error)alert(r.error);document.activeElement?.blur();refresh(true)});
+document.addEventListener('click',async e=>{const b=e.target.closest('[data-makelead],[data-clearlead]');if(!b)return;e.stopPropagation();
+  const space=b.dataset.makelead||b.dataset.clearlead;
+  if(b.dataset.clearlead&&!confirm(`Clear the lead of ${space}? Work sent to the space has nowhere to go until you pick another.`))return;
+  const r=await post(`/api/spaces/${encodeURIComponent(space)}/lead`,{cwd:b.dataset.cwd||''});if(r.error)alert(r.error);refresh(true)});
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-terminate]');if(!b)return;
   const x=livePeers.find(p=>p.id===b.dataset.terminate);if(!confirm(`End ${x?x.name:'this agent'}? Its session closes after the turn it's in.`))return;
   const r=await post(`/api/sessions/${encodeURIComponent(b.dataset.terminate)}/terminate`);if(r.error)alert(r.error);refresh(true)});
