@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.6"
+VERSION = "0.8.7"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -1811,6 +1811,9 @@ def update_task(tid, body, web=False):
         if web:
             if status and status not in TASK_OPEN + TASK_CLOSED:
                 return 400, {"error": "status is open, in_progress, done, failed or cancelled"}
+            # The page acted on what it last drew: if the owner has changed the task since, say so, don't override it.
+            if body.get("expect") and body["expect"] != t["status"]:
+                return 409, {"error": f"{tid} is {t['status'].replace('_', ' ')} now ({t['owner']} changed it); nothing was changed", "task": dict(t)}
         else:
             by = sessions.get(body.get("by") or "")
             if by is None:
@@ -2830,15 +2833,15 @@ UI_HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Peerlink</title><link rel="icon" href="data:,">
 <style>
-:root{color-scheme:light dark;--bg:#faf9f7;--side:#f2f0ec;--fg:#1f1e1c;--mut:#6b6862;--line:#e4e1db;--card:#fff;--acc:#c96442;--ok:#2f7d4f;--warn:#b7791f}
-@media (prefers-color-scheme:dark){:root{--bg:#1c1b19;--side:#161513;--fg:#ecebe8;--mut:#9b978f;--line:#34322e;--card:#252421;--acc:#e0805e;--ok:#5cb57f;--warn:#e0b04a}}
+:root{color-scheme:light dark;--bg:#faf9f7;--side:#f2f0ec;--fg:#1f1e1c;--mut:#6b6862;--line:#e4e1db;--card:#fff;--acc:#c96442;--ok:#2f7d4f;--warn:#b7791f;--bad:#c0392b;--well:rgba(127,127,127,.06)}
+@media (prefers-color-scheme:dark){:root{--bg:#1c1b19;--side:#161513;--fg:#ecebe8;--mut:#9b978f;--line:#34322e;--card:#252421;--acc:#e0805e;--ok:#5cb57f;--warn:#e0b04a;--bad:#e5675a;--well:rgba(255,255,255,.03)}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,sans-serif}
 .app{display:flex;min-height:100vh}
 nav{flex:0 0 210px;background:var(--side);border-right:1px solid var(--line);padding:18px 10px;position:sticky;top:0;height:100vh;display:flex;flex-direction:column;gap:2px}
 nav .brand{font-weight:700;font-size:16px;padding:0 10px 4px}nav .host{font-size:11px;color:var(--mut);padding:0 10px 14px}
 nav a{display:flex;justify-content:space-between;align-items:center;padding:7px 10px;border-radius:6px;color:var(--fg);text-decoration:none}
 nav a:hover{background:var(--line)}nav a.on{background:var(--card);box-shadow:0 0 0 1px var(--line);font-weight:600}
-nav .count{font-size:11px;color:var(--mut);font-weight:400}
+nav .count{font-size:11px;color:var(--mut);font-weight:400}nav .grp{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);padding:14px 10px 4px}
 main{flex:1;min-width:0;max-width:1100px;padding:22px 24px 60px}
 section{display:none}section.on{display:block}
 h1{font-size:20px;margin:0 0 4px}.lead{color:var(--mut);margin:0 0 18px}
@@ -2854,7 +2857,7 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)
 .down{width:2px;height:14px;background:var(--acc);flex:none}
 .node{width:190px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 10px;cursor:pointer;text-align:left;font:inherit;color:inherit}
 .node:hover{border-color:var(--mut)}.node.is-lead{border-color:var(--acc)}.node.sel{box-shadow:0 0 0 2px var(--acc)}
-.node .nm{font-weight:600;display:flex;align-items:center;gap:4px;justify-content:space-between}
+.node .nm{font-weight:600;display:flex;align-items:center;gap:6px;justify-content:space-between}.node .nm>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.node .nm .ctx{flex:none}
 .node .tag{font-size:11px;font-weight:500;color:var(--acc);white-space:nowrap}
 .node .badge{display:inline-block;font-size:10px;font-weight:600;color:var(--acc);border:1px solid var(--acc);border-radius:4px;padding:0 4px;margin-top:4px}
 .node.off{opacity:.5;cursor:default;border-style:dashed}.node.off:hover{border-color:var(--acc)}
@@ -2895,16 +2898,31 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)
 .task{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px}
 .task .mh{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;font-size:13px}.task .mh .when{margin-left:auto;color:var(--mut);font-size:12px}
 .task .note{margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}.task .tact{margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}.task .tact select{width:auto}
-.task.sub{margin-left:24px}button.danger{color:#c0392b;border-color:#c0392b}nav .count.hot:not(:empty){background:var(--acc);color:#fff;border-radius:999px;padding:1px 7px;font-weight:600}.task .ftext{margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;max-height:9em;overflow:auto}
+.task.sub{margin-left:24px}button.danger{color:var(--bad);border-color:var(--bad)}nav .count.hot:not(:empty){background:var(--acc);color:#fff;border-radius:999px;padding:1px 7px;font-weight:600}.task .ftext{margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;max-height:9em;overflow:auto}
 .task .tact input{flex:1;min-width:160px}.tchip.new,.tchip.bug{color:var(--warn);border-color:var(--warn)}.tchip.accepted,.tchip.idea{color:var(--acc);border-color:var(--acc)}.tchip{font-size:11px;border-radius:999px;padding:1px 8px;border:1px solid var(--line);color:var(--mut)}
-.tchip.open,.tchip.in_progress{color:var(--acc);border-color:var(--acc)}.tchip.done{color:#2e8b57;border-color:#2e8b57}.tchip.failed{color:#c0392b;border-color:#c0392b}
+.fl[hidden]{display:none}.seg{display:inline-flex}.seg button{border-radius:0}.seg button:first-child{border-radius:8px 0 0 8px}.seg button:last-child{border-radius:0 8px 8px 0;margin-left:-1px}.seg button.on{background:var(--acc);color:#fff;border-color:var(--acc)}
+.board{display:grid;grid-template-columns:repeat(4,minmax(0,1fr)) auto;gap:10px;align-items:start;margin-bottom:14px}
+.lane-h{font-size:12px;font-weight:600;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin:6px 0}
+.col{background:var(--well);border:1px solid var(--line);border-radius:10px;padding:8px;min-height:80px;display:flex;flex-direction:column;gap:8px}
+.col-h{font-size:12px;font-weight:600;color:var(--mut);display:flex;justify-content:space-between}
+.col.can{border-color:var(--acc);border-style:dashed}.col.over,.tdrop .agent.over{background:rgba(217,119,87,.12);border-color:var(--acc)}
+.col.shut{min-width:120px;max-width:130px}.col.shut .tcard{display:none}.col.shut.open{max-width:none;min-width:200px}.col.shut.open .tcard{display:block}
+.col-h button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
+.tcard{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:13px;cursor:grab}
+.tcard.dragging{opacity:.4}.tcard .tt{font-weight:600;overflow-wrap:anywhere}.tcard .meta{font-size:12px;color:var(--mut);margin-top:3px}.tcard .meta.by{display:flex;gap:8px}.tcard .meta.by>span:first-child{min-width:0;overflow-wrap:anywhere}.tcard .meta.by .age{margin-left:auto;white-space:nowrap}.col .none{font-size:12px;color:var(--mut);padding:4px 2px}
+.tcard .bar{height:4px;border-radius:2px;background:var(--line);margin-top:6px;overflow:hidden}.tcard .bar i{display:block;height:100%;background:var(--ok)}
+.tcard .more{display:none;margin-top:6px}.tcard.open .more{display:block}.tcard .more .tact{margin-top:6px;display:flex;gap:6px;flex-wrap:wrap}.tcard .more select{width:auto;max-width:100%}
+.tdrop{display:none;gap:6px;flex-wrap:wrap;align-items:center;margin:0 0 10px;font-size:12px;color:var(--mut)}.tdrop.on{display:flex}
+.tdrop .agent{border:1px dashed var(--line);border-radius:999px;padding:3px 10px;color:var(--fg,inherit)}
+@media (max-width:760px){.board{grid-template-columns:1fr}.col.shut{max-width:none}.col{min-height:0}}
+.tchip.open,.tchip.in_progress{color:var(--acc);border-color:var(--acc)}.tchip.done{color:var(--ok);border-color:var(--ok)}.tchip.failed{color:var(--bad);border-color:var(--bad)}
 .ptabs{display:flex;gap:4px;margin-top:12px;border-bottom:1px solid var(--line)}.ptabs button{background:transparent;color:var(--mut);border:0;border-bottom:2px solid transparent;border-radius:0;padding:6px 10px}
 .ptabs button.on{color:var(--fg);border-bottom-color:var(--acc)}.ptasks{margin-top:12px;display:flex;flex-direction:column;gap:8px}.ptasks .k{color:var(--mut)}
 .msg{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px;cursor:pointer}
 .msg .mh{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;font-size:13px}.msg .mh .when{margin-left:auto;color:var(--mut);font-size:12px}
 .msg .mt{margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .msg.open .mt{display:block}.msg .chip{font-size:11px;border-radius:999px;padding:1px 8px;border:1px solid var(--line);color:var(--mut)}
-.chip.queued{border-color:var(--warn);color:var(--warn)}.chip.expired{border-color:#c0392b;color:#c0392b}.chip.reply{color:var(--acc);border-color:var(--acc)}
+.chip.queued{border-color:var(--warn);color:var(--warn)}.chip.expired{border-color:var(--bad);color:var(--bad)}.chip.reply{color:var(--acc);border-color:var(--acc)}
 .msg.inthread{margin-left:22px;border-left:3px solid var(--acc)}
 @media (min-width:721px){body.drawer main{padding-right:404px;max-width:1504px}}
 @media (max-width:720px){#detail{width:100%;border-left:0}}
@@ -2925,47 +2943,62 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;overflow-wrap:anywhere;min-width:0}
 .peer .top{display:flex;justify-content:space-between;gap:8px;align-items:center}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:var(--ok)}.dot.busy{background:var(--warn)}
-.name{font-weight:600}.small{font-size:12px}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;word-break:break-all}
+.name{font-weight:600}.small{font-size:12px}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;overflow-wrap:anywhere}
 .pill{display:inline-block;font-size:11px;border:1px solid var(--line);border-radius:999px;padding:1px 8px;color:var(--mut)}
-input[type=text],input[type=number],textarea{width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font:inherit}
+input:not([type=checkbox]):not([type=radio]),textarea{width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font:inherit}
 select{background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px;font:inherit}
+input::placeholder,textarea::placeholder{color:var(--mut);opacity:.8}
 textarea{min-height:180px;font-family:ui-monospace,Menlo,monospace;font-size:12px}
 label{display:block;margin:8px 0 4px;font-size:12px;color:var(--mut)}
 .row{display:flex;gap:12px;flex-wrap:wrap}.row>div{flex:1 1 180px}
 button{background:var(--acc);color:#fff;border:0;border-radius:6px;padding:7px 14px;font:inherit;cursor:pointer}
 button.ghost{background:transparent;color:var(--fg);border:1px solid var(--line)}
+button:hover:not(:disabled){filter:brightness(1.06)}button.ghost:hover:not(:disabled){border-color:var(--mut);filter:none}button:disabled{opacity:.55;cursor:default}
+:focus-visible{outline:2px solid var(--acc);outline-offset:2px}input:focus-visible,select:focus-visible,textarea:focus-visible{outline-offset:0;border-color:var(--acc)}
+.fl{display:inline-flex;gap:6px;align-items:center;white-space:nowrap}.fl label{margin:0}
+details.how{margin:-10px 0 16px;color:var(--mut)}details.how summary{font-size:13px;color:var(--acc);width:max-content}details.how p{margin:6px 0 0;max-width:760px}details.how ul{margin:6px 0 0;padding-left:18px;max-width:760px}
 details{margin-top:8px}summary{cursor:pointer;font-size:12px;color:var(--mut)}
 table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
 th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap;max-height:6em;overflow:auto}
 .tablewrap{overflow-x:auto}.empty{color:var(--mut);padding:14px 0}
 .check{display:flex;align-items:center;gap:6px;margin-top:8px}
-.err{color:#c0392b}
+.err{color:var(--bad)}
 @media (max-width:720px){.app{flex-direction:column}
- nav{position:static;height:auto;flex:none;flex-direction:row;flex-wrap:wrap;border-right:0;border-bottom:1px solid var(--line);padding:10px 12px}
- nav .brand{padding:6px 8px 6px 4px}nav .host{display:none}nav a{padding:6px 10px}nav .count{margin-left:6px}
+ nav{position:sticky;top:0;z-index:5;height:auto;flex:none;flex-direction:row;align-items:center;overflow-x:auto;scrollbar-width:none;border-right:0;border-bottom:1px solid var(--line);padding:8px 12px}
+ nav::-webkit-scrollbar{display:none}nav .brand{padding:6px 8px 6px 4px;flex:none}nav .host{display:none}nav a{padding:6px 10px;flex:none;white-space:nowrap}nav .count{margin-left:6px}
+ nav .grp{padding:0;width:1px;height:18px;background:var(--line);overflow:hidden;color:transparent;flex:none;margin:0 4px}
+ details.how{margin-top:-8px}
  main{padding:16px}}
 </style></head><body><div class="app">
 <nav>
 <div class="brand">Peerlink</div><div class="host" id="hostline"></div>
 <a href="#agents" data-nav="agents">Agents <span class="count" id="n-agents"></span></a>
 <a href="#inbox" data-nav="inbox">Inbox <span class="count hot" id="n-inbox"></span></a>
-<a href="#spaces" data-nav="spaces">Spaces <span class="count" id="n-spaces"></span></a>
-<a href="#messages" data-nav="messages">Messages <span class="count" id="n-msgs"></span></a>
 <a href="#tasks" data-nav="tasks">Tasks <span class="count" id="n-tasks"></span></a>
-<a href="#feedback" data-nav="feedback">Feedback <span class="count" id="n-feedback"></span></a>
+<a href="#messages" data-nav="messages">Messages <span class="count" id="n-msgs"></span></a>
+<div class="grp" aria-hidden="true">Set up</div>
+<a href="#spaces" data-nav="spaces">Spaces <span class="count" id="n-spaces"></span></a>
 <a href="#channels" data-nav="channels">Channels <span class="count" id="n-discord"></span></a>
+<div class="grp" aria-hidden="true">Peerlink</div>
+<a href="#feedback" data-nav="feedback">Feedback <span class="count" id="n-feedback"></span></a>
 <a href="#settings" data-nav="settings">Settings</a>
 <a href="#controls" data-nav="controls">Controls</a>
 </nav>
-<main><div id="stalebar" style="display:none" class="small"></div><div id="offline">Can't reach the peerlink daemon. It restarts when an agent next needs it; this page reconnects by itself.</div><div id="signedout">This page is signed out. Run <span class="mono">/peerlink web</span> in any agent to open it again.</div>
+<main><div id="stalebar" style="display:none" class="small"></div><div id="offline">Can't reach the peerlink daemon. This page reconnects once it's back.</div><div id="signedout">Signed out. Run <span class="mono">/peerlink web</span> in any agent to sign in again.</div>
 
-<section id="agents"><h1>Agents</h1><p class="lead">Live Claude Code sessions as an org chart. Each box is a space. Its lead (outlined in orange) is pinned at the top with its members beneath it, and the lead of a space inside another sits in the parent's box with its team beneath it. An agent alone in a space leads it until you pick another: open an agent and choose Make lead. Work sent to a space goes to its lead. The percentage is how full each agent's context is. An agent only sees and messages agents in its own space, and a lead also its parent's. Click an agent to see and change its settings.</p><div class="orgwrap"><div id="peers"></div><div id="detail"></div></div></section>
+<section id="agents"><h1>Agents</h1><p class="lead">Your live agents, by space. Click one to see or change it.</p>
+<details class="how"><summary>How the chart works</summary><ul>
+<li>Each box is a space. Its lead, outlined in orange, sits at the top, with its members beneath it. The lead of a space inside another sits in the parent's box, with its team beneath it.</li>
+<li>Work sent to a space goes to its lead. An agent alone in a space leads it until you pick another: open an agent and choose Make lead.</li>
+<li>An agent only sees and messages agents in its own space. A lead also sees its parent's.</li>
+<li>The percentage is how full the agent's context window is. A yellow dot means it's working, a green one that it's idle.</li></ul></details><div class="orgwrap"><div id="peers"></div><div id="detail"></div></div></section>
 
-<section id="inbox"><h1>Inbox</h1><p class="lead">Everything waiting on you: agents asking to start another agent, tasks agents handed you, questions they're waiting on, and new feedback about peerlink. The longest waiting is first. On Discord, send <span class="mono">/inbox</span> for the same list and answer by number, like <span class="mono">1 done</span>.</p>
+<section id="inbox"><h1>Inbox</h1><p class="lead">Everything waiting on you, the longest waiting first. On Discord, <span class="mono">/inbox</span> shows the same list, and you answer by number, like <span class="mono">1 done</span>.</p>
 <div class="mlist" id="inboxlist"></div></section>
 
 <section id="spaces"><h1>Spaces</h1>
-<p class="lead">Each agent's space comes from, in order: an override for that agent, the nearest <span class="mono">.peerlink</span> file in its folder or above, a folder rule below, or <b>default</b>. A <span class="mono">.peerlink</span> with <span class="mono">parent: &lt;space&gt;</span> nests its space inside that one: the agent in that file's folder leads it and also sits in the parent.</p>
+<p class="lead">Which agents can see and message each other.</p>
+<details class="how"><summary>Where an agent's space comes from</summary><p>In order: an override set for that agent, the nearest <span class="mono">.peerlink</span> file in its folder or above, a folder rule below, or <b>default</b>. A <span class="mono">.peerlink</span> with <span class="mono">parent: &lt;space&gt;</span> nests its space inside that one. The agent in that file's folder leads it and also sits in the parent.</p></details>
 <div id="spacelist"></div>
 <h2>Folder rules</h2>
 <form class="card" id="rules">
@@ -2975,26 +3008,34 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 </form>
 </section>
 
-<section id="messages"><h1>Messages</h1><p class="lead">The latest messages between agents, newest first. A reply sits under the message it answers. Click a message to read all of it.</p>
-<div class="msgbar"><label class="small mut" for="msgspace">Space</label><select id="msgspace"><option value="">All spaces</option></select>
-<label class="small mut" for="msgagent">Agent</label><select id="msgagent"><option value="">Everyone</option></select></div>
+<section id="messages"><h1>Messages</h1><p class="lead">Recent messages between agents, newest first. Click one to read it all.</p>
+<div class="msgbar"><span class="fl"><label class="small mut" for="msgspace">Space</label><select id="msgspace"><option value="">All spaces</option></select></span>
+<span class="fl"><label class="small mut" for="msgagent">Agent</label><select id="msgagent"><option value="">Everyone</option></select></span></div>
 <div class="mlist" id="msgs"></div></section>
 
-<section id="tasks"><h1>Tasks</h1><p class="lead">Work agents hand each other with <span class="mono">kind: task</span>, and tasks you post on Discord starting with <span class="mono">Task:</span>. A task stays open until its owner marks it done or failed, and whoever asked gets the owner's note. A task sent to a lead is the lead's to split up; its subtasks show under it.</p>
-<div class="msgbar"><label class="small mut" for="tstatus">Show</label><select id="tstatus"><option value="live">Open and in progress</option><option value="done">Done</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option><option value="">All</option></select>
-<label class="small mut" for="towner">Owner</label><select id="towner"><option value="">Everyone</option></select>
-<label class="small mut" for="tspace">Space</label><select id="tspace"><option value="">All spaces</option></select></div>
+<section id="tasks"><h1>Tasks</h1><p class="lead">Work handed between agents. Click a card for details, or drag it.</p>
+<details class="how"><summary>How tasks work</summary><ul>
+<li>An agent hands out a task with <span class="mono">kind: task</span>. On Discord, start a post with <span class="mono">Task:</span>. A task stays open until its owner marks it done or failed, and whoever asked gets the owner's note.</li>
+<li>A task sent to a lead is the lead's to split up. Its subtasks count toward it.</li>
+<li>Drag a card to Cancelled to cancel it, from Done, Failed or Cancelled to Open to reopen it, or onto an agent to hand it over. Only the owner moves a task to In progress, Done or Failed. If the owner changed a task after the board was drawn, your move is refused.</li></ul></details>
+<div class="msgbar"><span class="seg" role="group" aria-label="Layout"><button class="ghost small" data-tlayout="board">Board</button><button class="ghost small" data-tlayout="list">List</button></span>
+<span id="tstatusw" class="fl"><label class="small mut" for="tstatus">Show</label><select id="tstatus"><option value="live">Open and in progress</option><option value="done">Done</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option><option value="">All</option></select></span>
+<span class="fl"><label class="small mut" for="towner">Owner</label><select id="towner"><option value="">Everyone</option></select></span>
+<span class="fl"><label class="small mut" for="treq">Asked by</label><select id="treq"><option value="">Anyone</option></select></span>
+<span class="fl"><label class="small mut" for="tspace">Space</label><select id="tspace"><option value="">All spaces</option></select></span>
+<span id="tgroupw" class="fl"><label class="small mut" for="tgroup">Rows</label><select id="tgroup"><option value="">One board</option><option value="space">By space</option><option value="owner">By owner</option></select></span></div>
+<div id="tdrop" class="tdrop"></div>
 <div class="mlist" id="tasklist"></div></section>
 
-<section id="feedback"><h1>Feedback</h1><p class="lead">Bugs and ideas agents report about peerlink itself, from any space. Accepting one makes it a task for the agent that works on peerlink; when that task is done, so is the feedback.</p>
-<div class="msgbar"><label class="small mut" for="fstatus">Show</label><select id="fstatus"><option value="new">New</option><option value="accepted">Accepted</option><option value="done">Done</option><option value="dismissed">Dismissed</option><option value="">All</option></select>
-<label class="small mut" for="ftype">Type</label><select id="ftype"><option value="">Bugs and ideas</option><option value="bug">Bugs</option><option value="idea">Ideas</option></select></div>
+<section id="feedback"><h1>Feedback</h1><p class="lead">Bugs and ideas agents report about peerlink. Accept one to hand it to the peerlink agent as a task.</p>
+<div class="msgbar"><span class="fl"><label class="small mut" for="fstatus">Show</label><select id="fstatus"><option value="new">New</option><option value="accepted">Accepted</option><option value="done">Done</option><option value="dismissed">Dismissed</option><option value="">All</option></select></span>
+<span class="fl"><label class="small mut" for="ftype">Type</label><select id="ftype"><option value="">Bugs and ideas</option><option value="bug">Bugs</option><option value="idea">Ideas</option></select></span></div>
 <div class="mlist" id="fblist"></div></section>
 
 <section id="channels"><h1>Channels</h1>
-<p class="lead">Places outside your terminal where you can talk to your agents.</p>
+<p class="lead">Talk to your agents from outside the terminal.</p>
 <h2>Discord</h2>
-<p class="lead">Each Discord channel you map has a <b>master</b> agent, which gets your messages, and can have <b>members</b>, which post there too; start a message with a member's name and a colon to reach it instead. Only the bot's owner can talk to it.</p>
+<p class="lead">Each channel you map has a <b>master</b> agent that gets your messages. Only you, the bot's owner, can talk to it.</p>
 <div id="dstatus"></div>
 <ol class="steps">
 <li class="step" id="dstep1"><span class="step-n">1</span><div class="step-body"><div class="step-t">Create the bot and paste its token</div><div id="dstep1b"></div></div></li>
@@ -3017,10 +3058,10 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <div class="check"><input type="checkbox" name="roster_in_prompt" id="rp"><label for="rp" style="margin:0">Show each agent the live agent list when it changes</label></div>
 <div class="check"><input type="checkbox" name="auto_summary" id="as"><label for="as" style="margin:0">Keep agent summaries current automatically</label></div>
 <div class="row"><div><label>Summary model</label><input type="text" name="summary_model"></div><div></div></div>
-<label>Guidance given to every agent (when to message peers)</label><textarea name="guidance" id="guidance"></textarea><div class="mut small">Leave empty to use the built-in guidance shown in grey.</div>
-<label>Remote daemons (one URL per line, e.g. http://other-mac.local:7899)</label><textarea name="remotes" style="min-height:60px"></textarea>
-<div class="row"><div><label>Listen host (restart the daemon to apply; 0.0.0.0 for remotes)</label><input type="text" name="listen_host"></div>
-<div><label>Shared token for remote daemons</label><input type="text" name="token"></div></div>
+<label>Guidance for every agent</label><textarea name="guidance" id="guidance"></textarea><div class="mut small">Leave empty to use the default, shown in grey.</div>
+<label>Other machines' daemons, one URL per line</label><textarea name="remotes" style="min-height:60px"></textarea>
+<div class="row"><div><label>Listen host (0.0.0.0 to accept other machines; needs a restart)</label><input type="text" name="listen_host"></div>
+<div><label>Shared token for other machines</label><input type="text" name="token"></div></div>
 <p><button type="submit">Save</button> <span class="mut small" id="saved"></span></p>
 </form></section>
 
@@ -3055,7 +3096,8 @@ function show(){const id=(location.hash||'#agents').slice(1);
   document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('on',a.dataset.nav===id))}
 // Leaving Agents, or Escape, closes the agent panel: it should never linger over another page.
 const closePanel=()=>{if(!sel)return;sel='';editing=false;refresh(true)};
-window.addEventListener('hashchange',()=>{show();closePanel()});
+// A page starts at its top: the browser would otherwise scroll to the section the link names, hiding its heading.
+window.addEventListener('hashchange',()=>{show();closePanel();scrollTo(0,0)});
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closePanel()});
 function agentPanel(x,others=[]){const sc=cfg.sessions?.[x.id]||{};const fileSpace=x.space_source==='file'?x.space:'';
   const wake=sc.auto_wake===true?'on':sc.auto_wake===false?'off':'default';
@@ -3081,14 +3123,14 @@ function agentPanel(x,others=[]){const sc=cfg.sessions?.[x.id]||{};const fileSpa
     ${x.threads.owes.map(t=>`<div class="small">owes <b>${esc(t.with)}</b> a reply · <span class="mut">${esc(t.id)}: ${esc(t.text.slice(0,90))}</span></div>`).join('')}
     ${x.threads.waiting.map(t=>`<div class="small">waiting on <b>${esc(t.with)}</b> · <span class="mut">${esc(t.id)}: ${esc(t.text.slice(0,90))}</span></div>`).join('')}</div>`:''}
    ${x.remote?'<div class="small mut">This agent runs on another machine; change it there.</div>':`<form id="agentform" data-id="${esc(x.id)}" data-nick="${esc(sc.nickname||'')}" data-spacefile="${esc(fileSpace)}" data-parent="${esc(x.file_parent||'')}" data-override="${esc(sc.space||'')}" data-wake="${wake}" data-muted="${x.muted?'1':''}">
-    <label>Name<input name="nickname" type="text" value="${esc(sc.nickname||'')}" placeholder="${esc(x.name)}"><span class="hint">What peers call this agent. It stays with this folder.</span></label>
-    <label>Space for this folder<input name="spacefile" type="text" value="${esc(fileSpace)}" placeholder="none"><span class="hint">Saved in this repo's .peerlink. Every agent in the folder joins it.</span></label>
-    <label>Inside space<input name="parent" type="text" value="${esc(x.file_parent||'')}" placeholder="none (top level)"><span class="hint">Where the whole ${esc(x.space||'default')} space sits. Changing it moves every agent in that space; the agent in the .peerlink's folder leads it unless you pick another lead.</span></label>
-    <label>Space for this agent only<input name="override" type="text" value="${esc(sc.space||'')}" placeholder="none"><span class="hint">Overrides the folder's space.</span></label>
+    <label>Name<input name="nickname" type="text" value="${esc(sc.nickname||'')}" placeholder="${esc(x.name)}"><span class="hint">What other agents call it. Kept for this folder.</span></label>
+    <label>Space for this folder<input name="spacefile" type="text" value="${esc(fileSpace)}" placeholder="none"><span class="hint">Saved in the folder's .peerlink, for every agent there.</span></label>
+    <label>Inside space<input name="parent" type="text" value="${esc(x.file_parent||'')}" placeholder="none (top level)"><span class="hint">The space ${esc(x.space||'default')} sits inside. Moves every agent in it.</span></label>
+    <label>Space for this agent only<input name="override" type="text" value="${esc(sc.space||'')}" placeholder="none"><span class="hint">Overrides the folder's space for this agent.</span></label>
     <label>When a message arrives<select name="wake">${opt('default','Use the default')}${opt('on','Start a turn')}${opt('off','Wait for the next prompt')}</select></label>
     <label class="check"><input name="muted" type="checkbox" ${x.muted?'checked':''}> Mute: hold every message for this agent</label>
     <div><button type="submit">Save</button> <span id="agentmsg" class="small"></span></div></form>
-    <div class="threads"><div class="k small">End this agent</div><div class="small mut">It finishes the turn it's in, then its session ends. If it's still running a minute later, its process is stopped.</div>
+    <div class="threads"><div class="k small">End this agent</div><div class="small mut">It finishes its current turn, then closes. If it's still running a minute later, it's stopped.</div>
     <div><button class="ghost small danger" data-terminate="${esc(x.id)}" ${x.terminating?'disabled':''}>${x.terminating?'Ending…':'Terminate'}</button></div></div>`}`}</div>`}
 // Messages as a conversation: newest first, each reply under the message it answers.
 let msgFilter='',spaceFilter='',livePeers=[],leadOf={};
@@ -3155,7 +3197,7 @@ async function refresh(force){
   // A lead is told apart by its outline (and says which team on hover), so every card keeps its context in one place.
   const badge=x=>x.leads?`<div><span class="badge">${x.leads==='only'?'Lead (only agent)':'Lead'}</span>${x.offline?` <span class="small mut" data-clearlead="${esc(x.space)}" title="Clear this lead" style="cursor:pointer">clear</span>`:''}</div>`:'';
   const node=x=>`<${x.offline?'div':'button'} class="node${x.leads?' is-lead':''}${x.offline?' off':''}${x.id&&x.id===sel?' sel':''}"${x.offline?'':` data-sel="${esc(x.id)}"`}${x.leads?` title="Leads the ${esc(x.space)} ${x.parent?'team':'space'}${x.offline?' (offline)':''}"`:''}>
-    <div class="nm"><span>${x.offline?'':`<span class="dot ${x.busy?'busy':''}"></span>`}${esc(x.name)}</span>${ctx(x)}</div>${badge(x)}
+    <div class="nm"><span title="${esc(x.name)}">${x.offline?'':`<span class="dot ${x.busy?'busy':''}"></span>`}${esc(x.name)}</span>${ctx(x)}</div>${badge(x)}
     <div class="dir">${esc(short(x.cwd))}</div>${x.branch?`<div class="dir" title="${esc(x.branch)}">⎇ ${esc(x.branch)}</div>`:''}<div class="sum">${esc(x.summary)||'no summary yet'}</div>${x.open_tasks?`<div class="small" style="color:var(--acc)">${x.open_tasks} open task${x.open_tasks>1?'s':''}</div>`:''}${x.stale&&!x.remote?'<div class="stale">reload needed</div>':''}</${x.offline?'div':'button'}>`;
   // Every live agent gets its own card, two sessions in one folder included: a hidden one can't be found to message.
   const rank=(a,b)=>(b.busy-a.busy)||(a.last_seen_s-b.last_seen_s);
@@ -3185,7 +3227,7 @@ async function refresh(force){
   // Agents still on older plugin code: they keep working, but get fixes only after /reload-plugins.
   const behind=p.peers.filter(x=>x.stale&&!x.remote);
   $('#stalebar').style.display=behind.length?'block':'none';
-  $('#stalebar').innerHTML=behind.length?`<b>${behind.length} agent${behind.length>1?'s':''} on an older peerlink plugin</b> (${behind.map(x=>esc(x.name)).join(', ')}). Update peerlink from the marketplace if needed, then run <span class="mono">/reload-plugins</span> in each.`:'';
+  $('#stalebar').innerHTML=behind.length?`<b>${behind.length} agent${behind.length>1?'s':''} on an older peerlink plugin</b> (${behind.map(x=>esc(x.name)).join(', ')}). Run <span class="mono">/peerlink update</span> in any agent.`:'';
   const picked=p.peers.find(x=>x.id===sel);
   const panel=picked?agentPanel(picked,p.peers.filter(y=>y.id!==picked.id&&y.cwd===picked.cwd&&y.space===picked.space)):'';
   // Never redraw the panel under someone editing it.
@@ -3219,7 +3261,7 @@ document.addEventListener('click',async e=>{const b=e.target.closest('[data-iact
   if(r.error)alert(r.error);document.activeElement?.blur();refresh(true)});
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-makelead],[data-clearlead]');if(!b)return;e.stopPropagation();
   const space=b.dataset.makelead||b.dataset.clearlead;
-  if(b.dataset.clearlead&&!confirm(`Clear the lead of ${space}? Work sent to the space has nowhere to go until you pick another.`))return;
+  if(b.dataset.clearlead&&!confirm(`Clear the lead of ${space}? Work sent to the space won't reach anyone until you pick a new lead.`))return;
   const r=await post(`/api/spaces/${encodeURIComponent(space)}/lead`,{cwd:b.dataset.cwd||''});if(r.error)alert(r.error);refresh(true)});
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-terminate]');if(!b)return;
   const x=livePeers.find(p=>p.id===b.dataset.terminate);if(!confirm(`End ${x?x.name:'this agent'}? Its session closes after the turn it's in.`))return;
@@ -3241,7 +3283,7 @@ function renderFeedback(){
       ${rest.join('\n').trim()?`<div class="ftext">${esc(rest.join('\n').trim())}</div>`:''}
       <div class="tact"><input class="small" data-fnote placeholder="Note (optional)" value="${esc(f.note||'')}">
       ${f.status==='new'?btn('accepted','Accept')+btn('dismissed','Dismiss'):f.status==='accepted'?btn('done','Mark done')+btn('dismissed','Dismiss'):btn('new','Back to new')}</div></div>`}).join('')
-    ||`<div class="empty">${allFeedback.length?'Nothing here.':'No feedback yet. Agents send it with report_issue.'}</div>`}
+    ||`<div class="empty">${allFeedback.length?'Nothing here.':'No feedback yet.'}</div>`}
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-fact]');if(!b)return;const row=b.closest('[data-fb]');
   const r=await post('/api/issues/'+encodeURIComponent(row.dataset.fb),{status:b.dataset.fact,note:row.querySelector('[data-fnote]').value});
   if(r.error)alert(r.error);document.activeElement?.blur();refresh(true)});
@@ -3262,27 +3304,75 @@ function taskRow(t,sub){const kids=allTasks.filter(x=>x.parent===t.id);
 // Open and in-progress first, then the rest, newest first within each.
 const byLive=list=>list.slice().sort((a,b)=>(isLive(b)-isLive(a))||(b.created-a.created));
 const withSubs=list=>{const ids=new Set(list.map(t=>t.id));return byLive(list.filter(t=>!t.parent||!ids.has(t.parent))).map(t=>taskRow(t,false)+byLive(list.filter(k=>k.parent===t.id)).map(k=>taskRow(k,true)).join('')).join('')};
+// The board's layout, rows and open cards are this browser's own; storage can be missing (a private window), so every use is guarded.
+const pref=(k,d)=>{try{return localStorage.getItem('peerlink.'+k)??d}catch{return d}};
+const keep=(k,v)=>{try{localStorage.setItem('peerlink.'+k,v)}catch{}};
+let tLayout=pref('tlayout','board'),dragging=null;const openCards=new Set();
+$('#tgroup').value=pref('tgroup','');
+const COLS=[['open','Open'],['in_progress','In progress'],['done','Done'],['failed','Failed'],['cancelled','Cancelled']];
+// What a drop on a column does: only what the web UI could already do. The owner's own statuses are never set from here.
+const dropAction=(t,col)=>col==='cancelled'&&isLive(t)?'cancelled':col==='open'&&!isLive(t)?'open':'';
+const reqName=t=>t.requester?.name||'?';
+function taskCard(t){const kids=allTasks.filter(x=>x.parent===t.id),done=kids.filter(k=>k.status==='done').length;
+  return `<div class="tcard${openCards.has(t.id)?' open':''}" draggable="true" data-task="${esc(t.id)}" data-st="${esc(t.status)}" tabindex="0" aria-label="${esc(t.title)}, ${TSTATE[t.status]}, owner ${esc(t.owner)}">
+    <div class="tt">${esc(t.title)}</div>
+    <div class="meta by"><span><b>${esc(t.owner)}</b> · asked by ${esc(reqName(t))}</span><span class="age" title="${new Date(t.created*1000).toLocaleString()}">${ago(t.created)}</span></div>
+    ${t.parent?`<div class="meta">↳ part of ${esc(t.parent)}</div>`:''}
+    ${kids.length?`<div class="meta">${done} of ${kids.length} subtasks done</div><div class="bar"><i style="width:${Math.round(100*done/kids.length)}%"></i></div>`:''}
+    <div class="more">${t.space?`<div class="meta">${esc(t.id)} · ${esc(t.space)}</div>`:`<div class="meta">${esc(t.id)}</div>`}${t.note?`<div class="note">${esc(t.note)}</div>`:''}
+    <div class="tact">${isLive(t)?'<button class="ghost small" data-tact="cancelled">Cancel</button>':'<button class="ghost small" data-tact="open">Reopen</button>'}${agentSelect('','data-treassign','Reassign to…')}</div></div></div>`}
+function board(list){const shut=!openCards.has('col:cancelled');
+  return `<div class="board">${COLS.map(([k,label])=>{const cards=list.filter(t=>t.status===k).sort((a,b)=>b.created-a.created);
+    return `<div class="col${k==='cancelled'?' shut'+(shut?'':' open'):''}" data-col="${k}"><div class="col-h">${k==='cancelled'?`<button data-tcol="cancelled" aria-expanded="${!shut}">${shut?'▸':'▾'} ${label}</button>`:label}<span>${cards.length}</span></div>${cards.map(taskCard).join('')||(k==='cancelled'?'':'<div class="none">None</div>')}</div>`}).join('')}</div>`}
 function renderTasks(){
   const opts=(el,all,vals)=>{const keep=el.value;el.innerHTML=`<option value="">${all}</option>`+vals.map(n=>`<option ${n===keep?'selected':''}>${esc(n)}</option>`).join('')};
   opts($('#towner'),'Everyone',[...new Set(allTasks.map(t=>t.owner))].sort());
+  opts($('#treq'),'Anyone',[...new Set(allTasks.map(reqName))].sort());
   opts($('#tspace'),'All spaces',[...new Set(allTasks.map(t=>t.space).filter(Boolean))].sort());
-  const st=$('#tstatus').value,ow=$('#towner').value,sp=$('#tspace').value;
-  const shown=allTasks.filter(t=>(st==='live'?isLive(t):!st||t.status===st)&&(!ow||t.owner===ow)&&(!sp||t.space===sp));
+  const st=$('#tstatus').value,ow=$('#towner').value,rq=$('#treq').value,sp=$('#tspace').value,grp=$('#tgroup').value;
+  const picked=allTasks.filter(t=>(!ow||t.owner===ow)&&(!rq||reqName(t)===rq)&&(!sp||t.space===sp));
   $('#n-tasks').textContent=allTasks.filter(isLive).length||'';
-  // Never redraw under an open reassign menu.
-  if(document.activeElement?.matches?.('#tasklist [data-treassign]'))return;
-  $('#tasklist').innerHTML=withSubs(shown)||`<div class="empty">${allTasks.length?'No tasks match.':'No tasks yet. An agent opens one with send_message and kind: task.'}</div>`}
+  document.querySelectorAll('[data-tlayout]').forEach(b=>b.classList.toggle('on',b.dataset.tlayout===tLayout));
+  $('#tstatusw').hidden=tLayout!=='list';$('#tgroupw').hidden=tLayout!=='board';
+  // Never redraw under an open reassign menu or a card being dragged.
+  if(dragging||document.activeElement?.matches?.('#tasklist [data-treassign]'))return;
+  const none=`<div class="empty">${allTasks.length?'No tasks match.':'No tasks yet.'}</div>`;
+  if(tLayout==='list'){$('#tasklist').innerHTML=withSubs(picked.filter(t=>st==='live'?isLive(t):!st||t.status===st))||none;return}
+  if(!picked.length){$('#tasklist').innerHTML=none;return}
+  const key=grp==='space'?t=>t.space||'no space':grp==='owner'?t=>t.owner:null;
+  $('#tasklist').innerHTML=key?[...new Set(picked.map(key))].sort().map(g=>`<div class="lane-h">${esc(g)}</div>${board(picked.filter(t=>key(t)===g))}`).join(''):board(picked)}
+// A board card opens in place to show its note and the same buttons as a list row, so nothing needs a drag.
+document.addEventListener('click',e=>{const h=e.target.closest('[data-tcol]');if(h){const k='col:'+h.dataset.tcol;openCards.has(k)?openCards.delete(k):openCards.add(k);renderTasks();return}
+  const c=e.target.closest('.tcard');if(!c||e.target.closest('.tact'))return;
+  openCards.has(c.dataset.task)?openCards.delete(c.dataset.task):openCards.add(c.dataset.task);c.classList.toggle('open')});
+document.addEventListener('keydown',e=>{const c=e.target.closest?.('.tcard');if(c&&e.target===c&&(e.key==='Enter'||e.key===' ')){e.preventDefault();c.click()}});
+document.addEventListener('click',e=>{const b=e.target.closest('[data-tlayout]');if(!b)return;tLayout=b.dataset.tlayout;keep('tlayout',tLayout);renderTasks()});
+// Dragging: the columns and agents a card may go to light up; anything else refuses the drop.
+document.addEventListener('dragstart',e=>{const c=e.target.closest?.('.tcard');if(!c)return;
+  dragging=allTasks.find(t=>t.id===c.dataset.task);if(!dragging)return;c.classList.add('dragging');e.dataTransfer.effectAllowed='move';e.dataTransfer.setData('text/plain',dragging.id);
+  document.querySelectorAll('.col').forEach(col=>col.classList.toggle('can',!!dropAction(dragging,col.dataset.col)));
+  const agents=agentFolders().filter(a=>a.cwd!==dragging.owner_cwd);
+  $('#tdrop').innerHTML=agents.length?'Hand it to: '+agents.map(a=>`<span class="agent" data-dropcwd="${esc(a.cwd)}">${esc(a.name)}</span>`).join(''):'';$('#tdrop').classList.toggle('on',agents.length>0)});
+const target=e=>{if(!dragging)return null;const a=e.target.closest?.('[data-dropcwd]');if(a)return a;const col=e.target.closest?.('.col');return col&&dropAction(dragging,col.dataset.col)?col:null};
+document.addEventListener('dragover',e=>{const t=target(e);document.querySelectorAll('.over').forEach(x=>x!==t&&x.classList.remove('over'));if(!t)return;e.preventDefault();t.classList.add('over')});
+document.addEventListener('dragend',()=>{dragging=null;$('#tdrop').classList.remove('on');document.querySelectorAll('.can,.over,.dragging').forEach(x=>x.classList.remove('can','over','dragging'));renderTasks()});
+document.addEventListener('drop',async e=>{const t=target(e),task=dragging;if(!t||!task)return;e.preventDefault();dragging=null;
+  let body;
+  if(t.dataset.dropcwd){if(!confirm(`Hand task ${task.id} to ${t.textContent}? ${task.owner} is told to stop.`))return;body={owner:t.dataset.dropcwd}}
+  else{const st=dropAction(task,t.dataset.col);if(st==='cancelled'&&!confirm(`Cancel task ${task.id}? Its owner is told to stop.`))return;body={status:st}}
+  // expect: refused if the owner changed the task since the board was drawn, so its own update is never overridden.
+  const r=await post('/api/tasks/'+encodeURIComponent(task.id),{...body,expect:task.status});if(r.error)alert(r.error);refresh(true)});
 function panelTasks(x){
   const mine=allTasks.filter(t=>t.owner_cwd&&t.owner_cwd===x.cwd),asked=allTasks.filter(t=>t.requester?.id===x.id||(x.cwd&&t.requester?.cwd===x.cwd));
   const sec=(title,list,none)=>`<div class="k small">${title}</div>${list.length?byLive(list).map(t=>taskRow(t,false)).join(''):`<div class="small mut">${none}</div>`}`;
   return `<div class="ptasks">${sec('Owns',mine,'No tasks for this agent.')}${sec('Asked for',asked,'It hasn\'t handed out any tasks.')}</div>`}
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-ptab],[data-tact]');if(!b)return;
   if(b.dataset.ptab){panelTab=b.dataset.ptab;refresh(true);return}
-  const id=b.closest('[data-task]').dataset.task;
+  const id=b.closest('[data-task]').dataset.task,was=allTasks.find(t=>t.id===id)?.status;
   if(b.dataset.tact==='cancelled'&&!confirm(`Cancel task ${id}? Its owner is told to stop.`))return;
-  const r=await post('/api/tasks/'+encodeURIComponent(id),{status:b.dataset.tact});if(r.error)alert(r.error);refresh(true)});
+  const r=await post('/api/tasks/'+encodeURIComponent(id),{status:b.dataset.tact,expect:was});if(r.error)alert(r.error);refresh(true)});
 document.addEventListener('change',async e=>{const t=e.target;
-  if(['tstatus','towner','tspace'].includes(t.id)){renderTasks();return}
+  if(['tstatus','towner','treq','tspace','tgroup'].includes(t.id)){if(t.id==='tgroup')keep('tgroup',t.value);renderTasks();return}
   if(t.dataset.treassign!==undefined&&t.value){const id=t.closest('[data-task]').dataset.task;
     const r=await post('/api/tasks/'+encodeURIComponent(id),{owner:t.value});if(r.error)alert(r.error);t.blur();refresh(true)}});
 document.addEventListener('input',e=>{if(e.target.closest('#agentform'))editing=true});
@@ -3341,26 +3431,26 @@ function renderDiscord(){if(!dState)return;const d=dState,invited=(dGuilds||[]).
       ${agentSelect('',`data-daddmember="${i}"`,'+ add member')}</div></td>
     <td><div class="kinds">${DKINDS.map(([k,l])=>`<label class="small"><input type="checkbox" data-dkind="${i}:${k}" ${!(r.kinds||[]).length||r.kinds.includes(k)?'checked':''}> ${l}</label>`).join('')}</div></td>
     <td style="white-space:nowrap"><button class="ghost small" data-dtest="${esc(r.channel_id)}" ${r.channel_id&&d.state==='online'?'':'disabled'}>Send a test</button> <button class="ghost small" data-dremove="${i}" title="Remove this channel">✕</button></td></tr>`).join('');
-  $('#dstep3b').innerHTML=`<p class="meta">Give each channel a master, which gets your messages. Members can post in the channel too, and you reach one by starting with its name and a colon (<span class="mono">storefront: how's the build?</span>). One agent can be in several channels. Agents are kept by folder, so a mapping survives restarts and <span class="mono">/clear</span>.</p>
+  $('#dstep3b').innerHTML=`<p class="meta">The master gets your messages. To reach a member instead, start with its name and a colon: <span class="mono">storefront: how's the build?</span></p>
     <table class="dmap"><thead><tr><th>Channel</th><th>Master</th><th>Members</th><th>Carries</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="mut small">No channels mapped yet.</td></tr>'}</tbody></table>
-    <p class="small mut" style="margin-top:6px">A channel can carry only some kinds. One set to tasks alone, a #tasks, turns everything you post there into a task for its master, and shows every task its agents hand out or finish. One set to announcements alone posts what agents announce to the master's space, and what you post there is announced to that space. Elsewhere, start a post with <span class="mono">Task:</span> or <span class="mono">Announcement:</span>.</p>
+    <p class="small mut" style="margin-top:6px">Limit a channel to one kind to make it a #tasks or #announcements channel: everything you post there becomes a task or an announcement. Elsewhere, start a post with <span class="mono">Task:</span> or <span class="mono">Announcement:</span>.</p>
     <div class="addline" style="margin-top:8px"><button class="ghost" data-dact="addroute">+ Map a channel</button><button class="ghost" data-dact="refresh" title="Look for new servers and channels">↻ Refresh channels</button></div>
     <div class="addline" style="margin-top:12px"><label class="small mut">Direct messages to the bot go to</label>${agentSelect(dDraft.dm,'data-ddm','Nobody (ignored)')}</div>
     <div class="addline" style="margin-top:12px"><button data-dact="save">Save mapping</button><span class="small" id="dsaved"></span></div>`;
-  const reading=d.reads_messages?`<p class="meta">Every message you write in a mapped channel goes to its master; DMs never need a mention.</p>`
+  const reading=d.reads_messages?`<p class="meta">Everything you write in a mapped channel goes to its master. No @mention needed.</p>`
     :d.message_content_switch?`<p class="meta">The Message Content switch is on in Discord, but the bot connected before it was. <button class="ghost small" data-dact="reconnect">Reconnect now</button></p>`
     :`<p class="meta">${d.message_content_switch===false?'<b>Discord says the Message Content switch is off.</b> ':''}@mention the bot each time, or DM it. To talk without @mentioning, turn on <b>Message Content Intent</b> on the <a href="${d.app_id?`https://discord.com/developers/applications/${esc(d.app_id)}/bot`:'https://discord.com/developers/applications'}" target="_blank" rel="noreferrer">Bot page ↗</a> (under Privileged Gateway Intents) and save. <button class="ghost small" data-dact="check">I turned it on</button></p>`;
   $('#dmore').innerHTML=`<h2>Talking to your agents</h2>${reading}
-    <p class="meta">While an agent works on your message, a reaction on it shows where it's at:</p>
+    <p class="meta">A reaction on your message shows its progress:</p>
     <div class="legend"><span>👀</span><span>delivered to the agent</span><span>🤔</span><span>thinking</span><span>🛠️</span><span>using tools</span><span>❓</span><span>asked you something</span><span>✅</span><span>answered</span></div>
-    <p class="meta" style="margin-top:12px">An agent can also message you first, and its posts are labelled with its name. If an agent isn't running, your message waits up to an hour for it. Links in an agent's message work as usual.</p>
+    <p class="meta" style="margin-top:12px">Agents can message you first, labelled with their name. If an agent isn't running, your message waits up to an hour for it.</p>
     <h2>What agents can send</h2>
     <label class="check"><input type="checkbox" data-dopt="buttons" ${d.buttons?'checked':''}> <span><b>Buttons</b> for choices: tap one and it goes back to the agent as your answer. Off, the choices are a numbered list you reply to.</span></label>
     <label class="check"><input type="checkbox" data-dopt="files_out" ${d.files_out?'checked':''}> <span><b>Files from agents:</b> an agent can attach files from this machine to its messages.</span></label>
     <label class="check"><input type="checkbox" data-dopt="files_in" ${d.files_in?'checked':''}> <span><b>Files to agents:</b> what you attach on Discord is saved here, in <span class="mono">~/.peerlink/files/discord</span>, and the agent gets the paths.</span></label>
     <div class="addline" style="margin-top:8px"><label class="small mut" for="dmaxmb">Largest file, either way</label><input id="dmaxmb" type="number" min="1" max="500" step="1" value="${esc(d.max_file_mb)}" style="width:90px" data-dopt="max_file_mb"> <span class="small mut">MB (Discord allows 10 MB without Nitro)</span></div>
     <h2>Bots that can post to agents</h2>
-    <p class="meta">Messages from other bots are ignored, except from bots listed here by user ID (comma separated; in Discord, turn on Developer Mode, then right-click the bot and Copy User ID). Their posts reach agents the way yours do, labelled with the bot's name, so list only bots you control. This bot's own posts never do.</p>
+    <p class="meta">Other bots are ignored unless listed here. Add their user IDs, separated by commas. To find one, turn on Developer Mode in Discord, right-click the bot and choose Copy User ID. List only bots you control.</p>
     <div class="addline"><input id="dbots" class="mono" placeholder="e.g. 1562000000000000000" value="${esc((d.trusted_bots||[]).join(', '))}" data-dbots style="flex:1;min-width:0"></div>
     <h2>Bot</h2>
     <label class="check"><input type="checkbox" data-dact="enabled" ${d.enabled?'checked':''}> Bot running</label>`}
