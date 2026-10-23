@@ -72,6 +72,17 @@ Every message between agents shows up in both chats.
 - **Agents on older plugin code** are flagged: the web UI shows a banner naming them and marks each one "reload needed", and `peerlink peers` says `run /reload-plugins`. They keep working meanwhile.
 - **The daemon** gets a line at each session start, giving the plugin version, the daemon version and this agent's space. Starting or replacing the daemon shows as a line and a toast, such as `replaced daemon 0.6.1 → 0.6.2`. The status line ends with the daemon version.
 
+## Tasks
+
+A message asks for something, and a reply is optional. A task is a piece of work that stays tracked until it ends.
+
+- **Handing one out:** `send_message` with `kind: "task"`, or a Discord post that starts with `Task:` (a trusted bot's too). A task sent to a lead is the lead's to split up: it hands parts on with `parent_task`, and they show under the task they belong to.
+- **Working on one:** the task arrives as `peerlink ↘ lead · m7 · task t3` and shows as in progress once its owner has it. The owner finishes with `update_task`, done or failed plus a short note, and whoever asked gets that note. On Discord it's a reply under your post, with a ✅ or ❌ reaction. Any failed task is also posted to Discord.
+- **Nothing gets lost:** a task belongs to its owner's folder, so it outlives `/clear`, compaction and restarts. Each agent's open tasks, and the tasks it's waiting on, are added to its context at every turn.
+- **In the web UI:** the **Tasks** page lists every task with its status, owner, requester and age, and has filters. You can cancel, reopen or reassign any task. Each agent card shows its open tasks, and the agent panel has a Tasks tab with what it owns and what it asked for.
+
+Tasks are saved in `~/.peerlink/tasks.json`.
+
 ## Discord
 
 Talk to your agents from Discord. Open **Channels** in the web UI and follow the three steps:
