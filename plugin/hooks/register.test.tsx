@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.8.2', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.8.3', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (path === '/api/sessions') return ok({ id: body.id, name: body.name, config: { poll_interval_ms: 600000, ...config }, previous })
     if (path === '/api/peers') return ok({ peers })
     if (path.endsWith('/threads')) return ok(state.threads)
@@ -420,7 +420,7 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.8.2 · daemon 0.8.2 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.8.3 · daemon 0.8.3 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the team is listed once', async ($, on) => {
@@ -453,7 +453,7 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.8.2')
+  expect(reg.plugin).toBe('0.8.3')
 })
 
 test('plain /peerlink shows status, not the web UI', async ($, on) => {
@@ -495,7 +495,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.8.3', true], ['0.8.2', false]] as const)
+for (const [installed, reloads] of [['0.8.4', true], ['0.8.3', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     fakeDaemon(on)
@@ -598,4 +598,26 @@ test('an incoming task shows its task id instead of reply expected', async ($, o
   const ui = await $.ui.mount({ plugin: 'peerlink', surface: 'terminal', component: 'UserMessage', requestId: 'u1', props: { text, origin: { kind: 'plugin', name: 'peerlink' }, isExpanded: false } } as any)
   expect(await ui.find({ type: 'Text', text: /m7 · task t3$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /reply expected/ })).toBeUndefined()
+})
+
+test('an announcement does not wake the agent: it is read at the start of its next turn', async ($, on) => {
+  const { clock } = engine(on)
+  const logged: string[] = []
+  on('ui.log', (_: any, e: any) => {
+    logged.push(e.text)
+    return { value: undefined }
+  })
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  const inbox: any[] = []
+  fakeDaemon(on, 1, null, inbox)
+  await $.session.start(START)
+  await settle()
+  inbox.push({ id: 'm8', from: 'api-id', from_name: 'api', from_host: 'Mac', text: 'Freeze on main until 5pm.', expects_reply: false, reply_to: null, hops: 0, kind: 'announcement' })
+  await clock.advance(600000)
+  for (let i = 0; i < 10; i++) await settle()
+  expect(logged).toContain('↘ api · m8 · announcement: Freeze on main until 5pm.  (read at the next turn)')
+  const out: any = await $.prompt.context({ blocks: [] } as any)
+  expect(out.blocks.find((b: any) => b.name === 'peerlink announcements').text).toContain('↘ api · m8 · announcement\nFreeze on main until 5pm.')
+  const again: any = await $.prompt.context({ blocks: [] } as any)
+  expect(again.blocks.find((b: any) => b.name === 'peerlink announcements')).toBeUndefined()
 })
