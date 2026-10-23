@@ -108,6 +108,14 @@ Talk to your agents from Discord. Open **Channels** in the web UI and follow the
   - **An #announcements channel** (announcements only): it shows what agents announce to its master's space, and what you post there is announced to that space.
   - **Elsewhere**, start a post with `Task:` or `Announcement:`.
 
+## Starting and ending agents
+
+**Starting:** when work belongs in a folder no agent runs in, an agent can call `request_spawn` with the folder, why, and a first prompt. Nothing starts until you approve it, either in the Inbox (**Approve and start it**) or with the **Approve** button on Discord. `/inbox` then `1 approve` works too. Only you can approve: never an agent, never a bot.
+
+Once approved, the daemon starts Claude Code in that folder: in tmux when tmux is installed (`tmux attach -t peerlink-<folder>-s1` to see it), else in a new Terminal window. The new agent joins the space it was asked for (the asking agent's by default) and gets the first prompt as a message from whoever asked, so its replies go back there. A request you don't answer expires after a day, and the asking agent is told either way. Requests are kept in `~/.peerlink/spawns.json`.
+
+**Ending:** open an agent's panel in the web UI and press **Terminate**, or send `/kill <name>` on Discord and confirm with the button. The agent finishes the turn it's in, then its session exits. If it's still running a minute later, the daemon stops its process, after checking it is a Claude Code process. Agents can't end each other. Every termination is logged in `~/.peerlink/terminations.jsonl`, with who asked.
+
 ## Announcements
 
 `send_message` with `kind: "announcement"` and `to: "space"` (or `"space:<name>"`, for a space the agent can reach) goes to every live agent in that space. It doesn't wake anyone: each agent reads it at the start of its next turn, and nobody replies. In the chat it shows straight away as a line. An agent can send 6 an hour (`announce_per_hour`), so they stay rare.
