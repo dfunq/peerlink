@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.9'
+const DAEMON_VERSION = '0.8.10'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -32,6 +32,8 @@ type ClientConfig = {
   // How this agent leads its space: you picked it, its folder holds the nesting .peerlink, or it was alone there.
   leads?: '' | 'set' | 'file' | 'only'
   space_parent?: string
+  // What this agent is here for: the role: lines of its folder's .peerlink.
+  role?: string
   // The agent that leads this agent's space, and the leads of spaces nested inside it.
   lead?: string
   children?: { name: string; space: string }[]
@@ -484,11 +486,18 @@ async function contextPercent($: EngineInterface) {
   }
 }
 
+function oneLine(text: string, max: number) {
+  const flat = text.replace(/\s+/g, ' ').trim()
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat
+}
+
 function peerLine(p: any) {
   const where = p.cwd.replace(/^\/Users\/[^/]+/, '~') + (p.branch ? ` [${p.branch}]` : '')
   // Only worth a mention when it's high: a nearly full agent may compact before it answers.
   const full = typeof p.context === 'number' && p.context >= 80 ? ` (context ${p.context}% full)` : ''
-  return `- ${p.name}${p.remote ? '@' + p.host : ''}${spaceTag(p)}${full}: ${where} — ${(p.summary || 'no summary yet').slice(0, 140)}`
+  // A role says what the agent is for; the summary, what it's doing now.
+  const about = p.role ? `${oneLine(p.role, 120)}${p.summary ? ` · now: ${p.summary.slice(0, 100)}` : ''}` : (p.summary || 'no summary yet').slice(0, 140)
+  return `- ${p.name}${p.remote ? '@' + p.host : ''}${spaceTag(p)}${full}: ${where} — ${about}`
 }
 
 // The live agents, for the model to read beside the prompt; only when the list changed since it last saw it.
@@ -636,7 +645,7 @@ async function listPeers($: EngineInterface, withIds: boolean) {
   return peers
     .map(
       p =>
-        `- ${p.name}${p.remote ? '@' + p.host : ''}${withIds ? ` (id ${p.id})` : ''}${spaceTag(p)} — ${p.busy ? 'busy' : 'idle'}${p.muted ? ', muted' : ''}\n  dir: ${p.cwd}${p.branch ? ` [${p.branch}]` : ''}\n  summary: ${p.summary || '(none)'}`,
+        `- ${p.name}${p.remote ? '@' + p.host : ''}${withIds ? ` (id ${p.id})` : ''}${spaceTag(p)} — ${p.busy ? 'busy' : 'idle'}${p.muted ? ', muted' : ''}\n  dir: ${p.cwd}${p.branch ? ` [${p.branch}]` : ''}${p.role ? `\n  role: ${oneLine(p.role, 400)}` : ''}\n  summary: ${p.summary || '(none)'}`,
     )
     .join('\n')
 }
@@ -663,6 +672,8 @@ function spaceTag(p: any) {
 function hierarchyGuidance() {
   if (!cfg) return ''
   const lines: string[] = []
+  // Your user's brief for this agent, from its folder's .peerlink; other agents see it too.
+  if (cfg.role) lines.push(`Your role here, as your user set it in this folder's .peerlink (other agents see it too): ${cfg.role}`)
   const chans = (cfg.discord ?? []).filter(c => c.channel_id !== 'dm')
   const dm = (cfg.discord ?? []).some(c => c.channel_id === 'dm')
   if (chans.length || dm) {

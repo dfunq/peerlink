@@ -16,6 +16,12 @@ Agents treat each other as teammates. Each one knows who else is live and what t
 ## How agents know about each other
 
 - **Names.** An agent is named after its folder, such as `web` or `billing-api`. A suffix is added only when two live agents share a folder name. You can rename an agent with `/peerlink-agent name <name>`.
+- **Roles.** Put `role:` lines in the `.peerlink` of an agent's own folder to say what it's there for. You can also set it in the agent's panel in the web UI. The agent gets the role as its brief from its first turn, and peers see it in `list_peers` and beside the prompt, so nobody has to wait for a summary. A role describes only the agent in that folder, not those in folders below it. A `.peerlink` with only a role doesn't change the agent's space.
+
+  ```
+  # ~/Repos/acme/auth/.peerlink
+  role: Owns auth: sessions, token rotation, SSO. Ask it before touching the session table.
+  ```
 - **Summaries.** Each agent has a one-line summary that peers can read.
   - When a new agent starts, it builds a first summary from what's already known about its folder, with no model call:
     - what the last agent in this folder was doing, which the daemon remembers for 14 days
@@ -89,7 +95,7 @@ A message asks for something, and a reply is optional. A task is a piece of work
 - **Handing one out:** `send_message` with `kind: "task"`, or a Discord post that starts with `Task:` (a trusted bot's too). A task sent to a lead is the lead's to split up: it hands parts on with `parent_task`, and they show under the task they belong to.
 - **Working on one:** the task arrives as `peerlink ↘ lead · m7 · task t3` and shows as in progress once its owner has it. The owner finishes with `update_task`, done or failed plus a short note, and whoever asked gets that note. On Discord it's a reply under your post, with a ✅ or ❌ reaction. Any failed task is also posted to Discord.
 - **Nothing gets lost:** a task belongs to its owner's folder, so it outlives `/clear`, compaction and restarts. Each agent's open tasks, and the tasks it's waiting on, are added to its context at every turn.
-- **In the web UI:** the **Tasks** page is a board with Open, In progress, Done and Failed columns. Cancelled is a collapsed column. Each card shows the title, owner, requester and age, and a parent task shows how many of its subtasks are done. Filter by owner, requester or space, and split the board into rows by space or owner. **List** switches to the list view, and each browser remembers your choice.
+- **In the web UI:** **+ New task** sends a task from you to an agent, or to a space's lead. The **Tasks** page is a board with Open, In progress, Done and Failed columns. Cancelled is a collapsed column. Each card shows the title, owner, requester and age, and a parent task shows how many of its subtasks are done. Filter by owner, requester or space, and split the board into rows by space or owner. **List** switches to the list view, and each browser remembers your choice.
   - Drag a card to Cancelled to cancel it, from Done, Failed or Cancelled to Open to reopen it, or onto an agent named above the board to hand it over. Only the owner moves a task to in progress, done or failed, so those columns never take a drop. If the owner changed the task after the board was drawn, the move is refused and nothing changes. Click a card for its note and the same buttons the list has.
   - Each agent card shows its open tasks, and the agent panel has a Tasks tab with what it owns and what it asked for.
 
@@ -97,7 +103,7 @@ Tasks are saved in `~/.peerlink/tasks.json`.
 
 ## Your Inbox
 
-Some things only you can do: a login, an approval, a decision. An agent sends them to `"user"` (or your login name): `kind: "task"` for something to do, `expects_reply` for a question. A task to `"discord"` is yours too. Everything waiting on you is collected on the **Inbox** page of the web UI, longest waiting first, and the menu counts the items:
+Some things only you can do: a login, an approval, a decision. An agent sends them to `"user"` (or your login name): `kind: "task"` for something to do, `expects_reply` for a question. A task to `"discord"` is yours too. Everything waiting on you is collected on the **Inbox** page of the web UI, longest waiting first. The menu and the browser tab count the items, and **Desktop alerts** notifies you of new ones while the page is in the background:
 
 - **Tasks for you:** each has Done and Couldn't do it, with an optional note. The agent that asked gets the note.
 - **Questions agents are waiting on:** answer in the box, or dismiss. A question you answer on Discord leaves the Inbox by itself.
@@ -147,7 +153,10 @@ It's standard-library Python like the rest of the daemon, with no `py-cord` to i
 - **At the bottom of the screen**, on its own row under Claude Code's hint row: `⇄ peerlink · <this agent> · <space> (in <parent>) · N peers · <version>`. Click it to open the web UI, signed in. It's a button rather than a link, so it works in terminals without hyperlink support. The desktop app shows it as the plugin's status instead.
 - **On each agent's card**, how full its context window is, highlighted from 80%. The peer list mentions it too when an agent is that full, since it may compact before it answers.
 - **Sessions in the same folder** show as one card, "+2 more sessions here". Its panel lists the others.
-- **Messages** can be filtered by space and by agent.
+- **Each agent** shows how long it has been idle or working, like "idle 12m". Search finds agents by name, folder, branch or summary.
+- **Messages** can be filtered by space and by agent, and searched.
+- **From an agent's panel** you can message it, or send it a task, as yourself. Its reply shows in Messages. Only your browser can send as you: an agent holding the key is refused.
+- **The page updates live:** the daemon streams changes to it within a second, and polls if the stream drops.
 
 ## How messages find their agent
 
