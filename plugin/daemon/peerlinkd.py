@@ -28,7 +28,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.2"
+VERSION = "0.8.3"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -98,6 +98,9 @@ and to the point, and skip acknowledgements, thanks and sign-offs.
 - To hand a peer a piece of work, send_message with kind "task". A task \
 that comes to you ("task t3") is yours until you call update_task with \
 done or failed and a short note; the note goes to whoever asked.
+- To tell your whole space something everyone needs (a shared API change, \
+a freeze), send_message with kind "announcement" and to "space". Nobody \
+replies, so keep them rare.
 - When you need your user to do something only they can (a login, an \
 approval, a decision), send_message to "user": kind "task" for something to \
 do, expects_reply for a question. It waits in their Inbox, and on Discord \
@@ -115,6 +118,7 @@ DEFAULT_CONFIG = {
     "inject_while_busy": True,
     "max_hops": 6,
     "rate_limit_per_min": 12,
+    "announce_per_hour": 6,  # announcements each agent may send: each one reaches a whole space
     "max_message_chars": 8000,
     "guidance": "",
     "issue_agent": "peerlink",
@@ -139,6 +143,7 @@ next_msg = [1]
 tasks = {}      # id -> task, see new_task()
 feedback = {}   # id -> a bug report or idea about peerlink, see report_issue()
 next_task = [1]
+announce_times = {}  # agent id -> when it last announced, for announce_per_hour
 config = {}
 key = [""]
 dir_summaries = {}  # cwd -> {summary, name, ts}: what the last agent there was doing
@@ -669,10 +674,69 @@ def routes_for(cwd):
     for r in discord.get("routes", []):
         if r.get("master") == cwd or cwd in (r.get("members") or []):
             out.append({"channel_id": r["channel_id"], "channel": discord_channel_label(r["channel_id"]),
-                        "master": r.get("master") == cwd})
+                        "master": r.get("master") == cwd, "kinds": r.get("kinds") or []})
     if discord.get("dm") == cwd:
         out.append({"channel_id": "dm", "channel": "direct messages", "master": True})
     return out
+
+
+KINDS = ("message", "task", "announcement")
+
+
+def carries(route, kind):
+    """A channel with no kinds set carries everything; one set to some kinds carries only those."""
+    return not route.get("kinds") or kind in route["kinds"]
+
+
+def kind_channels(kind, cwds=(), space=""):
+    """Channels set aside for one kind (#tasks, #announcements) that follow these folders, or this space."""
+    out = []
+    for r in discord.get("routes", []):
+        if kind not in (r.get("kinds") or []):
+            continue
+        folders = {r.get("master")} | set(r.get("members") or [])
+        if folders & set(c for c in cwds if c) or (space and r.get("master") and space_of({"id": "", "cwd": r["master"]})[0] == space):
+            out.append(r["channel_id"])
+    return out
+
+
+def post_async(posts):
+    """[(channel, text, reply_to)] posted off the request thread: Discord's latency is none of the caller's business."""
+    if not posts or not discord.get("token") or not discord_bot[0]:
+        return
+    def run():
+        for channel, text, ref in posts:
+            try:
+                discordlink.post(discord["token"], channel, text, ref)
+            except discordlink.DiscordError as err:
+                log("discord", "post failed:", err)
+    threading.Thread(target=run, daemon=True).start()
+
+
+def announce(sender_rec, space, text, hops=0, from_discord=None):
+    """One message to every live agent in a space, read at the start of each one's next turn; nobody replies."""
+    with lock:
+        now = time.time()
+        recipients = [r for r in sessions.values() if is_live(r, now) and r["id"] != (sender_rec or {}).get("id") and space in reach(r)]
+        if from_discord:
+            sender = {"from": f"discord:{from_discord['channel_id']}", "from_name": f"{from_discord['author']} on Discord", "from_host": "discord",
+                      "from_cwd": "", "from_space": "discord", "discord": {"channel_id": from_discord["channel_id"], "message_id": from_discord["message_id"]}}
+        else:
+            sender = {"from": sender_rec["id"], "from_name": display_name(sender_rec), "from_host": HOSTNAME,
+                      "from_cwd": sender_rec.get("cwd", ""), "from_space": space_of(sender_rec)[0]}
+        msg = {"id": f"m{next_msg[0]}", "ts": now, **sender, "to": f"space:{space}", "to_name": f"everyone in {space}",
+               "to_cwd": "", "to_space": space, "text": text[:20000], "expects_reply": False, "reply_to": None,
+               "hops": hops, "status": "queued" if recipients else "delivered", "v": 2, "kind": "announcement",
+               "recipients": [display_name(r) for r in recipients]}
+        next_msg[0] += 1
+        for r in recipients:
+            inboxes.setdefault(r["id"], []).append(msg)
+        record(msg)
+    log("announce", msg["id"], msg["from_name"], "->", space, len(recipients))
+    if not from_discord:
+        post_async([(c, f"📣 **{msg['from_name']}** to everyone in {space}: {text}", None)
+                    for c in kind_channels("announcement", [msg["from_cwd"]], space)])
+    return msg
 
 
 def save_discord_files(d):
@@ -750,7 +814,20 @@ def on_discord(d):
     text += save_discord_files(d)
     if not text.strip():
         return
-    kind = "task" if re.match(r"\s*task\s*:", text, re.I) else "message"
+    # A "Task:" or "Announcement:" prefix says what it is; a channel set to one kind makes everything that kind.
+    kinds = route.get("kinds") or []
+    prefix = re.match(r"\s*(task|announcement|announce)\s*:\s*", text, re.I)
+    kind = ("announcement" if prefix.group(1).lower().startswith("announce") else "task") if prefix else ""
+    if kind and not carries(route, kind):
+        kind = ""
+    if not kind:
+        kind = "message" if carries(route, "message") else "task" if "task" in kinds else "announcement"
+    if kind == "announcement":
+        space = space_of({"id": "", "cwd": cwd})[0]
+        msg = announce(None, space, text[prefix.end():] if prefix else text, from_discord=d)
+        n = len(msg["recipients"])
+        discordlink.post(discord["token"], d["channel_id"], f"Announced to {n} agent{'' if n == 1 else 's'} in {space}." if n else f"No agent in {space} is running; nobody heard it.", d["message_id"])
+        return
     with lock:
         msg = {
             "id": f"m{next_msg[0]}", "ts": time.time(),
@@ -908,12 +985,12 @@ def send_discord(sender_rec, to, text, parent, hops, options=None, files=None, e
     word = to.strip().lower()
     if not (word == "discord" or word.startswith("discord#")):
         return None
-    mine = [r for r in routes_for(sender_rec.get("cwd", "")) if r["channel_id"] != "dm"]
+    mine = [r for r in routes_for(sender_rec.get("cwd", "")) if r["channel_id"] != "dm" and carries(r, "message")]
     if word.startswith("discord#"):
         want = "#" + word.split("#", 1)[1].lstrip("#")
         mine = [r for r in mine if r["channel"].lower() == want]
     if not mine:
-        return 404, {"error": "this agent isn't mapped to that Discord channel; the mapping is in the web UI, under Channels"}
+        return 404, {"error": "this agent isn't mapped to a Discord channel that carries messages; the mapping is in the web UI, under Channels"}
     if len(mine) > 1:
         return 409, {"error": "this agent is in several Discord channels: say which, e.g. " + ", ".join(f"discord{r['channel']}" for r in mine)}
     return post_to_discord(sender_rec, mine[0]["channel_id"], text, None, None, hops, options, files, expects_reply)
@@ -921,7 +998,7 @@ def send_discord(sender_rec, to, text, parent, hops, options=None, files=None, e
 
 def user_send(sender_rec, word, text, kind, parent_task, expects_reply, hops, options, files):
     """A message or task for you: it waits in your Inbox, and is posted to Discord when the agent has a channel there."""
-    chans = [r for r in routes_for(sender_rec.get("cwd", "")) if r["channel_id"] != "dm"] if discord.get("token") and discord_bot[0] else []
+    chans = [r for r in routes_for(sender_rec.get("cwd", "")) if r["channel_id"] != "dm" and carries(r, kind)] if discord.get("token") and discord_bot[0] else []
     if word.startswith("discord#"):
         chans = [r for r in chans if r["channel"].lower() == "#" + word.split("#", 1)[1].lstrip("#")]
     if word.startswith("discord") and not chans:
@@ -1125,8 +1202,8 @@ def send(body):
     if not text or not (to or body.get("reply_to")):
         return 400, {"error": "text, and to or reply_to, are required"}
     kind = body.get("kind") or "message"
-    if kind not in ("message", "task"):
-        return 400, {"error": "kind is message or task"}
+    if kind not in KINDS:
+        return 400, {"error": "kind is message, task or announcement"}
     parent_task = body.get("parent_task") or ""
     if parent_task and parent_task not in tasks:
         return 400, {"error": f"no task {parent_task}"}
@@ -1154,6 +1231,21 @@ def send(body):
 
     options = [str(o) for o in body.get("options") or []][:25]
     files = [str(f) for f in body.get("files") or []][:10]
+    if kind == "announcement":
+        if not sender_rec:
+            return 400, {"error": "announcements come from agents on this machine"}
+        word = to.strip().lower()
+        space = space_of(sender_rec)[0] if word in ("space", "everyone", "all", "") else clean_space(word.split(":", 1)[1] if word.startswith("space:") else word)
+        if space not in reach(sender_rec):
+            return 403, {"error": f"you can announce to {' or '.join(sorted(reach(sender_rec)))}, not {space}"}
+        with lock:
+            sent = [t for t in announce_times.get(sender, []) if now - t < 3600]
+            if len(sent) >= int(config.get("announce_per_hour") or 6):
+                return 429, {"error": f"you've sent {len(sent)} announcements this hour; the limit is {config.get('announce_per_hour')}. Message the agents who need it instead"}
+            announce_times[sender] = sent + [now]
+        msg = announce(sender_rec, space, text, hops)
+        n = len(msg["recipients"])
+        return 200, {"id": msg["id"], "to": f"everyone in {space} ({n} agent{'' if n == 1 else 's'})", "status": "queued"}
     # A reply to something you sent from the web UI comes back to you.
     if parent and parent.get("from") == "user":
         to = "user"
@@ -1229,6 +1321,8 @@ def send(body):
         next_msg[0] += 1
         if kind == "task":
             new_task(msg, {"id": sender, "name": msg["from_name"], "cwd": msg["from_cwd"]}, parent_task)
+            post_async([(c, f"📋 **{msg['from_name']}** → **{msg['to_name']}**, task {msg['task']}: {tasks[msg['task']]['title']}", None)
+                        for c in kind_channels("task", [msg["from_cwd"], msg["to_cwd"]])])
         inboxes.setdefault(target["id"], []).append(msg)
         if sender in sent_times:
             sent_times[sender].append(now)
@@ -1622,9 +1716,14 @@ def task_closed(t, web=False):
         elif req.get("cwd"):
             task_message(t, req["cwd"], line if owner else f"{t['owner']}: {line}", sender=owner, reply_to=t["msg"])
         if t["status"] == "failed" and not d and not t.get("user"):
-            chans = [r for r in routes_for(t["owner_cwd"]) + routes_for(req.get("cwd", "")) if r["channel_id"] != "dm"]
+            chans = [r for r in routes_for(t["owner_cwd"]) + routes_for(req.get("cwd", "")) if r["channel_id"] != "dm" and carries(r, "task")]
             if chans:
                 posts.append((chans[0]["channel_id"], f"**{t['owner']}**: {line} (asked by {req.get('name') or 'an agent'})", None))
+        # A #tasks channel follows every task of the folders in it, besides the posts above.
+        already = {c for c, _, _ in posts} | ({d["channel_id"]} if d else set())
+        for c in kind_channels("task", [t["owner_cwd"], req.get("cwd", "")]):
+            if c not in already:
+                posts.append((c, f"**{t['owner']}**: {line} (asked by {req.get('name') or 'an agent'})", None))
     if posts and discord.get("token") and discord_bot[0]:
         def post_all():
             for channel, text, ref in posts:
@@ -1687,7 +1786,9 @@ class Handler(BaseHTTPRequestHandler):
                 discord["enabled"] = bool(b["enabled"])
             if "routes" in b:
                 discord["routes"] = [{"channel_id": str(r["channel_id"]), "master": r.get("master", ""),
-                                      "members": [m for m in r.get("members", []) if m and m != r.get("master")]}
+                                      "members": [m for m in r.get("members", []) if m and m != r.get("master")],
+                                      # Every kind ticked is the same as none: the channel carries everything.
+                                      "kinds": [k for k in KINDS if k in (r.get("kinds") or [])] if set(r.get("kinds") or []) < set(KINDS) else []}
                                      for r in b["routes"] if r.get("channel_id")]
             if "dm" in b:
                 discord["dm"] = b["dm"] or ""
@@ -2356,6 +2457,7 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)
 .step.done .step-n{background:var(--ok);border-color:var(--ok);color:#fff}.step-body{flex:1;min-width:0}.step-t{font-weight:600;margin-bottom:4px}
 .step .meta{color:var(--mut);font-size:13px;margin:4px 0 8px}.addline{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.addline .grow{flex:1;min-width:200px}
 .dmap{width:100%;border-collapse:collapse;margin-top:6px}.dmap td,.dmap th{padding:6px 6px;border-bottom:1px solid var(--line);vertical-align:top;text-align:left}
+.kinds{display:flex;flex-direction:column;gap:2px}.kinds label{display:flex;gap:6px;align-items:center;white-space:nowrap;margin:0;line-height:1.35}.kinds input{margin:0}
 .dmap th{font-size:12px;color:var(--mut);font-weight:500}.dmap select{width:100%}.chips{display:flex;flex-wrap:wrap;gap:4px;align-items:center}
 .chip{display:inline-flex;gap:4px;align-items:center;font-size:12px;border:1px solid var(--line);border-radius:999px;padding:1px 4px 1px 8px}
 .chip button{padding:0 5px;font-size:12px;line-height:1.4;background:transparent;color:var(--mut);border:0}
@@ -2587,7 +2689,7 @@ function renderMessages(list){
   for(const x of shown)if(x.reply_to&&byId[x.reply_to])(kids[x.reply_to]??=[]).push(x);
   const card=(x,inthread)=>{const st=x.status==='delivered'?'':`<span class="chip ${esc(x.status)}">${esc(x.status)}</span>`;
     return `<div class="msg${inthread?' inthread':''}" data-msg="${esc(x.id)}"><div class="mh"><b>${esc(x.from_name)}</b><span class="mut">→</span><b>${esc(x.to_name)}</b>
-      ${x.task?`<span class="chip reply">task ${esc(x.task)}</span>`:x.expects_reply?'<span class="chip">reply expected</span>':''}${x.reply_to?`<span class="chip reply">re ${esc(x.reply_to)}</span>`:''}${st}
+      ${x.kind==='announcement'?`<span class="chip reply">announcement · ${(x.recipients||[]).length} agents</span>`:''}${x.task?`<span class="chip reply">task ${esc(x.task)}</span>`:x.expects_reply?'<span class="chip">reply expected</span>':''}${x.reply_to?`<span class="chip reply">re ${esc(x.reply_to)}</span>`:''}${st}
       <span class="when">${new Date(x.ts*1000).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})} · ${esc(x.id)}</span></div>
       <div class="mt">${esc(x.text)}</div></div>`};
   const thread=(x,depth)=>card(x,depth>0)+(kids[x.id]||[]).sort((a,b)=>a.ts-b.ts).map(k=>thread(k,depth+1)).join('');
@@ -2715,6 +2817,7 @@ document.addEventListener('change',async e=>{const t=e.target;
   if(t.dataset.fnote!==undefined){const r=await post('/api/issues/'+encodeURIComponent(t.closest('[data-fb]').dataset.fb),{note:t.value});if(r.error)alert(r.error);t.blur();refresh(true)}});
 // Tasks: one row each, its subtasks under it. The Tasks page and an agent's Tasks tab share the row.
 let allTasks=[],panelTab='about';
+const DKINDS=[['message','Messages'],['task','Tasks'],['announcement','Announcements']];
 const TSTATE={open:'open',in_progress:'in progress',done:'done',failed:'failed',cancelled:'cancelled'};
 const isLive=t=>t.status==='open'||t.status==='in_progress';
 const ago=ts=>{const d=Date.now()/1000-ts;return d<90?Math.round(d)+'s':d<5400?Math.round(d/60)+'m':d<129600?Math.round(d/3600)+'h':Math.round(d/86400)+'d'};
@@ -2803,9 +2906,11 @@ function renderDiscord(){if(!dState)return;const d=dState,invited=(dGuilds||[]).
     <td>${agentSelect(r.master,`data-droute="${i}" data-dfield="master"`,'Pick its master…')}</td>
     <td><div class="chips">${(r.members||[]).map((m,j)=>`<span class="chip">${esc(folderLabel(m))}<button title="Remove" data-dunmember="${i}:${j}">✕</button></span>`).join('')}
       ${agentSelect('',`data-daddmember="${i}"`,'+ add member')}</div></td>
+    <td><div class="kinds">${DKINDS.map(([k,l])=>`<label class="small"><input type="checkbox" data-dkind="${i}:${k}" ${!(r.kinds||[]).length||r.kinds.includes(k)?'checked':''}> ${l}</label>`).join('')}</div></td>
     <td style="white-space:nowrap"><button class="ghost small" data-dtest="${esc(r.channel_id)}" ${r.channel_id&&d.state==='online'?'':'disabled'}>Send a test</button> <button class="ghost small" data-dremove="${i}" title="Remove this channel">✕</button></td></tr>`).join('');
   $('#dstep3b').innerHTML=`<p class="meta">Give each channel a master, which gets your messages. Members can post in the channel too, and you reach one by starting with its name and a colon (<span class="mono">storefront: how's the build?</span>). One agent can be in several channels. Agents are kept by folder, so a mapping survives restarts and <span class="mono">/clear</span>.</p>
-    <table class="dmap"><thead><tr><th>Channel</th><th>Master</th><th>Members</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="4" class="mut small">No channels mapped yet.</td></tr>'}</tbody></table>
+    <table class="dmap"><thead><tr><th>Channel</th><th>Master</th><th>Members</th><th>Carries</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="mut small">No channels mapped yet.</td></tr>'}</tbody></table>
+    <p class="small mut" style="margin-top:6px">A channel can carry only some kinds. One set to tasks alone, a #tasks, turns everything you post there into a task for its master, and shows every task its agents hand out or finish. One set to announcements alone posts what agents announce to the master's space, and what you post there is announced to that space. Elsewhere, start a post with <span class="mono">Task:</span> or <span class="mono">Announcement:</span>.</p>
     <div class="addline" style="margin-top:8px"><button class="ghost" data-dact="addroute">+ Map a channel</button><button class="ghost" data-dact="refresh" title="Look for new servers and channels">↻ Refresh channels</button></div>
     <div class="addline" style="margin-top:12px"><label class="small mut">Direct messages to the bot go to</label>${agentSelect(dDraft.dm,'data-ddm','Nobody (ignored)')}</div>
     <div class="addline" style="margin-top:12px"><button data-dact="save">Save mapping</button><span class="small" id="dsaved"></span></div>`;
@@ -2833,6 +2938,10 @@ document.addEventListener('change',e=>{const t=e.target;if(!dDraft)return;
   if(t.dataset.droute!==undefined){dDraft.routes[+t.dataset.droute][t.dataset.dfield]=t.value;renderDiscord()}
   if(t.dataset.daddmember!==undefined&&t.value){const r=dDraft.routes[+t.dataset.daddmember];r.members=r.members||[];if(t.value!==r.master&&!r.members.includes(t.value))r.members.push(t.value);renderDiscord()}
   if(t.dataset.ddm!==undefined){dDraft.dm=t.value}
+  if(t.dataset.dkind){const [i,k]=t.dataset.dkind.split(':');const r=dDraft.routes[+i];
+    let ks=(r.kinds&&r.kinds.length?r.kinds:DKINDS.map(x=>x[0])).filter(x=>x!==k);if(t.checked)ks.push(k);
+    // A channel carries something: unticking the last kind leaves it ticked.
+    r.kinds=ks.length?DKINDS.map(x=>x[0]).filter(x=>ks.includes(x)):r.kinds;renderDiscord()}
   if(t.dataset.dopt){const v=t.type==='checkbox'?t.checked:Number(t.value);api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({[t.dataset.dopt]:v})}).then(()=>loadDiscord())}
   if(t.dataset.dbots!==undefined)api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({trusted_bots:t.value})}).then(()=>loadDiscord());
   if(t.dataset.dact==='enabled')api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({enabled:t.checked})}).then(()=>loadDiscord())});
