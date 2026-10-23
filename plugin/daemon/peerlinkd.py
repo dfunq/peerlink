@@ -17,6 +17,7 @@ import re
 import hmac
 import json
 import secrets
+import shutil
 import subprocess
 import os
 import signal
@@ -28,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.3"
+VERSION = "0.8.4"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -47,6 +48,8 @@ LOG_PATH = os.path.join(HOME, "daemon.log")
 MESSAGES_PATH = os.path.join(HOME, "messages.jsonl")
 ISSUES_PATH = os.path.join(HOME, "issues.jsonl")
 TASKS_PATH = os.path.join(HOME, "tasks.json")
+SPAWNS_PATH = os.path.join(HOME, "spawns.json")
+TERMINATIONS_PATH = os.path.join(HOME, "terminations.jsonl")
 DISCORD_PATH = os.path.join(HOME, "discord.json")  # the bot token and the channel mapping, 0600
 # Reports an agent wrote while the daemon was down; the daemon files them when it starts.
 PENDING_ISSUES_DIR = os.path.join(HOME, "issues-pending")
@@ -101,6 +104,8 @@ done or failed and a short note; the note goes to whoever asked.
 - To tell your whole space something everyone needs (a shared API change, \
 a freeze), send_message with kind "announcement" and to "space". Nobody \
 replies, so keep them rare.
+- When work belongs in a folder no agent is running in, request_spawn asks \
+your user to start one there; nothing starts without their approval.
 - When you need your user to do something only they can (a login, an \
 approval, a decision), send_message to "user": kind "task" for something to \
 do, expects_reply for a question. It waits in their Inbox, and on Discord \
@@ -144,6 +149,8 @@ tasks = {}      # id -> task, see new_task()
 feedback = {}   # id -> a bug report or idea about peerlink, see report_issue()
 next_task = [1]
 announce_times = {}  # agent id -> when it last announced, for announce_per_hour
+spawns = {}          # id -> a request to start an agent, see request_spawn()
+spawn_spaces = {}    # folder -> the space an approved agent joins when it registers there
 config = {}
 key = [""]
 dir_summaries = {}  # cwd -> {summary, name, ts}: what the last agent there was doing
@@ -511,6 +518,7 @@ def public_peer(rec):
         "context": rec.get("context"),  # percent of the context window in use, when the agent reports it
         "stale": rec.get("plugin", "") != VERSION,
         "muted": session_cfg(rec["id"])["muted"],
+        "terminating": bool(rec.get("terminate")),
         "last_seen_s": round(time.time() - rec["last_seen"], 1),
     }
 
@@ -946,6 +954,19 @@ def on_press(press):
     and the buttons are disabled with yours highlighted, so it reads as answered."""
     if press["custom_id"].startswith("pt:"):
         return on_task_press(press)
+    if press["custom_id"].startswith("ps:"):
+        return on_spawn_press(press)
+    if press["custom_id"].startswith("pk:"):
+        _, sid, idx = (press["custom_id"].split(":") + ["", ""])[:3]
+        code, out = terminate(sid, f"Discord ({press['author']})") if idx == "0" else (200, {"kept": True})
+        rows = (press["message"] or {}).get("components") or []
+        for row in rows:
+            for b in row.get("components", []):
+                b["disabled"], b["style"] = True, 3 if b.get("custom_id") == press["custom_id"] else 2
+        discordlink.answer_interaction(press["id"], press["token"], 7, {"components": rows})
+        if code != 200:
+            discordlink.post(discord["token"], press["channel_id"], out.get("error", "Couldn't end it."))
+        return
     _, mid, idx = (press["custom_id"].split(":") + ["", ""])[:3]
     asked = next((m for m in messages if m["id"] == mid), None)
     options = (asked or {}).get("options") or []
@@ -1057,7 +1078,10 @@ def inbox_items():
             out.append({"kind": "question", "id": m["id"], "who": m["from_name"], "since": m["ts"], "title": task_title_of(m["text"])[:120], "text": m["text"]})
         out += [{"kind": "feedback", "id": f["id"], "who": f.get("from_name") or "an agent", "since": f["ts"], "title": task_title_of(f["text"])[:120],
                  "text": f["text"], "type": f.get("type", "bug")} for f in feedback.values() if f.get("status") == "new"]
-    order = {"task": 0, "question": 1, "feedback": 2}
+        out += [{"kind": "approval", "id": x["id"], "who": x["requester"].get("name", ""), "since": x["created"],
+                 "title": f"Start an agent in {tilde_path(x['dir'])}", "text": f"{x['purpose']}\n\nSpace: {x['space']}\nFirst prompt: {x['prompt']}"}
+                for x in spawns.values() if x["status"] == "pending"]
+    order = {"approval": 0, "task": 1, "question": 2, "feedback": 3}
     return sorted(out, key=lambda x: (order[x["kind"]], x["since"]))
 
 
@@ -1074,6 +1098,10 @@ def inbox_act(body, discord_from=None):
         if code == 200:
             close_task_buttons(t)
         return code, out
+    if kind == "approval":
+        if action not in ("approve", "deny"):
+            return 400, {"error": "a request to start an agent is approved or denied"}
+        return decide_spawn(iid, action == "approve", "Discord" if discord_from else "the web UI")
     if kind == "feedback":
         if action not in ("accepted", "dismissed"):
             return 400, {"error": "feedback is accepted or dismissed"}
@@ -1101,7 +1129,7 @@ def inbox_act(body, discord_from=None):
             next_msg[0] += 1
             agent = queue_for_folder(m.get("from_cwd", ""), msg)
         return 200, {"id": msg["id"], "to": msg["to_name"], "waiting": not agent}
-    return 400, {"error": "kind is task, question or feedback"}
+    return 400, {"error": "kind is approval, task, question or feedback"}
 
 
 def close_task_buttons(t):
@@ -1136,7 +1164,7 @@ def on_task_press(press):
 
 inbox_lists = {}  # Discord channel -> (when, [(kind, id)]): what "1 done" refers to after "/inbox"
 INBOX_VERBS = {"done": ("task", "done"), "failed": ("task", "failed"), "fail": ("task", "failed"), "accept": ("feedback", "accepted"),
-               "dismiss": (None, "dismiss")}
+               "dismiss": (None, "dismiss"), "approve": ("approval", "approve"), "deny": ("approval", "deny")}
 
 
 def inbox_command(d):
@@ -1154,16 +1182,27 @@ def inbox_command(d):
             say(f"Task {task['id']} marked {action}; {task['requester'].get('name') or 'the agent'} has been told.")
             return True
         return False
+    kill = re.match(r"^/?kill\s+@?(\S+)\s*$", text, re.I)
+    if kill:
+        name = kill.group(1).lower()
+        with lock:
+            agent = next((r for r in sessions.values() if is_live(r) and display_name(r).lower() == name), None)
+        if not agent:
+            say(f"No running agent is called {kill.group(1)}.")
+            return True
+        discordlink.post(discord["token"], channel, f"End **{display_name(agent)}** ({tilde_path(agent.get('cwd', ''))})? It finishes its current turn first.",
+                         d["message_id"], discordlink.buttons(["End it", "Keep it"], f"pk:{agent['id']}"))
+        return True
     if text.lower() in ("/inbox", "inbox"):
         items = inbox_items()
         inbox_lists[channel] = (time.time(), [(i["kind"], i["id"]) for i in items])
         if not items:
             say("Your Inbox is empty.")
             return True
-        icon = {"task": "☑️", "question": "❓", "feedback": "💡"}
+        icon = {"approval": "🚀", "task": "☑️", "question": "❓", "feedback": "💡"}
         lines = [f"**Inbox** ({len(items)})"] + [
             f"{n}. {icon[i['kind']]} {i['id']} · {i['who']} · {ago_text(time.time() - i['since'])}: {i['title']}" for n, i in enumerate(items[:20], 1)]
-        lines.append('Answer with the number: "1 done", "1 failed: why", "2 <your answer>", "3 accept" or "3 dismiss".')
+        lines.append('Answer with the number: "1 approve" or "1 deny", "2 done" or "2 failed: why", "3 <your answer>", "4 accept" or "4 dismiss".')
         say("\n".join(lines))
         return True
     listed = inbox_lists.get(channel)
@@ -1181,11 +1220,13 @@ def inbox_command(d):
         action = want[1] if want[1] != "dismiss" else ("dismissed" if kind == "feedback" else "dismiss")
         if kind == "task" and action == "dismiss":
             action = "failed"
+        if kind == "approval" and action == "dismiss":
+            action = "deny"
         code, out = inbox_act({"kind": kind, "id": iid, "action": action, "text": note.strip()})
     elif kind == "question":
         code, out = inbox_act({"kind": kind, "id": iid, "action": "reply", "text": rest}, discord_from=d)
     else:
-        say(f'{iid} is a {kind}: answer {"done or failed" if kind == "task" else "accept or dismiss"}.')
+        say(f'{iid} is a {kind}: answer {"done or failed" if kind == "task" else "approve or deny" if kind == "approval" else "accept or dismiss"}.')
         return True
     say(f"{iid}: {out.get('error')}" if code != 200 else f"{iid}: {action if want else 'answer sent'}.")
     return True
@@ -1734,6 +1775,215 @@ def task_closed(t, web=False):
         threading.Thread(target=post_all, daemon=True).start()
 
 
+# Starting an agent: an agent asks, you approve (web UI or Discord, never an agent or a bot), and only then
+# does the daemon start Claude Code in that folder, in tmux when it's there, else a Terminal window.
+SPAWN_TTL_S = 24 * 3600
+
+
+def load_spawns():
+    try:
+        with open(SPAWNS_PATH) as f:
+            for x in json.load(f):
+                spawns[x["id"]] = x
+    except (OSError, ValueError, KeyError):
+        pass
+
+
+def save_spawns():
+    with open(SPAWNS_PATH + ".tmp", "w") as f:
+        json.dump(list(spawns.values()), f, indent=1)
+    os.replace(SPAWNS_PATH + ".tmp", SPAWNS_PATH)
+
+
+def spawn_told(sp, text):
+    """Tell the agent that asked how its request went. Called with the lock held."""
+    req = sp["requester"]
+    if req.get("cwd"):
+        task_message({"id": sp["id"]}, req["cwd"], text)
+
+
+def request_spawn(body):
+    by = sessions.get(body.get("by") or "")
+    if by is None:
+        return 403, {"error": "unknown agent; register again"}
+    folder = os.path.abspath(os.path.expanduser(str(body.get("dir") or "")))
+    purpose, prompt = str(body.get("purpose") or "").strip(), str(body.get("first_prompt") or "").strip()
+    if not os.path.isdir(folder):
+        return 400, {"error": f"{folder} isn't a folder on this machine; it has to exist already"}
+    if not purpose or not prompt:
+        return 400, {"error": "purpose and first_prompt are both required"}
+    with lock:
+        if any(x["dir"] == folder and x["status"] == "pending" for x in spawns.values()):
+            return 409, {"error": f"a request to start an agent in {folder} is already waiting for your user"}
+        running = successor(folder)
+        n = max([int(i[1:]) for i in spawns] or [0]) + 1
+        sp = {"id": f"s{n}", "dir": folder, "purpose": purpose[:1000], "prompt": prompt[:8000],
+              "space": clean_space(body.get("space") or "") or space_of(by)[0],
+              "requester": {"id": by["id"], "name": display_name(by), "cwd": by.get("cwd", "")},
+              "status": "pending", "created": time.time(), "updated": time.time(), "note": ""}
+        spawns[sp["id"]] = sp
+        save_spawns()
+        chans = [r for r in routes_for(by.get("cwd", "")) if r["channel_id"] != "dm" and carries(r, "message")]
+    log("spawn asked", sp["id"], sp["requester"]["name"], folder)
+    if chans and discord.get("token") and discord_bot[0]:
+        try:
+            sent = discordlink.post(discord["token"], chans[0]["channel_id"],
+                                    f"**{sp['requester']['name']}** asks to start an agent in `{tilde_path(folder)}` (space {sp['space']}): {purpose}\nIts first prompt: {prompt[:600]}",
+                                    None, discordlink.buttons(["Approve", "Deny"], f"ps:{sp['id']}"))
+            with lock:
+                sp["discord_out"] = {"channel_id": chans[0]["channel_id"], "message_id": str((sent[-1] or {}).get("id", "")) if sent else ""}
+                save_spawns()
+        except discordlink.DiscordError as err:
+            log("discord", "spawn post failed:", err)
+    note = f" An agent is already running there ({display_name(running)})." if running else ""
+    return 200, {"id": sp["id"], "status": "pending", "note": note}
+
+
+def tilde_path(p):
+    home = os.path.expanduser("~")
+    return "~" + p[len(home):] if p.startswith(home) else p
+
+
+def find_claude():
+    found = os.environ.get("PEERLINK_CLAUDE") or shutil.which("claude")
+    for p in ([found] if found else []) + [os.path.expanduser("~/.local/bin/claude"), os.path.expanduser("~/.claude/local/claude"),
+                                            "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]:
+        if p and os.access(p, os.X_OK):
+            return p
+    return ""
+
+
+def launch(sp):
+    """Start Claude Code in the folder: (how, "") when it started, ("", why not) when it didn't."""
+    claude = find_claude()
+    if not claude:
+        return "", "Claude Code (claude) isn't on this machine's PATH"
+    tmux = shutil.which("tmux") or next((p for p in ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux") if os.access(p, os.X_OK)), "")
+    try:
+        if tmux:
+            name = "peerlink-" + re.sub(r"[^A-Za-z0-9_-]", "-", os.path.basename(sp["dir"]))[:30] + "-" + sp["id"]
+            subprocess.run([tmux, "new-session", "-d", "-s", name, "-c", sp["dir"], claude], check=True, timeout=10, capture_output=True)
+            return f"in tmux (tmux attach -t {name})", ""
+        if sys.platform == "darwin":
+            quote = lambda v: '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
+            script = f'tell application "Terminal" to do script "cd " & quoted form of {quote(sp["dir"])} & " && " & quoted form of {quote(claude)}'
+            subprocess.run(["osascript", "-e", script], check=True, timeout=15, capture_output=True)
+            return "in a new Terminal window", ""
+    except (OSError, subprocess.SubprocessError) as err:
+        return "", f"could not start it: {err}"
+    return "", "starting an agent needs tmux on this machine"
+
+
+def decide_spawn(sid, approve, via):
+    """Your answer to a spawn request. Only the web UI (your browser) and your own Discord presses call this."""
+    with lock:
+        sp = spawns.get(sid)
+        if sp is None:
+            return 404, {"error": f"no request {sid}"}
+        if sp["status"] != "pending":
+            return 409, {"error": f"{sid} is already {sp['status']}"}
+        sp["status"], sp["updated"] = ("approved" if approve else "denied"), time.time()
+        save_spawns()
+    if approve:
+        how, err = launch(sp)
+        with lock:
+            if err:
+                sp["status"], sp["note"] = "failed", err
+                spawn_told(sp, f"Your user approved {sid}, but the agent in {sp['dir']} didn't start: {err}")
+            else:
+                sp["status"], sp["note"] = "started", how
+                spawn_spaces[sp["dir"]] = sp["space"]
+                # The first prompt waits for the new agent's folder, as a message from whoever asked, so replies go back.
+                req = sessions.get(sp["requester"]["id"]) or successor(sp["requester"]["cwd"])
+                msg = {"id": f"m{next_msg[0]}", "ts": time.time(), "from": req["id"] if req else "peerlink",
+                       "from_name": display_name(req) if req else sp["requester"]["name"], "from_host": HOSTNAME,
+                       "from_cwd": sp["requester"]["cwd"], "to_cwd": sp["dir"], "from_space": sp["space"], "to_space": sp["space"],
+                       "text": sp["prompt"], "expects_reply": True, "reply_to": None, "hops": 0, "status": "queued", "v": 2}
+                next_msg[0] += 1
+                queue_for_folder(sp["dir"], msg)
+                spawn_told(sp, f"Your user approved {sid}: an agent is starting in {sp['dir']} {how}, and your first prompt is waiting for it ({msg['id']}).")
+            save_spawns()
+    else:
+        with lock:
+            spawn_told(sp, f"Your user denied {sid}, the agent you asked for in {sp['dir']}.")
+    close_buttons(sp)
+    log("spawn", sid, sp["status"], "via", via, sp["note"])
+    return 200, {"spawn": dict(sp)}
+
+
+def close_buttons(item):
+    """Clear the buttons on a Discord post once its question is settled elsewhere."""
+    out = item.get("discord_out") or {}
+    if not out.get("message_id") or not discord.get("token"):
+        return
+    def edit():
+        try:
+            discordlink.call(discord["token"], "PATCH", f"/channels/{out['channel_id']}/messages/{out['message_id']}", {"components": []})
+        except discordlink.DiscordError as err:
+            log("discord", "could not clear buttons:", err)
+    threading.Thread(target=edit, daemon=True).start()
+
+
+def on_spawn_press(press):
+    _, sid, idx = (press["custom_id"].split(":") + ["", ""])[:3]
+    sp = spawns.get(sid)
+    if not sp or sp["status"] != "pending":
+        discordlink.answer_interaction(press["id"], press["token"], 4, {"content": f"{sid} is already {sp['status'] if sp else 'gone'}.", "flags": 64})
+        return
+    rows = (press["message"] or {}).get("components") or []
+    for row in rows:
+        for b in row.get("components", []):
+            b["disabled"] = True
+            b["style"] = 3 if b.get("custom_id") == press["custom_id"] else 2
+    discordlink.answer_interaction(press["id"], press["token"], 7, {"components": rows})
+    decide_spawn(sid, idx == "0", f"Discord ({press['author']})")
+
+
+# Ending an agent: you ask (web UI, or "/kill <name>" on Discord, confirmed with a button), never an agent.
+# Its plugin ends the session once the turn it's in finishes; a minute later, if it's still there, the daemon
+# ends the process itself.
+def terminate(sid, by):
+    with lock:
+        rec = sessions.get(sid)
+        if rec is None or not is_live(rec):
+            return 404, {"error": "that agent isn't running"}
+        if rec.get("terminate"):
+            return 200, {"ok": True, "already": True}
+        rec["terminate"] = {"by": by, "ts": time.time()}
+        entry = {"ts": time.time(), "agent": display_name(rec), "id": sid, "cwd": rec.get("cwd", ""), "by": by, "pid": rec.get("pid")}
+    append_log_to(TERMINATIONS_PATH, entry)
+    log("terminate", entry["agent"], "by", by)
+    threading.Thread(target=hard_stop, args=(sid,), daemon=True).start()
+    return 200, {"ok": True}
+
+
+def hard_stop(sid, grace=60):
+    time.sleep(grace)
+    with lock:
+        rec = sessions.get(sid)
+        if rec is None or not is_live(rec):
+            return
+        pid = rec.get("pid")
+    # Only a process that is Claude Code's: a stale pid may belong to something else by now.
+    try:
+        comm = subprocess.run(["ps", "-p", str(int(pid)), "-o", "comm="], capture_output=True, text=True, timeout=5).stdout.strip() if pid else ""
+    except (OSError, ValueError, subprocess.SubprocessError):
+        comm = ""
+    if not re.search(r"claude|node", comm, re.I):
+        log("terminate", sid, "still running, and its process can't be found to end it", repr(comm))
+        return
+    try:
+        os.kill(int(pid), signal.SIGTERM)
+        time.sleep(5)
+        os.kill(int(pid), 0)
+        os.kill(int(pid), signal.SIGKILL)
+    except OSError:
+        pass
+    with lock:
+        sessions.pop(sid, None)
+    log("terminate", sid, "process", pid, "ended")
+
+
 def reaper():
     while True:
         time.sleep(10)
@@ -1742,6 +1992,10 @@ def reaper():
             for sid in [s for s, r in sessions.items() if now - r["last_seen"] > config["peer_ttl_s"] * 10]:
                 sessions.pop(sid, None)
                 expire(inboxes.pop(sid, []))
+            for sp in [x for x in spawns.values() if x["status"] == "pending" and now - x["created"] > SPAWN_TTL_S]:
+                sp["status"], sp["updated"] = "expired", now
+                spawn_told(sp, f"Your request {sp['id']} to start an agent in {sp['dir']} expired: your user didn't answer within a day.")
+                save_spawns()
             # Messages to an agent that has gone for an hour are not coming back.
             for sid in [s for s in inboxes if s not in sessions]:
                 kept = [m for m in inboxes[sid] if now - m["ts"] < 3600]
@@ -1988,9 +2242,15 @@ class Handler(BaseHTTPRequestHandler):
                     # A folder keeps the name it was given: a new session there (a restart, a resume) is still "vault".
                     given = (config.get("folder_names") or {}).get(b.get("cwd") or "")
                     rec["name"] = unique_name(given or b["name"], sid)
-                for k in ("cwd", "repo", "branch", "summary", "model", "plugin"):
+                for k in ("cwd", "repo", "branch", "summary", "model", "plugin", "pid"):
                     if b.get(k) is not None:
                         rec[k] = b[k]
+                # An agent you approved starting joins the space it was asked for.
+                want = spawn_spaces.pop(rec.get("cwd", ""), "")
+                if want and want != space_of(rec)[0] and not session_cfg(sid)["space"]:
+                    config["sessions"].setdefault(sid, {})["space"] = want
+                    rec.pop("_space", None)
+                    save_config()
                 rec["busy"] = bool(b.get("busy", False))
                 rec["last_seen"] = time.time()
                 sessions[sid] = rec
@@ -2033,7 +2293,10 @@ class Handler(BaseHTTPRequestHandler):
             with lock:
                 mine = reach(rec)
             others = sum(1 for p in local_peers() if p["id"] != sid and peer_reach(p) & mine) + len(config.get("remotes", []))
-            return self.reply(200, {"name": display_name(rec), "config": cfg, "inbox": inbox, "peer_count": others})
+            out = {"name": display_name(rec), "config": cfg, "inbox": inbox, "peer_count": others}
+            if rec.get("terminate"):
+                out["terminate"] = rec["terminate"]
+            return self.reply(200, out)
 
         if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "config" and method == "POST":
             # One agent's settings, merged here: a page or plugin holding an old copy of every agent's
@@ -2084,6 +2347,18 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(404, {"error": "unknown agent"})
                 return self.reply(200, open_threads(rec))
 
+        if rest == ["spawns"] and method == "POST":
+            code, out = request_spawn(self.body())
+            return self.reply(code, out)
+        if rest == ["spawns"] and method == "GET":
+            with lock:
+                return self.reply(200, {"spawns": sorted(spawns.values(), key=lambda x: -x["created"])})
+        if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "terminate" and method == "POST":
+            # Only you, in the browser: no agent ends another.
+            if not browser or self.key_ok():
+                return self.reply(403, {"error": "agents are ended from the web UI or Discord"})
+            code, out = terminate(rest[1], "the web UI")
+            return self.reply(code, out)
         if rest == ["inbox"] and method == "GET":
             return self.reply(200, {"items": inbox_items(), "user": USER_NAME})
         if rest == ["inbox"] and method == "POST":
@@ -2210,6 +2485,7 @@ def serve():
     load_messages()
     load_tasks()
     load_feedback()
+    load_spawns()
     load_dirs()
     file_pending_issues()
     load_discord()
@@ -2486,7 +2762,7 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)
 .task{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px}
 .task .mh{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;font-size:13px}.task .mh .when{margin-left:auto;color:var(--mut);font-size:12px}
 .task .note{margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}.task .tact{margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}.task .tact select{width:auto}
-.task.sub{margin-left:24px}nav .count.hot:not(:empty){background:var(--acc);color:#fff;border-radius:999px;padding:1px 7px;font-weight:600}.task .ftext{margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;max-height:9em;overflow:auto}
+.task.sub{margin-left:24px}button.danger{color:#c0392b;border-color:#c0392b}nav .count.hot:not(:empty){background:var(--acc);color:#fff;border-radius:999px;padding:1px 7px;font-weight:600}.task .ftext{margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;max-height:9em;overflow:auto}
 .task .tact input{flex:1;min-width:160px}.tchip.new,.tchip.bug{color:var(--warn);border-color:var(--warn)}.tchip.accepted,.tchip.idea{color:var(--acc);border-color:var(--acc)}.tchip{font-size:11px;border-radius:999px;padding:1px 8px;border:1px solid var(--line);color:var(--mut)}
 .tchip.open,.tchip.in_progress{color:var(--acc);border-color:var(--acc)}.tchip.done{color:#2e8b57;border-color:#2e8b57}.tchip.failed{color:#c0392b;border-color:#c0392b}
 .ptabs{display:flex;gap:4px;margin-top:12px;border-bottom:1px solid var(--line)}.ptabs button{background:transparent;color:var(--mut);border:0;border-bottom:2px solid transparent;border-radius:0;padding:6px 10px}
@@ -2552,7 +2828,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 
 <section id="agents"><h1>Agents</h1><p class="lead">Live Claude Code sessions as an org chart. Each box is a space; a lead (outlined in orange) sits in its parent's box with its team beneath it. The percentage is how full each agent's context is. An agent only sees and messages agents in its own space, and a lead also its parent's. Click an agent to see and change its settings.</p><div class="orgwrap"><div id="peers"></div><div id="detail"></div></div></section>
 
-<section id="inbox"><h1>Inbox</h1><p class="lead">Everything waiting on you: tasks agents handed you, questions they're waiting on, and new feedback about peerlink. The longest waiting is first. On Discord, send <span class="mono">/inbox</span> for the same list and answer by number, like <span class="mono">1 done</span>.</p>
+<section id="inbox"><h1>Inbox</h1><p class="lead">Everything waiting on you: agents asking to start another agent, tasks agents handed you, questions they're waiting on, and new feedback about peerlink. The longest waiting is first. On Discord, send <span class="mono">/inbox</span> for the same list and answer by number, like <span class="mono">1 done</span>.</p>
 <div class="mlist" id="inboxlist"></div></section>
 
 <section id="spaces"><h1>Spaces</h1>
@@ -2674,7 +2950,9 @@ function agentPanel(x,others=[]){const sc=cfg.sessions?.[x.id]||{};const fileSpa
     <label>Space for this agent only<input name="override" type="text" value="${esc(sc.space||'')}" placeholder="none"><span class="hint">Overrides the folder's space. An agent with its own space never leads a team.</span></label>
     <label>When a message arrives<select name="wake">${opt('default','Use the default')}${opt('on','Start a turn')}${opt('off','Wait for the next prompt')}</select></label>
     <label class="check"><input name="muted" type="checkbox" ${x.muted?'checked':''}> Mute: hold every message for this agent</label>
-    <div><button type="submit">Save</button> <span id="agentmsg" class="small"></span></div></form>`}`}</div>`}
+    <div><button type="submit">Save</button> <span id="agentmsg" class="small"></span></div></form>
+    <div class="threads"><div class="k small">End this agent</div><div class="small mut">It finishes the turn it's in, then its session ends. If it's still running a minute later, its process is stopped.</div>
+    <div><button class="ghost small danger" data-terminate="${esc(x.id)}" ${x.terminating?'disabled':''}>${x.terminating?'Ending…':'Terminate'}</button></div></div>`}`}</div>`}
 // Messages as a conversation: newest first, each reply under the message it answers.
 let msgFilter='',spaceFilter='',livePeers=[];
 // A message's spaces: what it recorded when sent, else (older messages) the space of a live agent on either end.
@@ -2777,20 +3055,24 @@ let inbox=[];
 function renderInbox(){
   $('#n-inbox').textContent=inbox.length||'';
   if(document.activeElement?.closest?.('#inboxlist'))return;
-  const label={task:'task for you',question:'waiting on your answer',feedback:'feedback'};
+  const label={approval:'wants a new agent',task:'task for you',question:'waiting on your answer',feedback:'feedback'};
   const btn=(a,t)=>`<button class="ghost small" data-iact="${a}">${t}</button>`;
-  $('#inboxlist').innerHTML=inbox.map(i=>`<div class="task" data-ikind="${esc(i.kind)}" data-iid="${esc(i.id)}"><div class="mh"><span class="tchip ${i.kind==='task'?'open':i.kind==='question'?'new':esc(i.type)}">${label[i.kind]}</span><b>${esc(i.title)}</b><span class="when">${esc(i.id)} · waiting ${ago(i.since)}</span></div>
+  $('#inboxlist').innerHTML=inbox.map(i=>`<div class="task" data-ikind="${esc(i.kind)}" data-iid="${esc(i.id)}"><div class="mh"><span class="tchip ${i.kind==='task'||i.kind==='approval'?'open':i.kind==='question'?'new':esc(i.type)}">${label[i.kind]}</span><b>${esc(i.title)}</b><span class="when">${esc(i.id)} · waiting ${ago(i.since)}</span></div>
     <div class="small mut">from <b>${esc(i.who)}</b>${i.kind==='feedback'?' · '+esc(i.type):''}</div>
     ${(()=>{const more=i.text.trim().startsWith(i.title.trim())?i.text.trim().slice(i.title.trim().length).trim():i.text.trim();return more?`<div class="ftext">${esc(more)}</div>`:''})()}
-    <div class="tact">${i.kind==='task'?`<input class="small" data-itext placeholder="Note for ${esc(i.who)} (optional)">${btn('done','Done')}${btn('failed',"Couldn't do it")}`
+    <div class="tact">${i.kind==='approval'?`${btn('approve','Approve and start it')}${btn('deny','Deny')}`:i.kind==='task'?`<input class="small" data-itext placeholder="Note for ${esc(i.who)} (optional)">${btn('done','Done')}${btn('failed',"Couldn't do it")}`
       :i.kind==='question'?`<input class="small" data-itext placeholder="Your answer">${btn('reply','Send')}${btn('dismiss','Dismiss')}`
       :`${btn('accepted','Accept')}${btn('dismissed','Dismiss')}`}</div></div>`).join('')
     ||'<div class="empty">Nothing is waiting on you.</div>'}
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-iact]');if(!b)return;const row=b.closest('[data-iid]');
   const text=row.querySelector('[data-itext]')?.value||'';
   if(b.dataset.iact==='reply'&&!text.trim()){row.querySelector('[data-itext]').focus();return}
+  if(b.dataset.iact==='approve'&&!confirm('Start a new Claude Code session in that folder?'))return;
   const r=await post('/api/inbox',{kind:row.dataset.ikind,id:row.dataset.iid,action:b.dataset.iact,text});
   if(r.error)alert(r.error);document.activeElement?.blur();refresh(true)});
+document.addEventListener('click',async e=>{const b=e.target.closest('[data-terminate]');if(!b)return;
+  const x=livePeers.find(p=>p.id===b.dataset.terminate);if(!confirm(`End ${x?x.name:'this agent'}? Its session closes after the turn it's in.`))return;
+  const r=await post(`/api/sessions/${encodeURIComponent(b.dataset.terminate)}/terminate`);if(r.error)alert(r.error);refresh(true)});
 document.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target.matches?.('#inboxlist [data-itext]')){e.preventDefault();e.target.closest('[data-iid]').querySelector('[data-iact]').click()}});
 // Feedback: newest first; accepting one opens a task for peerlink's maintainer.
 let allFeedback=[];

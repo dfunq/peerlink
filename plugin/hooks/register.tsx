@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.3'
+const DAEMON_VERSION = '0.8.4'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -89,6 +89,18 @@ let cfg: ClientConfig | undefined
 let pending: PeerMessage[] = []
 // Announcements don't start a turn: they're read at the start of the next one.
 let notices: PeerMessage[] = []
+// Set once the user has asked, from the web UI or Discord, for this session to end.
+let terminating = false
+let pid: number | undefined
+
+// This Claude Code process, so the daemon can end it if a requested exit doesn't happen.
+async function processId($: EngineInterface) {
+  if (pid === undefined) {
+    const run = await $.process.run(['sh', '-c', 'echo $PPID'], { timeoutMs: 3000 }).catch(() => undefined)
+    pid = Number(run?.stdout.trim()) || 0
+  }
+  return pid || undefined
+}
 let cancelPoll: (() => void) | undefined
 let lastRoster = ''
 let manualSummaryAt = -Infinity
@@ -246,6 +258,7 @@ async function announce($: EngineInterface, succeeds?: string) {
     busy,
     summary: summary || undefined,
     plugin: DAEMON_VERSION,
+    pid: await processId($),
   })
   if (res.ok) {
     myName = res.data.name
@@ -394,6 +407,14 @@ async function poll($: EngineInterface) {
   peerCount = Number(res.data.peer_count ?? 0)
   // The first peer to show up gets a real summary to read.
   if (!hadPeers && peerCount > 0 && !hasSummarizedTalk && !busy) void summarize($)
+  if (res.data.terminate && !terminating) {
+    // The user asked for this session to end: /exit, once the turn it's in is done.
+    terminating = true
+    const by = res.data.terminate.by ?? 'the user'
+    $.ui.toast(`peerlink: ending this session, as asked from ${by}`)
+    $.ui.log(`peerlink: ending this session after the current turn, as asked from ${by}.`)
+    void $.command.run({ command: 'exit' }).catch(() => undefined)
+  }
   const inbox = res.data.inbox as PeerMessage[]
   for (const m of inbox.filter(m => m.kind === 'announcement')) {
     notices.push(m)
@@ -941,6 +962,22 @@ export const register: Register = on => {
       isDeferred: false,
     })
     await $.tool.register({
+      name: 'request_spawn',
+      description:
+        "Ask your user to start a new agent (a Claude Code session) in another folder, for work that belongs there. Nothing starts until they approve it in the web UI or on Discord. If they do, the agent starts in your space, or the one you name, and gets first_prompt from you as its first message, so its replies come back to you. You're told if they deny it, or don't answer within a day.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          dir: { type: 'string', description: 'The folder to start it in; it must exist already' },
+          purpose: { type: 'string', description: 'Why it is needed, in a sentence your user decides on' },
+          first_prompt: { type: 'string', description: 'What the new agent should do first' },
+          space: { type: 'string', description: 'The space it joins; yours if left out' },
+        },
+        required: ['dir', 'purpose', 'first_prompt'],
+      },
+      isDeferred: false,
+    })
+    await $.tool.register({
       name: 'report_issue',
       description:
         "Report a problem with peerlink itself (a message that never arrived or reached the wrong agent, a peer you expected that isn't listed, an error from these tools), or suggest how peerlink could work better for you. It goes into the feedback queue your user reviews; a bug also goes straight to the agent working on peerlink when one is live. Not for problems with your own task or a peer's work.",
@@ -1093,6 +1130,13 @@ export const register: Register = on => {
     return text(
       `Sent to ${res.data.to} (${res.data.id}).${input.expects_reply ? ' Their reply will arrive as a peer message; continue with other work meanwhile.' : ''}`,
     )
+  }).catch(daemonDown)
+
+  on('tool.call', { tool: 'mcp__peerlink__request_spawn' }, async ($, e) => {
+    const input = e as any
+    const res = await call($, 'POST', '/api/spawns', { by: sessionId, dir: input.dir, purpose: input.purpose, first_prompt: input.first_prompt, space: input.space })
+    if (!res.ok) return text(`Not asked: ${res.data.error ?? res.status}`)
+    return text(`Asked your user to approve ${res.data.id}.${res.data.note ?? ''} You'll get a message when they decide; carry on meanwhile.`)
   }).catch(daemonDown)
 
   on('tool.call', { tool: 'mcp__peerlink__update_task' }, async ($, e) => {
