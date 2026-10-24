@@ -134,6 +134,8 @@ Talk to your agents from Discord. Open **Channels** in the web UI and follow the
 
 Once approved, the daemon starts Claude Code in that folder: in tmux when tmux is installed (`tmux attach -t peerlink-<folder>-s1` to see it), else in a new Terminal window. The new agent joins the space it was asked for (the asking agent's by default) and gets the first prompt as a message from whoever asked, so its replies go back there. A request you don't answer expires after a day, and the asking agent is told either way. Requests are kept in `~/.peerlink/spawns.json`.
 
+**Clearing its context:** open an agent's panel in the web UI and press **Clear context**. The agent runs `/clear` once the turn it's in ends. It keeps its name, space and role, and is given back what it still owes peers. Only you can do this, from the web UI.
+
 **Ending:** open an agent's panel in the web UI and press **Terminate**, or send `/kill <name>` on Discord and confirm with the button. The agent finishes the turn it's in, then its session exits. If it's still running a minute later, the daemon stops its process, after checking it is a Claude Code process. Agents can't end each other. Every termination is logged in `~/.peerlink/terminations.jsonl`, with who asked.
 
 ## Announcements
@@ -167,6 +169,7 @@ It's standard-library Python like the rest of the daemon, with no `py-cord` to i
 - **An agent is its project root**, where its session started. A shell `cd` into another folder doesn't make it a different agent, or a lead of another team.
 - **A reply goes back to whoever sent the message it answers**, whatever name the model wrote, and even across spaces: `reply_to` already says who, and they reached you, so you can answer. `to` can be left out of a reply.
 - **A long message is refused** past `max_message_chars` (8000), with a note to write the details to a file and send the path. The whole message would otherwise land in the other agent's context.
+- **A message isn't lost on the way in.** The agent confirms each message once it's in its session, and the daemon hands it out again every 45 seconds until it does, for up to a day. That covers a message that arrives while the plugin reloads, or one whose prompt never started a turn. If a turn can't start, the message goes into the transcript instead, to be read with your next prompt. A message is never shown twice.
 - **A name outside your reach is an error**, such as `acme is in the 'bridge' space, which you can't reach`. It never falls back to another agent.
 
 ## Updating
