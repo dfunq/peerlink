@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.13"
+VERSION = "0.8.14"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -2373,9 +2373,14 @@ class Handler(BaseHTTPRequestHandler):
         if rest == ["channels"] and method == "GET":
             if not discord.get("token"):
                 return self.reply(200, {"guilds": []})
-            live_view = bot.channels_live() if bot else None
+            # ↻ Refresh asks Discord itself (fresh=1), and what it says replaces the gateway's view.
+            live_view = bot.channels_live() if bot and "fresh" not in q else None
             try:
-                return self.reply(200, {"guilds": live_view if live_view is not None else discordlink.channels_rest(discord["token"])})
+                if live_view is None:
+                    live_view = discordlink.channels_rest(discord["token"])
+                    if bot:
+                        bot.set_channels(live_view)
+                return self.reply(200, {"guilds": live_view})
             except discordlink.DiscordError as err:
                 return self.reply(502, {"error": str(err)})
         if rest == ["test"] and method == "POST":
@@ -3826,7 +3831,7 @@ document.addEventListener('click',async e=>{const t=e.target.closest('button');i
   if(t.dataset.dtest){const r=await post('/api/discord/test',{channel_id:t.dataset.dtest});t.textContent=r.error?'Failed':'Sent ✓';if(r.error)alert(r.error)}
   const a=t.dataset.dact;if(!a)return;
   if(a==='addroute'){dDraft.routes.push({channel_id:'',master:'',members:[]});renderDiscord()}
-  if(a==='refresh'){const r=await api('/api/discord/channels');dGuilds=r.guilds||[];renderDiscord()}
+  if(a==='refresh'){const r=await api('/api/discord/channels?fresh=1');dGuilds=r.guilds||[];renderDiscord()}
   if(a==='forget'&&confirm('Disconnect the Discord bot? The channel mapping is kept.')){await api('/api/discord',{method:'DELETE'});dGuilds=null;await loadDiscord()}
   if(a==='reconnect'){await post('/api/discord/reconnect');setTimeout(()=>loadDiscord(),2000)}
   if(a==='check')await loadDiscord(true);
