@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.15'
+const DAEMON_VERSION = '0.8.16'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -101,6 +101,11 @@ let pending: PeerMessage[] = []
 let notices: PeerMessage[] = []
 // Set once the user has asked, from the web UI or Discord, for this session to end.
 let terminating = false
+// Set when the user asked, from the web UI, for this session's context to be cleared: run once the turn ends.
+let clearing = false
+// Messages that reached the session, so one the daemon hands out again isn't shown twice; and acks it hasn't taken yet.
+const placed = new Set<string>()
+let unacked: string[] = []
 let pid: number | undefined
 
 // This Claude Code process, so the daemon can end it if a requested exit doesn't happen.
@@ -404,6 +409,17 @@ const shownWaiting = new Set<string>()
 let wakeAt: number | undefined
 let wakeTimer = false
 
+// Tells the daemon these messages reached the session. Until it hears, it hands them out again, so one lost to a
+// reload or a prompt that never started a turn still arrives. A failed call is retried with the next heartbeat.
+function acked($: EngineInterface, batch: PeerMessage[]) {
+  const ids = batch.map(m => m.id)
+  for (const id of ids) placed.add(id)
+  if (placed.size > 500) for (const id of [...placed].slice(0, placed.size - 500)) placed.delete(id)
+  void call($, 'POST', `/api/sessions/${sessionId}/ack`, { ids })
+    .then(res => (res.ok ? undefined : unacked.push(...ids)))
+    .catch(() => unacked.push(...ids))
+}
+
 async function deliver($: EngineInterface) {
   if (pending.length === 0 || !cfg) {
     wakeAt = undefined
@@ -419,6 +435,7 @@ async function deliver($: EngineInterface) {
       pending = [...batch, ...pending]
       return
     }
+    acked($, batch)
     // The model reads the row above, which the person never sees: show each message as a transcript line too.
     for (const m of batch) $.ui.log(frame(m).replace('\n', ': '))
     $.ui.toast(`Message from ${batch.map(m => m.from_name).join(', ')}`)
@@ -463,7 +480,29 @@ async function deliver($: EngineInterface) {
   pending = []
   busy = true
   $.ui.toast(`Message from ${batch.map(m => m.from_name).join(', ')}`)
-  await $.prompt.submit({ text: framed(batch) })
+  const res: any = await $.prompt.submit({ text: framed(batch) }).catch(err => ({ drop: String(err) }))
+  if (res && 'drop' in res) {
+    // No turn started (a hook dropped it, or the session wasn't taking prompts): don't sit "busy" with the messages
+    // gone. Put them in the transcript instead, so they're read with the next turn, and say so.
+    busy = false
+    const put = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: framed(batch) }] } }).catch(() => ({ deny: true }))
+    if ('deny' in put && put.deny) {
+      pending = [...batch, ...pending]
+      return
+    }
+    acked($, batch)
+    for (const m of batch) $.ui.log(`${frame(m).replace('\n', ': ')}  (couldn't start a turn: read with your next prompt)`)
+    $.ui.toast(`Message from ${batch.map(m => m.from_name).join(', ')}, waiting for your next prompt`)
+    return
+  }
+  acked($, batch)
+}
+
+async function clearNow($: EngineInterface) {
+  if (!clearing) return
+  clearing = false
+  $.ui.toast('peerlink: clearing context, as asked from the web UI')
+  await $.command.run({ command: 'clear' }).catch(() => undefined)
 }
 
 async function poll($: EngineInterface) {
@@ -479,7 +518,10 @@ async function poll($: EngineInterface) {
   }
   let res
   try {
-    res = await call($, 'POST', `/api/sessions/${sessionId}/heartbeat`, { busy, activity: busy ? activity : undefined, context: await contextPercent($), branch: await freshBranch($) })
+    const ack = unacked
+    unacked = []
+    res = await call($, 'POST', `/api/sessions/${sessionId}/heartbeat`, { busy, activity: busy ? activity : undefined, context: await contextPercent($), branch: await freshBranch($), ack })
+    if (!res.ok) unacked.push(...ack)
   } catch {
     await ensureDaemon($)
     await announce($)
@@ -505,7 +547,14 @@ async function poll($: EngineInterface) {
     $.ui.log(`peerlink: ending this session after the current turn, as asked from ${by}.`)
     void $.command.run({ command: 'exit' }).catch(() => undefined)
   }
-  const inbox = res.data.inbox as PeerMessage[]
+  if (res.data.clear) {
+    clearing = true
+    $.ui.log(`peerlink: clearing this session's context${busy ? ' after the current turn' : ''}, as asked from ${res.data.clear.by ?? 'the user'}.`)
+    if (!busy) await clearNow($)
+  }
+  // The daemon hands a message out again until it's acked: skip one already here or already in the session.
+  const held = new Set([...pending, ...notices].map(m => m.id))
+  const inbox = (res.data.inbox as PeerMessage[]).filter(m => !held.has(m.id) && !placed.has(m.id))
   for (const m of inbox.filter(m => m.kind === 'announcement')) {
     notices.push(m)
     $.ui.log(`${frame(m).replace('\n', ': ')}  (read at the next turn)`)
@@ -1174,7 +1223,8 @@ export const register: Register = on => {
     if (e.agentId === undefined) {
       busy = false
       turnsSinceSummary++
-      void deliver($)
+      if (clearing) void clearNow($)
+      else void deliver($)
       void summarize($)
     }
     return done
@@ -1198,6 +1248,7 @@ export const register: Register = on => {
     const out = await next(e)
     const threads = await openThreadsBlock($).catch(() => '')
     const heard = notices.splice(0)
+    if (heard.length) acked($, heard)
     const blocks = [
       ...(heard.length
         ? [{ name: 'peerlink announcements', text: `Announced to your space since your last turn (no reply expected):\n\n${heard.map(frame).join('\n\n')}` }]

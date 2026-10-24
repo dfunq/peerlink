@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.15"
+VERSION = "0.8.16"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -144,6 +144,11 @@ DEFAULT_CONFIG = {
 lock = threading.RLock()
 sessions = {}   # id -> session record
 inboxes = {}    # id -> [message]
+# Messages handed to an agent that hasn't said they reached its session yet: id -> {message id: (message, when handed)}.
+# Handed again until acked, so one lost in a plugin reload or a prompt that never started a turn still arrives.
+handed = {}
+REDELIVER_S = float(os.environ.get("PEERLINK_REDELIVER_S", 45))
+HANDED_MAX_AGE_S = 86400
 messages = []   # recent log, newest last
 sent_times = {} # sender id -> [timestamps]
 next_msg = [1]
@@ -1887,6 +1892,11 @@ def adopt(rec, old=None):
             append_log({"id": m["id"], "to": rec["id"], "to_name": display_name(rec)})
         inboxes.setdefault(rec["id"], []).extend(box)
         moved += len(box)
+    # Handed to the session it replaces but never acked (it cleared or reloaded first): handed out again here.
+    if old and old != rec["id"] and handed.get(old):
+        mine = handed.setdefault(rec["id"], {})
+        for mid, (m, _) in handed.pop(old).items():
+            mine[mid] = (m, 0)
     return moved
 
 
@@ -1909,9 +1919,22 @@ def open_threads(rec, max_age=8 * 3600, limit=8):
     return {"owes": owes[-limit:], "waiting": waiting[-limit:], "tasks": mine[-limit:], "asked": asked[-limit:]}
 
 
-def take_inbox(sid):
+def take_inbox(sid, track=False):
+    """New messages for this agent, marked delivered. With track (a plugin that acks), each is handed again every
+    REDELIVER_S until the plugin acks it, for up to a day."""
     with lock:
         box = inboxes.pop(sid, [])
+        now = time.time()
+        again = []
+        if track:
+            mine = handed.setdefault(sid, {})
+            for mid in [mid for mid, (m, ts) in mine.items() if now - m["ts"] >= HANDED_MAX_AGE_S]:
+                mine.pop(mid)
+            again = [m for m, ts in mine.values() if now - ts >= REDELIVER_S]
+            for m in box + again:
+                mine[m["id"]] = (m, now)
+            if again:
+                log("redeliver", ", ".join(m["id"] for m in again), "->", sid[:8])
         started = False
         for m in box:
             m["status"] = "delivered"
@@ -1922,7 +1945,7 @@ def take_inbox(sid):
                 t["status"], t["updated"], started = "in_progress", time.time(), True
         if started:
             save_tasks()
-        return box
+        return box + again
 
 
 # Tasks: work handed to an agent, tracked until its owner says done or failed. A task belongs to its owner's
@@ -2258,6 +2281,27 @@ def terminate(sid, by):
     append_log_to(TERMINATIONS_PATH, entry)
     log("terminate", entry["agent"], "by", by)
     threading.Thread(target=hard_stop, args=(sid,), daemon=True).start()
+    return 200, {"ok": True}
+
+
+def ack(sid, ids):
+    """The plugin says these messages reached its session: stop handing them out."""
+    if isinstance(ids, list) and ids:
+        with lock:
+            mine = handed.get(sid, {})
+            for mid in ids:
+                mine.pop(str(mid), None)
+
+
+def clear_context(sid, by):
+    """You ask an agent to /clear its context; it does once its current turn ends."""
+    with lock:
+        rec = sessions.get(sid)
+        if rec is None or not is_live(rec):
+            return 404, {"error": "that agent isn't running"}
+        rec["clear"] = {"by": by, "ts": time.time()}
+        name = display_name(rec)
+    log("clear", name, "by", by)
     return 200, {"ok": True}
 
 
@@ -2641,13 +2685,16 @@ class Handler(BaseHTTPRequestHandler):
                     if b.get("summary_kind") in ("model", "manual"):
                         remember_dir(rec)
                 cfg = client_config(sid)
-            inbox = [] if cfg["muted"] else take_inbox(sid)
+            ack(sid, b.get("ack"))
+            inbox = [] if cfg["muted"] else take_inbox(sid, track="ack" in b)
             with lock:
                 mine = reach(rec)
             others = sum(1 for p in local_peers() if p["id"] != sid and peer_reach(p) & mine) + len(config.get("remotes", []))
             out = {"name": display_name(rec), "config": cfg, "inbox": inbox, "peer_count": others}
             if rec.get("terminate"):
                 out["terminate"] = rec["terminate"]
+            if rec.get("clear"):
+                out["clear"] = rec.pop("clear")
             return self.reply(200, out)
 
         if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "config" and method == "POST":
@@ -2705,6 +2752,15 @@ class Handler(BaseHTTPRequestHandler):
         if rest == ["spawns"] and method == "GET":
             with lock:
                 return self.reply(200, {"spawns": sorted(spawns.values(), key=lambda x: -x["created"])})
+        if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "ack" and method == "POST":
+            ack(rest[1], self.body().get("ids"))
+            return self.reply(200, {"ok": True})
+        if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "clear" and method == "POST":
+            # Only you, in the browser: no agent wipes another's context.
+            if not browser or self.key_ok():
+                return self.reply(403, {"error": "an agent's context is cleared from the web UI"})
+            code, out = clear_context(rest[1], "the web UI")
+            return self.reply(code, out)
         if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "terminate" and method == "POST":
             # Only you, in the browser: no agent ends another.
             if not browser or self.key_ok():
@@ -3412,6 +3468,8 @@ function agentPanel(x,others=[]){const sc=cfg.sessions?.[x.id]||{};const fileSpa
     <label>When a message arrives<select name="wake">${opt('default','Use the default')}${opt('on','Start a turn')}${opt('off','Wait for the next prompt')}</select></label></details>
     <label class="check"><input name="muted" type="checkbox" ${x.muted?'checked':''}> Mute: hold every message for this agent</label>
     <div><button type="submit">Save</button> <span id="agentmsg" class="small"></span></div></form>
+    <div class="threads"><div class="k small">Clear its context</div><div class="small mut">Runs /clear once its current turn ends: a fresh conversation in the same folder, keeping its name, space and role. What it still owes peers is given back to it.</div>
+    <div><button class="ghost small" data-clearctx="${esc(x.id)}">Clear context</button> <span class="small ok" id="clearmsg"></span></div></div>
     <div class="threads"><div class="k small">End this agent</div><div class="small mut">It finishes its current turn, then closes. If it's still running a minute later, it's stopped.</div>
     <div><button class="ghost small danger" data-terminate="${esc(x.id)}" ${x.terminating?'disabled':''}>${x.terminating?'Ending…':'Terminate'}</button></div></div>`}`}</div>`}
 // Messages as a conversation: newest first, each reply under the message it answers.
@@ -3588,6 +3646,9 @@ document.addEventListener('click',async e=>{const b=e.target.closest('[data-make
   const space=b.dataset.makelead||b.dataset.clearlead;
   if(b.dataset.clearlead&&!confirm(`Clear the lead of ${space}? Work sent to the space won't reach anyone until you pick a new lead.`))return;
   const r=await post(`/api/spaces/${encodeURIComponent(space)}/lead`,{cwd:b.dataset.cwd||''});if(r.error)alert(r.error);refresh(true)});
+document.addEventListener('click',async e=>{const b=e.target.closest('[data-clearctx]');if(!b)return;
+  const x=livePeers.find(p=>p.id===b.dataset.clearctx);if(!confirm(`Clear ${x?x.name:'this agent'}'s context? It starts a fresh conversation after the turn it's in.`))return;
+  const r=await post(`/api/sessions/${encodeURIComponent(b.dataset.clearctx)}/clear`);if(r.error)alert(r.error);else{const m=$('#clearmsg');if(m)m.textContent='Asked: it clears after its current turn.'}});
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-terminate]');if(!b)return;
   const x=livePeers.find(p=>p.id===b.dataset.terminate);if(!confirm(`End ${x?x.name:'this agent'}? Its session closes after the turn it's in.`))return;
   const r=await post(`/api/sessions/${encodeURIComponent(b.dataset.terminate)}/terminate`);if(r.error)alert(r.error);refresh(true)});
