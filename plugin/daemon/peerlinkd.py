@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.12"
+VERSION = "0.8.13"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -325,6 +325,7 @@ def client_config(sid):
         "space_from": where,
         "parent": parent_of(rec) if rec else "",
         "leads": leads(rec) if rec else "",
+        "also": also_in(rec) if rec else [],
         "role": role_of(rec) if rec else "",
         # The space this agent's space sits inside, for members too (a lead's `parent` is the same).
         "space_parent": read_space_file(where, "parent") if rec and source == "file" else "",
@@ -552,10 +553,40 @@ def leads_view():
         return out
 
 
+def also_in(rec):
+    """Spaces you added this agent's folder to in the web UI, on top of its own, wherever the folder is."""
+    own = space_of(rec)[0]
+    return sorted(s for s in (config.get("space_members") or {}).get(rec.get("cwd") or "", []) if s != own)
+
+
+def set_members(cwd, spaces):
+    """You set the spaces an agent's folder is also a member of (none clears it). The agents there are told."""
+    cwd = os.path.abspath(os.path.expanduser(cwd)) if cwd else ""
+    if not cwd:
+        return 400, {"error": "say which agent's folder"}
+    spaces = sorted({clean_space(s) for s in spaces} - {"", DEFAULT_SPACE})
+    with lock:
+        members = config.setdefault("space_members", {})
+        old = members.get(cwd, [])
+        if spaces:
+            members[cwd] = spaces
+        else:
+            members.pop(cwd, None)
+        save_config()
+        added, dropped = sorted(set(spaces) - set(old)), sorted(set(old) - set(spaces))
+        if added or dropped:
+            said = "; ".join(filter(None, [
+                f"you're now also a member of {', '.join(added)}: you see and message its agents, and they see you" if added else "",
+                f"you're no longer a member of {', '.join(dropped)}" if dropped else ""]))
+            task_message(None, cwd, f"Your user changed your spaces in the web UI: {said}.")
+        log("members", tilde_path(cwd), "->", ", ".join(spaces) or "(none)")
+    return 200, {"cwd": cwd, "spaces": spaces}
+
+
 def reach(rec):
-    """The spaces this agent sees and messages: its own, and the parent too when it leads its space."""
+    """The spaces this agent sees and messages: its own, the parent too when it leads its space, and any you added it to."""
     parent = parent_of(rec)
-    return {space_of(rec)[0], parent} - {""}
+    return {space_of(rec)[0], parent, *also_in(rec)} - {""}
 
 
 def peer_reach(p):
@@ -656,6 +687,7 @@ def public_peer(rec):
         "threads": {k: [{f: t[f] for f in ("id", "with", "text")} for t in v] for k, v in open_threads(rec, limit=5).items()},
         "open_tasks": sum(1 for t in tasks.values() if t["status"] in TASK_OPEN and t["owner_cwd"] and t["owner_cwd"] == rec.get("cwd")),
         "reach": sorted(reach(rec)),
+        "also": also_in(rec),
         "busy": rec.get("busy", False),
         "busy_since": rec.get("busy_since"),
         "sent_hour": sent_last_hour(rec),
@@ -2680,6 +2712,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(403, {"error": "a space's lead is set in the web UI"})
             code, out = set_lead(rest[1], str(self.body().get("cwd") or ""))
             return self.reply(code, out)
+        if rest == ["members"] and method == "POST":
+            # Only you, in the browser: no agent or bot adds itself, or another, to a space.
+            if not browser or self.key_ok():
+                return self.reply(403, {"error": "an agent's spaces are set in the web UI"})
+            body = self.body()
+            spaces = body.get("spaces")
+            code, out = set_members(str(body.get("cwd") or ""), spaces if isinstance(spaces, list) else [])
+            return self.reply(code, out)
         if rest == ["web", "send"] and method == "POST":
             # Only you, in the browser: it goes out in your name.
             if not browser or self.key_ok():
@@ -3069,6 +3109,7 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)
 .node .tag{font-size:11px;font-weight:500;color:var(--acc);white-space:nowrap}
 .node .badge{display:inline-block;font-size:10px;font-weight:600;color:var(--acc);border:1px solid var(--acc);border-radius:4px;padding:0 4px;white-space:nowrap}
 .node .nm .rt{flex:none;display:inline-flex;align-items:center;gap:6px}.node .badge.only{border-style:dashed}
+.lrow .badge.guest,.node .badge.guest{color:var(--mut);border-color:var(--mut);font-weight:500}
 .node.off{opacity:.5;cursor:default;border-style:dashed}.node.off:hover{border-color:var(--acc)}
 .under{margin-left:14px;border-left:2px solid var(--acc);padding-left:12px;margin-top:8px}
 .node .dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--mut);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -3218,7 +3259,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 
 <section id="spaces"><h1>Spaces</h1>
 <p class="lead">Which agents can see and message each other.</p>
-<details class="how"><summary>Where an agent's space comes from</summary><p>In order: an override set for that agent, the nearest <span class="mono">.peerlink</span> file in its folder or above, a folder rule below, or <b>default</b>. A <span class="mono">.peerlink</span> with <span class="mono">parent: &lt;space&gt;</span> nests its space inside that one. The agent in that file's folder leads it and also sits in the parent.</p></details>
+<details class="how"><summary>Where an agent's space comes from</summary><p>In order: an override set for that agent, the nearest <span class="mono">.peerlink</span> file in its folder or above, a folder rule below, or <b>default</b>. A <span class="mono">.peerlink</span> with <span class="mono">parent: &lt;space&gt;</span> nests its space inside that one. The agent in that file's folder leads it and also sits in the parent. To put an agent in more spaces wherever its folder is, open it on the Agents page and fill in <b>Also a member of</b>.</p></details>
 <div id="spacelist"></div>
 <h2>Folder rules</h2>
 <form class="card" id="rules">
@@ -3344,7 +3385,7 @@ function agentPanel(x,others=[]){const sc=cfg.sessions?.[x.id]||{};const fileSpa
    <div style="margin-top:8px">${esc(x.summary)||'<span class="mut">no summary yet</span>'}</div>
    ${x.remote?'':`<div class="ptabs"><button class="${panelTab==='tasks'?'':'on'}" data-ptab="about">Agent</button><button class="${panelTab==='tasks'?'on':''}" data-ptab="tasks">Tasks${x.open_tasks?' · '+x.open_tasks:''}</button></div>`}
    ${panelTab==='tasks'&&!x.remote?panelTasks(x):`<div class="facts"><span class="k">Status</span><span>${x.busy?'working':'idle'}${x.busy_since?' for '+ago(x.busy_since):''}${x.muted?' · muted':''}</span>
-    <span class="k">Space</span><span><span class="pill">${esc(x.space||'default')}</span> <span class="mut">${esc(why)}</span></span>
+    <span class="k">Space</span><span><span class="pill">${esc(x.space||'default')}</span> <span class="mut">${esc(why)}</span>${(x.also||[]).length?` <span class="mut">· also in</span> ${x.also.map(n=>`<span class="pill">${esc(n)}</span>`).join(' ')}`:''}</span>
     <span class="k">Role</span><span>${role}${leadBtn?' '+leadBtn:''}</span>
     <span class="k">Messages</span><span>${x.sent_hour||0} sent in the last hour${x.sent_hour>=20?' · <span style="color:var(--warn)">chatty: each one can cost its recipient a turn</span>':''}</span>
     ${x.context!=null?`<span class="k">Context</span><span>${x.context}% of its window in use${x.context>=80?' · <span style="color:var(--warn)">close to compacting</span>':''}</span>`:''}
@@ -3355,11 +3396,12 @@ function agentPanel(x,others=[]){const sc=cfg.sessions?.[x.id]||{};const fileSpa
     ${x.threads.waiting.map(t=>`<div class="small">waiting on <b>${esc(t.with)}</b> · <span class="mut">${esc(t.id)}: ${esc(t.text.slice(0,90))}</span></div>`).join('')}</div>`:''}
    ${x.remote?'':`<form id="msgform" class="sendbox" data-to="${esc(x.id)}"><label>Message ${esc(x.name)}<textarea name="text" rows="3" placeholder="It arrives as a message from you; its reply shows in Messages."></textarea></label>
     <div class="addline"><label class="check"><input type="checkbox" name="astask"> Send as a task</label><button type="submit">Send</button><span class="small ${sentNote.err?'err':'ok'}" id="sendmsg">${sentNote.to===x.id?esc(sentNote.text):''}</span></div></form>`}
-   ${x.remote?'<div class="small mut">This agent runs on another machine; change it there.</div>':`<form id="agentform" data-id="${esc(x.id)}" data-nick="${esc(sc.nickname||'')}" data-spacefile="${esc(fileSpace)}" data-parent="${esc(x.file_parent||'')}" data-override="${esc(sc.space||'')}" data-wake="${wake}" data-muted="${x.muted?'1':''}" data-role="${esc(x.role||'')}">
+   ${x.remote?'<div class="small mut">This agent runs on another machine; change it there.</div>':`<form id="agentform" data-id="${esc(x.id)}" data-nick="${esc(sc.nickname||'')}" data-spacefile="${esc(fileSpace)}" data-parent="${esc(x.file_parent||'')}" data-override="${esc(sc.space||'')}" data-wake="${wake}" data-muted="${x.muted?'1':''}" data-role="${esc(x.role||'')}" data-cwd="${esc(x.cwd)}" data-also="${esc((x.also||[]).join(', '))}">
     <label>Name<input name="nickname" type="text" value="${esc(sc.nickname||'')}" placeholder="${esc(x.name)}"><span class="hint">What other agents call it. Kept for this folder.</span></label>
     <label>Role<textarea name="role" rows="3" placeholder="What this agent is here for, e.g. Owns the billing API: invoices, payments, the Stripe webhook.">${esc(x.role||'')}</textarea><span class="hint">Saved as role: in this folder's .peerlink. The agent gets it as its brief, and other agents see it.</span></label>
     <label>Space for this folder<input name="spacefile" type="text" value="${esc(fileSpace)}" placeholder="none"><span class="hint">Saved in the folder's .peerlink, for every agent there.</span></label>
     <label>Inside space<input name="parent" type="text" value="${esc(x.file_parent||'')}" placeholder="none (top level)"><span class="hint">The space ${esc(x.space||'default')} sits inside. Moves every agent in it.</span></label>
+    <label>Also a member of<input name="also" type="text" value="${esc((x.also||[]).join(', '))}" placeholder="none, e.g. ${esc(Object.keys(leadOf).find(n=>n!==x.space)||'acme')}"><span class="hint">More spaces it joins, wherever its folder is. It sees and messages their agents, and they see it. Kept for this folder; separate with commas.</span></label>
     <details class="adv"${sc.space||wake!=='default'?' open':''}><summary>Advanced</summary>
     <label>Space for this agent only<input name="override" type="text" value="${esc(sc.space||'')}" placeholder="none"><span class="hint">Overrides the folder's space for this agent.</span></label>
     <label>When a message arrives<select name="wake">${opt('default','Use the default')}${opt('on','Start a turn')}${opt('off','Wait for the next prompt')}</select></label></details>
@@ -3422,6 +3464,8 @@ async function refresh(force,snap){
   const inside={},kids={},leads={};for(const x of [...p.peers,...ghosts])if(x.parent){(leads[x.space]??=[]).push(x);if(!inside[x.space]){inside[x.space]={parent:x.parent,lead:x.name,peer:x};(kids[x.parent]??=[]).push(x.space)}}
   for(const n in inside)inside[n].lead=leads[n].map(x=>x.name).join(', ');
   for(const n of Object.keys(kids))if(!groups[n])groups[n]=[];
+  // An agent you added to other spaces shows in each of them too, marked with its own space.
+  const guests={};for(const x of p.peers)for(const n of x.also||[]){(guests[n]??=[]).push({...x,leads:'',parent:'',guest:x.space});groups[n]??=[]}
   const size=(n,seen=new Set())=>{if(seen.has(n))return 0;seen.add(n);return (groups[n]||[]).length+(kids[n]||[]).reduce((t,c)=>t+size(c,seen),0)};
   const order=(a,b)=>a==='default'?1:b==='default'?-1:((kids[b]||[]).length>0)-((kids[a]||[]).length>0)||size(b)-size(a)||a.localeCompare(b);
   const roots=Object.keys(groups).filter(n=>!inside[n]||n===inside[n].parent).sort(order);
@@ -3430,7 +3474,7 @@ async function refresh(force,snap){
   // A space's box: its members, then the leads of the spaces under it.
   const isLead=(x,n)=>!!(inside[n]&&inside[n].parent!==n&&x.parent&&x.space===n);
   const members=n=>[...groups[n].filter(x=>!isLead(x,n)&&!(x.leads&&!x.parent)).sort(rank).sort((a,b)=>a.name.localeCompare(b.name)),
-    ...(kids[n]||[]).filter(c=>c!==n).sort().map(c=>inside[c].peer)];
+    ...(guests[n]||[]).sort((a,b)=>a.name.localeCompare(b.name)),...(kids[n]||[]).filter(c=>c!==n).sort().map(c=>inside[c].peer)];
   const short=d=>{const t=tilde(d).split('/');return t.length>3?'…/'+t.slice(-2).join('/'):t.join('/')};
   const state=x=>(x.busy?'working':'idle')+(x.busy_since?' '+ago(x.busy_since):'');
   // Messages sent in the last hour, flagged from 20: each one can cost its recipient a turn.
@@ -3439,7 +3483,7 @@ async function refresh(force,snap){
   // A lead is told apart by its outline (and says which team on hover), so every card keeps its context in one place.
   // The badge sits in the name row, left of the context; an offline lead's clear link goes beneath.
   // An implicit lead (it was alone in the space) has a dashed badge, and says so on hover, so the name keeps its room.
-  const badge=x=>x.leads?`<span class="badge${x.leads==='only'?' only':''}" title="${x.leads==='only'?'Lead (only agent): it was the only agent in the space':'Lead'}">Lead</span>`:'';
+  const badge=x=>x.guest?`<span class="badge guest" title="A member you added; its own space is ${esc(x.guest)}">${esc(x.guest)}</span>`:x.leads?`<span class="badge${x.leads==='only'?' only':''}" title="${x.leads==='only'?'Lead (only agent): it was the only agent in the space':'Lead'}">Lead</span>`:'';
   const clearOff=x=>x.leads&&x.offline?`<div><span class="small mut" data-clearlead="${esc(x.space)}" title="Clear this lead" style="cursor:pointer">clear</span></div>`:'';
   const node=x=>`<${x.offline?'div':'button'} class="node${x.leads?' is-lead':''}${x.offline?' off':''}${x.id&&x.id===sel?' sel':''}"${x.offline?'':` data-sel="${esc(x.id)}"`}${x.leads?` title="Leads the ${esc(x.space)} ${x.parent?'team':'space'}${x.offline?' (offline)':''}"`:''}>
     <div class="nm"><span title="${esc(x.name)}">${x.offline?'':`<span class="dot ${x.busy?'busy':''}"></span>`}${esc(x.name)}</span><span class="rt">${badge(x)}${ctx(x)}</span></div>${clearOff(x)}
@@ -3457,7 +3501,7 @@ async function refresh(force,snap){
     const row=`<div class="orow${stack?' stack':''}">${cols.join('')||'<span class="mut small">no other live agents</span>'}</div>`;
     return `<div class="unit"><div class="unit-h">${esc(n)}${inside[n]&&inside[n].parent!==n?' team':''} · ${count}</div>${top.length?`<div class="orow stack">${top.map(node).join('')}</div>${cols.length?`<div class="under">${row}</div>`:''}`:row}</div>`};
   const sunit=(n,seen)=>{if(seen.has(n))return '';seen.add(n);
-    const own=groups[n].filter(x=>!isLead(x,n)&&!(x.leads&&!x.parent)).map(x=>esc(x.name));
+    const own=[...groups[n].filter(x=>!isLead(x,n)&&!(x.leads&&!x.parent)).map(x=>esc(x.name)),...(guests[n]||[]).map(x=>esc(x.name)+` <span class="mut">(${esc(x.guest)})</span>`)];
     const ledBy=inside[n]?inside[n].lead:tops(n).map(x=>x.name+(x.offline?' (offline)':'')).join(', ');
     const ch=(kids[n]||[]).filter(c=>c!==n&&!seen.has(c)).sort();
     return `<div class="ocol"><div class="sbox${ledBy?' led':''}"><div class="name">${esc(n)}</div>
@@ -3476,7 +3520,7 @@ async function refresh(force,snap){
   const lspace=(n,seen)=>{if(seen.has(n))return '';seen.add(n);
     const nested=inside[n]&&inside[n].parent!==n;
     const head=nested?(leads[n]||[]):tops(n);
-    const own=groups[n].filter(x=>!isLead(x,n)&&!(x.leads&&!x.parent)).sort(rank).sort((a,b)=>a.name.localeCompare(b.name));
+    const own=[...groups[n].filter(x=>!isLead(x,n)&&!(x.leads&&!x.parent)).sort(rank).sort((a,b)=>a.name.localeCompare(b.name)),...(guests[n]||[]).sort((a,b)=>a.name.localeCompare(b.name))];
     const ch=(kids[n]||[]).filter(c=>c!==n&&!seen.has(c)).sort();
     const body=own.map(lrow).join('')+ch.map(c=>lspace(c,seen)).join('');
     // Counted as the chart counts: a top-level lead and the leads of teams inside sit with this space; a team's own lead sits with its parent.
@@ -3695,6 +3739,8 @@ document.addEventListener('submit',async e=>{if(e.target.id!=='agentform')return
   if(Object.keys(patch).length){const r=await post(`/api/sessions/${encodeURIComponent(id)}/config`,patch);if(r.error)errs.push(r.error);else cfg.sessions=r.sessions}
   for(const [field,key] of [['role','role'],['spacefile','space'],['parent','parent']])if(v(field)!==d[field]){
     const r=await post(`/api/sessions/${encodeURIComponent(id)}/space-file`,{[key]:v(field)});if(r.error)errs.push(r.error)}
+  const also=v('also').split(',').map(t=>t.trim()).filter(Boolean);
+  if(also.join(', ')!==d.also){const r=await post('/api/members',{cwd:d.cwd,spaces:also});if(r.error)errs.push(r.error)}
   editing=false;lastPanel='';await refresh(true);
   const m2=$('#agentmsg');if(m2){m2.className='small '+(errs.length?'err':'ok');m2.textContent=errs.length?errs.join(' '):'Saved'}});
 document.addEventListener('click',async e=>{const t=e.target.closest('button');if(!t)return;

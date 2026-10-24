@@ -1,6 +1,6 @@
 {
   "name": "peerlink",
-  "version": "0.8.12",
+  "version": "0.8.13",
   "description": "Lets your Claude agents discover and message each other through one lightweight daemon per machine, with a CLI and a signed-in web UI.",
   "author": { "name": "Dillon" },
   "license": "MIT"
