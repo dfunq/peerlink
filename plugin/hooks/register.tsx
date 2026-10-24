@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.14'
+const DAEMON_VERSION = '0.8.15'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -733,7 +733,7 @@ function hierarchyGuidance() {
           ? `To tell them something first, send_message to "discord"${chans.length > 1 ? ` plus the channel, like "discord${chans[0]!.channel}"` : ''}.`
           : '',
         'They read it on a phone: lead with the answer, keep it short, use plain markdown, no tables. Links work, as [text](url).',
-        'To offer choices, pass options: they become buttons, and the pick comes back as a reply. To share a file, pass its absolute path in files. Files they attach arrive as paths you can read.',
+        'When you need them to decide or approve something (yes or no, merge or not, pick one), pass options rather than asking them to type a reply: they become buttons, and the tap comes back as their reply. To share a file, pass its absolute path in files. Files they attach arrive as paths you can read.',
       ]
         .filter(Boolean)
         .join(' '),
@@ -1048,7 +1048,7 @@ export const register: Register = on => {
           options: {
             type: 'array',
             items: { type: 'string' },
-            description: 'Choices to offer, short labels. On Discord they are buttons and the pick comes back as a reply; to a peer, a numbered list',
+            description: 'Choices to offer, short labels, such as ["Merge both", "Hold"]. Use them whenever you ask your user to decide or approve, instead of asking them to type a reply. On Discord they are buttons and the tap comes back as a reply; to a peer, a numbered list',
           },
           files: {
             type: 'array',
