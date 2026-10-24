@@ -323,7 +323,7 @@ class Bot:
         self.owner_ids = set()
         self.trusted_bots = set()  # bot user IDs whose posts count as the owner's; empty by default
         self.reads_messages = False
-        self.guild_channels = {}  # guild id -> {"name", "channels": {id: name}}
+        self.guild_channels = {}  # guild id -> {"name", "channels": {id: (position, name)}}
         self.stop = threading.Event()
         self.ws = None
         self.thread = threading.Thread(target=self._run, name="discord", daemon=True)
@@ -339,13 +339,18 @@ class Bot:
         if self.state != "online":
             return None
         return [{"id": gid, "name": g["name"],
-                 "channels": [{"id": cid, "name": name} for cid, name in g["channels"].items()]}
+                 "channels": [{"id": cid, "name": name} for cid, (_, name) in sorted(g["channels"].items(), key=lambda c: c[1])]}
                 for gid, g in self.guild_channels.items()]
+
+    def set_channels(self, guilds):
+        """Replace what the gateway reported with a fresh listing from REST (channels_rest), already in order."""
+        self.guild_channels = {g["id"]: {"name": g["name"], "channels": {c["id"]: (i, c["name"]) for i, c in enumerate(g["channels"])}}
+                               for g in guilds}
 
     def channel_name(self, channel_id):
         for g in self.guild_channels.values():
             if channel_id in g["channels"]:
-                return g["channels"][channel_id]
+                return g["channels"][channel_id][1]
         return ""
 
     def _run(self):
@@ -418,12 +423,18 @@ class Bot:
             self.state, self.error = "online", ""
             self.log("discord", "online as", self.user)
         elif kind in ("GUILD_CREATE", "GUILD_UPDATE"):
-            chans = sorted((c for c in d.get("channels", []) if c.get("type") in POSTABLE),
-                           key=lambda c: (c.get("position", 0), c.get("name", "")))
             self.guild_channels[str(d["id"])] = {
-                "name": d.get("name", "?"), "channels": {str(c["id"]): c.get("name", "?") for c in chans}}
+                "name": d.get("name", "?"),
+                "channels": {str(c["id"]): (c.get("position", 0), c.get("name", "?")) for c in d.get("channels", []) if c.get("type") in POSTABLE}}
         elif kind == "GUILD_DELETE":
             self.guild_channels.pop(str(d.get("id")), None)
+        elif kind in ("CHANNEL_CREATE", "CHANNEL_UPDATE", "CHANNEL_DELETE"):
+            # A channel added, renamed or removed after the bot connected; without this it shows only after a restart.
+            g = self.guild_channels.get(str(d.get("guild_id")))
+            if g is not None:
+                g["channels"].pop(str(d.get("id")), None)
+                if kind != "CHANNEL_DELETE" and d.get("type") in POSTABLE:
+                    g["channels"][str(d["id"])] = (d.get("position", 0), d.get("name", "?"))
         elif kind == "MESSAGE_CREATE":
             author = d.get("author") or {}
             aid = str(author.get("id"))
