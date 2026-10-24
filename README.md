@@ -16,7 +16,7 @@ Agents treat each other as teammates. Each one knows who else is live and what t
 ## How agents know about each other
 
 - **Names.** An agent is named after its folder, such as `web` or `billing-api`. A suffix is added only when two live agents share a folder name. You can rename an agent with `/peerlink-agent name <name>`.
-- **Roles.** Put `role:` lines in the `.peerlink` of an agent's own folder to say what it's there for. You can also set it in the agent's panel in the web UI. The agent gets the role as its brief from its first turn, and peers see it in `list_peers` and beside the prompt, so nobody has to wait for a summary. A role describes only the agent in that folder, not those in folders below it. A `.peerlink` with only a role doesn't change the agent's space.
+- **Roles.** Put `role:` lines in the `.peerlink` of an agent's own folder to say what it's there for. You can also set it on the Details tab of the agent's panel in the web UI. The agent gets the role as its brief from its first turn, and peers see it in `list_peers` and beside the prompt, so nobody has to wait for a summary. A role describes only the agent in that folder, not those in folders below it. A `.peerlink` with only a role doesn't change the agent's space.
 
   ```
   # ~/Repos/acme/auth/.peerlink
@@ -47,7 +47,7 @@ An agent's space comes from the first of these that applies:
    Commit it, and the space travels with the repo. `/peerlink-spaces file <name>`, or "Space for this folder" in the web UI, writes it for you: it edits the repo's own `.peerlink`, or creates one at the repo root. It never rewrites a `.peerlink` above the repo, because that file sets the space for other folders too.
 3. **A folder rule**, in the Spaces page of the web UI or `space_rules` in the config. For example, `~/Repos/acme = acme` covers that folder and everything inside it. The most specific rule wins.
 
-**Adding an agent to more spaces.** An agent's folder fixes its own space, but you can make it a member of other spaces too, wherever its folder is. Open it on the Agents page and fill in **Also a member of**, such as `acme`. It then sees and messages the agents in those spaces, and they see it, as well as its own. It shows in each space with its own space beside its name, and it's told it was added. This is kept for its folder (`space_members` in the config), so it lasts across sessions. Only you can set it, in the web UI: an agent can't add itself to a space.
+**Adding an agent to more spaces.** An agent's folder fixes its own space, but you can make it a member of other spaces too, wherever its folder is. Open it on the Agents page and fill in **Also a member of** on its **Details** tab, such as `acme`. It then sees and messages the agents in those spaces, and they see it, as well as its own. On the Agents page it moves to the spaces you added it to, with its own space beside its name, so it isn't listed twice. A lead you picked stays at the head of its own space instead, with a `+acme` badge. It's told it was added. This is kept for its folder (`space_members` in the config), so it lasts across sessions. Only you can set it, in the web UI: an agent can't add itself to a space.
 
 Space names are lowercased. Linked daemons on other machines only connect agents whose spaces have the same name.
 
@@ -134,9 +134,9 @@ Talk to your agents from Discord. Open **Channels** in the web UI and follow the
 
 Once approved, the daemon starts Claude Code in that folder: in tmux when tmux is installed (`tmux attach -t peerlink-<folder>-s1` to see it), else in a new Terminal window. The new agent joins the space it was asked for (the asking agent's by default) and gets the first prompt as a message from whoever asked, so its replies go back there. A request you don't answer expires after a day, and the asking agent is told either way. Requests are kept in `~/.peerlink/spawns.json`.
 
-**Clearing its context:** open an agent's panel in the web UI and press **Clear context**. The agent runs `/clear` once the turn it's in ends. It keeps its name, space and role, and is given back what it still owes peers. Only you can do this, from the web UI.
+**Clearing its context:** open an agent's panel in the web UI and press **Clear context** on its **Controls** tab. The agent runs `/clear` once the turn it's in ends. It keeps its name, space and role, and is given back what it still owes peers. Only you can do this, from the web UI.
 
-**Ending:** open an agent's panel in the web UI and press **Terminate**, or send `/kill <name>` on Discord and confirm with the button. The agent finishes the turn it's in, then its session exits. If it's still running a minute later, the daemon stops its process, after checking it is a Claude Code process. Agents can't end each other. Every termination is logged in `~/.peerlink/terminations.jsonl`, with who asked.
+**Ending:** open an agent's panel in the web UI and press **Terminate** on its **Controls** tab, or send `/kill <name>` on Discord and confirm with the button. The agent finishes the turn it's in, then its session exits. If it's still running a minute later, the daemon stops its process, after checking it is a Claude Code process. Agents can't end each other. Every termination is logged in `~/.peerlink/terminations.jsonl`, with who asked.
 
 ## Announcements
 

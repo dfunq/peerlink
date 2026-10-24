@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.16"
+VERSION = "0.8.17"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -3228,7 +3228,7 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)
 @media (max-width:760px){.board{grid-template-columns:1fr}.col.shut{max-width:none}.col{min-height:0}}
 .tchip.open,.tchip.in_progress{color:var(--acc);border-color:var(--acc)}.tchip.done{color:var(--ok);border-color:var(--ok)}.tchip.failed{color:var(--bad);border-color:var(--bad)}
 .ptabs{display:flex;gap:4px;margin-top:12px;border-bottom:1px solid var(--line)}.ptabs button{background:transparent;color:var(--mut);border:0;border-bottom:2px solid transparent;border-radius:0;padding:6px 10px}
-.ptabs button.on{color:var(--fg);border-bottom-color:var(--acc)}.ptasks{margin-top:12px;display:flex;flex-direction:column;gap:8px}.ptasks .k{color:var(--mut)}
+.ptabs button.on{color:var(--fg);border-bottom-color:var(--acc)}.ptabs+form{border-top:0}.ptasks{margin-top:12px;display:flex;flex-direction:column;gap:8px}.ptasks .k{color:var(--mut)}
 .msg{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px;cursor:pointer}
 .msg .mh{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;font-size:13px}.msg .mh .when{margin-left:auto;color:var(--mut);font-size:12px}
 .msg .mt{margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
@@ -3291,8 +3291,8 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 </style></head><body><div class="app">
 <nav>
 <div class="brand">Peerlink</div><div class="host" id="hostline"></div>
-<a href="#agents" data-nav="agents">Agents <span class="count" id="n-agents"></span></a>
 <a href="#inbox" data-nav="inbox">Inbox <span class="count hot" id="n-inbox"></span></a>
+<a href="#agents" data-nav="agents">Agents <span class="count" id="n-agents"></span></a>
 <a href="#tasks" data-nav="tasks">Tasks <span class="count" id="n-tasks"></span></a>
 <a href="#messages" data-nav="messages">Messages <span class="count" id="n-msgs"></span></a>
 <div class="grp" aria-hidden="true">Set up</div>
@@ -3439,15 +3439,32 @@ function agentPanel(x,others=[]){const sc=cfg.sessions?.[x.id]||{};const fileSpa
   // Only you, here, pick a lead: the daemon refuses it from agents and bots.
   const leadBtn=x.remote||!x.space||x.space==='default'?'':x.leads==='file'?'':x.leads?`<button class="ghost small" data-clearlead="${esc(x.space)}">Clear lead</button>`:`<button class="ghost small" data-makelead="${esc(x.space)}" data-cwd="${esc(x.cwd)}">${led?'Make lead instead of '+esc(led.name):'Make lead of '+esc(x.space)}</button>`;
   const opt=(v,t)=>`<option value="${v}" ${wake===v?'selected':''}>${t}</option>`;
+  const tab=x.remote?'about':panelTab;
   return `<div class="card panel${x.leads?' is-lead':''}">
    <div class="top"><span><span class="dot ${x.busy?'busy':''}"></span><span class="name">${esc(x.name)}</span>${x.remote?` <span class="mut small">@${esc(x.host)}</span>`:''}</span><button class="ghost x" data-close title="Close">✕</button></div>
    <div class="mono mut" style="margin-top:4px">${esc(tilde(x.cwd))}${x.branch?' · '+esc(x.branch):''} <button class="ghost small copy" data-copy="${esc(x.cwd)}" title="Copy the folder path">Copy</button></div>
    ${x.role?`<div class="role"><span class="k">Role</span> ${esc(x.role)}</div>`:''}
    <div style="margin-top:8px">${esc(x.summary)||'<span class="mut">no summary yet</span>'}</div>
-   ${x.remote?'':`<div class="ptabs"><button class="${panelTab==='tasks'?'':'on'}" data-ptab="about">Agent</button><button class="${panelTab==='tasks'?'on':''}" data-ptab="tasks">Tasks${x.open_tasks?' · '+x.open_tasks:''}</button></div>`}
-   ${panelTab==='tasks'&&!x.remote?panelTasks(x):`<div class="facts"><span class="k">Status</span><span>${x.busy?'working':'idle'}${x.busy_since?' for '+ago(x.busy_since):''}${x.muted?' · muted':''}</span>
+   ${x.remote?'':`<div class="ptabs">${[['about','Agent'],['tasks','Tasks'+(x.open_tasks?' · '+x.open_tasks:'')],['details','Details'],['controls','Controls']].map(([k,t])=>`<button class="${tab===k?'on':''}" data-ptab="${k}">${t}</button>`).join('')}</div>`}
+   ${tab==='tasks'?panelTasks(x):tab==='details'?`<form id="agentform" data-id="${esc(x.id)}" data-nick="${esc(sc.nickname||'')}" data-spacefile="${esc(fileSpace)}" data-parent="${esc(x.file_parent||'')}" data-override="${esc(sc.space||'')}" data-role="${esc(x.role||'')}" data-cwd="${esc(x.cwd)}" data-also="${esc((x.also||[]).join(', '))}">
+    <label>Name<input name="nickname" type="text" value="${esc(sc.nickname||'')}" placeholder="${esc(x.name)}"><span class="hint">What other agents call it. Kept for this folder.</span></label>
+    <label>Role<textarea name="role" rows="3" placeholder="What this agent is here for, e.g. Owns the billing API: invoices, payments, the Stripe webhook.">${esc(x.role||'')}</textarea><span class="hint">Saved as role: in this folder's .peerlink. The agent gets it as its brief, and other agents see it.</span></label>
+    <label>Space for this folder<input name="spacefile" type="text" value="${esc(fileSpace)}" placeholder="none"><span class="hint">Saved in the folder's .peerlink, for every agent there.</span></label>
+    <label>Inside space<input name="parent" type="text" value="${esc(x.file_parent||'')}" placeholder="none (top level)"><span class="hint">The space ${esc(x.space||'default')} sits inside. Moves every agent in it.</span></label>
+    <label>Also a member of<input name="also" type="text" value="${esc((x.also||[]).join(', '))}" placeholder="none, e.g. ${esc(Object.keys(leadOf).find(n=>n!==x.space)||'acme')}"><span class="hint">More spaces it joins, wherever its folder is. It sees and messages their agents, and they see it. Kept for this folder; separate with commas.</span></label>
+    <details class="adv"${sc.space?' open':''}><summary>Advanced</summary>
+    <label>Space for this agent only<input name="override" type="text" value="${esc(sc.space||'')}" placeholder="none"><span class="hint">Overrides the folder's space for this agent.</span></label></details>
+    <div><button type="submit">Save</button> <span id="agentmsg" class="small"></span></div></form>`:tab==='controls'?`<form id="agentform" data-id="${esc(x.id)}" data-wake="${wake}" data-muted="${x.muted?'1':''}">
+    <label>When a message arrives<select name="wake">${opt('default','Use the default')}${opt('on','Start a turn')}${opt('off','Wait for the next prompt')}</select></label>
+    <label class="check"><input name="muted" type="checkbox" ${x.muted?'checked':''}> Mute: hold every message for this agent</label>
+    <div><button type="submit">Save</button> <span id="agentmsg" class="small"></span></div></form>
+    ${leadBtn?`<div class="threads"><div class="k small">Lead</div><div class="small mut">${role}</div><div>${leadBtn}</div></div>`:''}
+    <div class="threads"><div class="k small">Clear its context</div><div class="small mut">Runs /clear once its current turn ends: a fresh conversation in the same folder, keeping its name, space and role. What it still owes peers is given back to it.</div>
+    <div><button class="ghost small" data-clearctx="${esc(x.id)}">Clear context</button> <span class="small ok" id="clearmsg"></span></div></div>
+    <div class="threads"><div class="k small">End this agent</div><div class="small mut">It finishes its current turn, then closes. If it's still running a minute later, it's stopped.</div>
+    <div><button class="ghost small danger" data-terminate="${esc(x.id)}" ${x.terminating?'disabled':''}>${x.terminating?'Ending…':'Terminate'}</button></div></div>`:`<div class="facts"><span class="k">Status</span><span>${x.busy?'working':'idle'}${x.busy_since?' for '+ago(x.busy_since):''}${x.muted?' · muted':''}</span>
     <span class="k">Space</span><span><span class="pill">${esc(x.space||'default')}</span> <span class="mut">${esc(why)}</span>${(x.also||[]).length?` <span class="mut">· also in</span> ${x.also.map(n=>`<span class="pill">${esc(n)}</span>`).join(' ')}`:''}</span>
-    <span class="k">Role</span><span>${role}${leadBtn?' '+leadBtn:''}</span>
+    <span class="k">Role</span><span>${role}</span>
     <span class="k">Messages</span><span>${x.sent_hour||0} sent in the last hour${x.sent_hour>=20?' · <span style="color:var(--warn)">chatty: each one can cost its recipient a turn</span>':''}</span>
     ${x.context!=null?`<span class="k">Context</span><span>${x.context}% of its window in use${x.context>=80?' · <span style="color:var(--warn)">close to compacting</span>':''}</span>`:''}
     <span class="k">Plugin</span><span>${esc(x.plugin||'older than 0.6.6')}${x.stale&&!x.remote?' · <span style="color:var(--warn)">run /reload-plugins in this agent</span>':''}</span></div>
@@ -3457,21 +3474,7 @@ function agentPanel(x,others=[]){const sc=cfg.sessions?.[x.id]||{};const fileSpa
     ${x.threads.waiting.map(t=>`<div class="small">waiting on <b>${esc(t.with)}</b> · <span class="mut">${esc(t.id)}: ${esc(t.text.slice(0,90))}</span></div>`).join('')}</div>`:''}
    ${x.remote?'':`<form id="msgform" class="sendbox" data-to="${esc(x.id)}"><label>Message ${esc(x.name)}<textarea name="text" rows="3" placeholder="It arrives as a message from you; its reply shows in Messages."></textarea></label>
     <div class="addline"><label class="check"><input type="checkbox" name="astask"> Send as a task</label><button type="submit">Send</button><span class="small ${sentNote.err?'err':'ok'}" id="sendmsg">${sentNote.to===x.id?esc(sentNote.text):''}</span></div></form>`}
-   ${x.remote?'<div class="small mut">This agent runs on another machine; change it there.</div>':`<form id="agentform" data-id="${esc(x.id)}" data-nick="${esc(sc.nickname||'')}" data-spacefile="${esc(fileSpace)}" data-parent="${esc(x.file_parent||'')}" data-override="${esc(sc.space||'')}" data-wake="${wake}" data-muted="${x.muted?'1':''}" data-role="${esc(x.role||'')}" data-cwd="${esc(x.cwd)}" data-also="${esc((x.also||[]).join(', '))}">
-    <label>Name<input name="nickname" type="text" value="${esc(sc.nickname||'')}" placeholder="${esc(x.name)}"><span class="hint">What other agents call it. Kept for this folder.</span></label>
-    <label>Role<textarea name="role" rows="3" placeholder="What this agent is here for, e.g. Owns the billing API: invoices, payments, the Stripe webhook.">${esc(x.role||'')}</textarea><span class="hint">Saved as role: in this folder's .peerlink. The agent gets it as its brief, and other agents see it.</span></label>
-    <label>Space for this folder<input name="spacefile" type="text" value="${esc(fileSpace)}" placeholder="none"><span class="hint">Saved in the folder's .peerlink, for every agent there.</span></label>
-    <label>Inside space<input name="parent" type="text" value="${esc(x.file_parent||'')}" placeholder="none (top level)"><span class="hint">The space ${esc(x.space||'default')} sits inside. Moves every agent in it.</span></label>
-    <label>Also a member of<input name="also" type="text" value="${esc((x.also||[]).join(', '))}" placeholder="none, e.g. ${esc(Object.keys(leadOf).find(n=>n!==x.space)||'acme')}"><span class="hint">More spaces it joins, wherever its folder is. It sees and messages their agents, and they see it. Kept for this folder; separate with commas.</span></label>
-    <details class="adv"${sc.space||wake!=='default'?' open':''}><summary>Advanced</summary>
-    <label>Space for this agent only<input name="override" type="text" value="${esc(sc.space||'')}" placeholder="none"><span class="hint">Overrides the folder's space for this agent.</span></label>
-    <label>When a message arrives<select name="wake">${opt('default','Use the default')}${opt('on','Start a turn')}${opt('off','Wait for the next prompt')}</select></label></details>
-    <label class="check"><input name="muted" type="checkbox" ${x.muted?'checked':''}> Mute: hold every message for this agent</label>
-    <div><button type="submit">Save</button> <span id="agentmsg" class="small"></span></div></form>
-    <div class="threads"><div class="k small">Clear its context</div><div class="small mut">Runs /clear once its current turn ends: a fresh conversation in the same folder, keeping its name, space and role. What it still owes peers is given back to it.</div>
-    <div><button class="ghost small" data-clearctx="${esc(x.id)}">Clear context</button> <span class="small ok" id="clearmsg"></span></div></div>
-    <div class="threads"><div class="k small">End this agent</div><div class="small mut">It finishes its current turn, then closes. If it's still running a minute later, it's stopped.</div>
-    <div><button class="ghost small danger" data-terminate="${esc(x.id)}" ${x.terminating?'disabled':''}>${x.terminating?'Ending…':'Terminate'}</button></div></div>`}`}</div>`}
+   ${x.remote?'<div class="small mut">This agent runs on another machine; change it there.</div>':''}`}</div>`}
 // Messages as a conversation: newest first, each reply under the message it answers.
 let msgFilter='',spaceFilter='',livePeers=[],leadOf={};
 // A message's spaces: what it recorded when sent, else (older messages) the space of a live agent on either end.
@@ -3515,8 +3518,11 @@ async function refresh(force,snap){
   $('#hostline').textContent=`${st.host} · daemon ${st.version}`;
   $('#browsers').textContent=`${st.browsers} signed in · links work once and expire after 60 s`;
   $('#keypath').textContent=st.home+'/key';
-  const groups={};for(const x of p.peers)(groups[x.space||'default']??=[]).push(x);
-  const names=Object.keys(groups).sort((a,b)=>a==='default'?1:b==='default'?-1:a.localeCompare(b));
+  // An agent you added to other spaces shows there, not in its own space as well, marked with its own space.
+  // A lead you picked stays to head its own space, marked with the spaces it also joined.
+  const stays=x=>!(x.also||[]).length||x.leads==='set'||x.leads==='file';
+  const groups={};for(const x of p.peers)if(stays(x))(groups[x.space||'default']??=[]).push(x);
+  const names=[...new Set(p.peers.map(x=>x.space||'default'))];
   // An org chart. A space is a box of its own agents; the lead of a space inside it sits in that box too, with
   // its team's box hanging beneath it. Charts with teams in them come first, so the top of the org is at the top.
   // Two sessions open in a lead's folder are both leads: all sit in the parent's box, the team under the first.
@@ -3527,8 +3533,7 @@ async function refresh(force,snap){
   const inside={},kids={},leads={};for(const x of [...p.peers,...ghosts])if(x.parent){(leads[x.space]??=[]).push(x);if(!inside[x.space]){inside[x.space]={parent:x.parent,lead:x.name,peer:x};(kids[x.parent]??=[]).push(x.space)}}
   for(const n in inside)inside[n].lead=leads[n].map(x=>x.name).join(', ');
   for(const n of Object.keys(kids))if(!groups[n])groups[n]=[];
-  // An agent you added to other spaces shows in each of them too, marked with its own space.
-  const guests={};for(const x of p.peers)for(const n of x.also||[]){(guests[n]??=[]).push({...x,leads:'',parent:'',guest:x.space});groups[n]??=[]}
+  const guests={};for(const x of p.peers)if(!stays(x))for(const n of x.also){(guests[n]??=[]).push({...x,leads:'',parent:'',guest:x.space});groups[n]??=[]}
   const size=(n,seen=new Set())=>{if(seen.has(n))return 0;seen.add(n);return (groups[n]||[]).length+(kids[n]||[]).reduce((t,c)=>t+size(c,seen),0)};
   const order=(a,b)=>a==='default'?1:b==='default'?-1:((kids[b]||[]).length>0)-((kids[a]||[]).length>0)||size(b)-size(a)||a.localeCompare(b);
   const roots=Object.keys(groups).filter(n=>!inside[n]||n===inside[n].parent).sort(order);
@@ -3546,7 +3551,7 @@ async function refresh(force,snap){
   // A lead is told apart by its outline (and says which team on hover), so every card keeps its context in one place.
   // The badge sits in the name row, left of the context; an offline lead's clear link goes beneath.
   // An implicit lead (it was alone in the space) has a dashed badge, and says so on hover, so the name keeps its room.
-  const badge=x=>x.guest?`<span class="badge guest" title="A member you added; its own space is ${esc(x.guest)}">${esc(x.guest)}</span>`:x.leads?`<span class="badge${x.leads==='only'?' only':''}" title="${x.leads==='only'?'Lead (only agent): it was the only agent in the space':'Lead'}">Lead</span>`:'';
+  const badge=x=>(x.leads&&(x.also||[]).length?`<span class="badge guest" title="Also a member of ${esc(x.also.join(', '))}">+${esc(x.also.join(', '))}</span>`:'')+(x.guest?`<span class="badge guest" title="A member you added; its own space is ${esc(x.guest)}">${esc(x.guest)}</span>`:x.leads?`<span class="badge${x.leads==='only'?' only':''}" title="${x.leads==='only'?'Lead (only agent): it was the only agent in the space':'Lead'}">Lead</span>`:'');
   const clearOff=x=>x.leads&&x.offline?`<div><span class="small mut" data-clearlead="${esc(x.space)}" title="Clear this lead" style="cursor:pointer">clear</span></div>`:'';
   const node=x=>`<${x.offline?'div':'button'} class="node${x.leads?' is-lead':''}${x.offline?' off':''}${x.id&&x.id===sel?' sel':''}"${x.offline?'':` data-sel="${esc(x.id)}"`}${x.leads?` title="Leads the ${esc(x.space)} ${x.parent?'team':'space'}${x.offline?' (offline)':''}"`:''}>
     <div class="nm"><span title="${esc(x.name)}">${x.offline?'':`<span class="dot ${x.busy?'busy':''}"></span>`}${esc(x.name)}</span><span class="rt">${badge(x)}${ctx(x)}</span></div>${clearOff(x)}
@@ -3762,7 +3767,7 @@ function panelTasks(x){
   const sec=(title,list,none)=>`<div class="k small">${title}</div>${list.length?byLive(list).map(t=>taskRow(t,false)).join(''):`<div class="small mut">${none}</div>`}`;
   return `<div class="ptasks">${sec('Owns',mine,'No tasks for this agent.')}${sec('Asked for',asked,'It hasn\'t handed out any tasks.')}</div>`}
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-ptab],[data-tact]');if(!b)return;
-  if(b.dataset.ptab){panelTab=b.dataset.ptab;refresh(true);return}
+  if(b.dataset.ptab){panelTab=b.dataset.ptab;editing=false;refresh(true);return}
   const id=b.closest('[data-task]').dataset.task,was=allTasks.find(t=>t.id===id)?.status;
   if(b.dataset.tact==='cancelled'&&!confirm(`Cancel task ${id}? Its owner is told to stop.`))return;
   const r=await post('/api/tasks/'+encodeURIComponent(id),{status:b.dataset.tact,expect:was});if(r.error)alert(r.error);refresh(true)});
@@ -3793,20 +3798,21 @@ document.addEventListener('click',async e=>{const b=e.target.closest('[data-copy
 document.addEventListener('input',e=>{if(e.target.closest('#agentform,#msgform'))editing=true;
   if(e.target.id==='asearch'&&lastSnap)refresh(true,lastSnap);if(e.target.id==='msgq')renderMessages(lastMsgs)});
 document.addEventListener('change',e=>{if(e.target.closest('#agentform,#msgform'))editing=true});
-// Save applies only what changed, in one go, and says what happened.
+// Save applies only what changed, in one go, and says what happened. Details and Controls each show part of the
+// agent's settings in this one form, so a field the open tab doesn't show is left alone.
 document.addEventListener('submit',async e=>{if(e.target.id!=='agentform')return;e.preventDefault();
-  const f=e.target,d=f.dataset,id=d.id,msg=$('#agentmsg'),v=n=>f.elements[n].value.trim();
+  const f=e.target,d=f.dataset,id=d.id,msg=$('#agentmsg'),has=n=>!!f.elements[n],v=n=>f.elements[n].value.trim();
   const patch={},errs=[];
-  if(v('nickname')!==d.nick)patch.nickname=v('nickname');
-  if(v('override')!==d.override)patch.space=v('override');
-  if(f.elements.wake.value!==d.wake)patch.auto_wake=f.elements.wake.value==='default'?null:f.elements.wake.value==='on';
-  if(f.elements.muted.checked!==!!d.muted)patch.muted=f.elements.muted.checked;
+  if(has('nickname')&&v('nickname')!==d.nick)patch.nickname=v('nickname');
+  if(has('override')&&v('override')!==d.override)patch.space=v('override');
+  if(has('wake')&&f.elements.wake.value!==d.wake)patch.auto_wake=f.elements.wake.value==='default'?null:f.elements.wake.value==='on';
+  if(has('muted')&&f.elements.muted.checked!==!!d.muted)patch.muted=f.elements.muted.checked;
   msg.className='small';msg.textContent='Saving…';
   if(Object.keys(patch).length){const r=await post(`/api/sessions/${encodeURIComponent(id)}/config`,patch);if(r.error)errs.push(r.error);else cfg.sessions=r.sessions}
-  for(const [field,key] of [['role','role'],['spacefile','space'],['parent','parent']])if(v(field)!==d[field]){
+  for(const [field,key] of [['role','role'],['spacefile','space'],['parent','parent']])if(has(field)&&v(field)!==d[field]){
     const r=await post(`/api/sessions/${encodeURIComponent(id)}/space-file`,{[key]:v(field)});if(r.error)errs.push(r.error)}
-  const also=v('also').split(',').map(t=>t.trim()).filter(Boolean);
-  if(also.join(', ')!==d.also){const r=await post('/api/members',{cwd:d.cwd,spaces:also});if(r.error)errs.push(r.error)}
+  const also=has('also')?v('also').split(',').map(t=>t.trim()).filter(Boolean):[];
+  if(has('also')&&also.join(', ')!==d.also){const r=await post('/api/members',{cwd:d.cwd,spaces:also});if(r.error)errs.push(r.error)}
   editing=false;lastPanel='';await refresh(true);
   const m2=$('#agentmsg');if(m2){m2.className='small '+(errs.length?'err':'ok');m2.textContent=errs.length?errs.join(' '):'Saved'}});
 document.addEventListener('click',async e=>{const t=e.target.closest('button');if(!t)return;
