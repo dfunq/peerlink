@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.12'
+const DAEMON_VERSION = '0.8.13'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -34,6 +34,8 @@ type ClientConfig = {
   // How this agent leads its space: you picked it, its folder holds the nesting .peerlink, or it was alone there.
   leads?: '' | 'set' | 'file' | 'only'
   space_parent?: string
+  // Spaces your user added this agent's folder to, on top of its own.
+  also?: string[]
   // What this agent is here for: the role: lines of its folder's .peerlink.
   role?: string
   // The agent that leads this agent's space, and the leads of spaces nested inside it.
@@ -698,7 +700,8 @@ function spaceLine() {
     : cfg.space_source === 'rule' ? `folder rule ${cfg.space_from}`
     : 'no space set'
   const nest = cfg.parent ? `, leads it inside "${cfg.parent}"` : cfg.leads ? ', leads it' : cfg.lead ? `, led by ${cfg.lead}` : ''
-  return `space: ${cfg.space} (${from}${nest})`
+  const also = cfg.also?.length ? `; also a member of ${cfg.also.join(', ')}` : ''
+  return `space: ${cfg.space} (${from}${nest})${also}`
 }
 
 // Where a peer sits relative to this agent: a lead speaks for its space; a peer in another space is the lead's parent.
@@ -746,6 +749,10 @@ function hierarchyGuidance() {
     )
   else if (cfg.lead)
     lines.push(`${cfg.lead} leads the "${cfg.space}" space and relays work from outside it. Report results to ${cfg.lead}, and ask it for anything that lives outside your space.`)
+  if (cfg.also?.length)
+    lines.push(
+      `Your user also made you a member of ${cfg.also.map(s => `"${s}"`).join(', ')}: you see and message the agents there, and they see you. Your own space is still "${cfg.space}".`,
+    )
   const kids = cfg.children ?? []
   if (kids.length)
     lines.push(
@@ -1209,7 +1216,7 @@ export const register: Register = on => {
         {
           id: 'peerlink:guidance',
           scope: 'session',
-          text: `# Peer agents\nPeers know you as "${myName}"${cfg.space && cfg.space !== 'default' ? ` in the "${cfg.space}" space; you only see agents in that space${cfg.parent ? ` and "${cfg.parent}"` : ''}` : ''}.${hierarchyGuidance()}\n${cfg.guidance}`,
+          text: `# Peer agents\nPeers know you as "${myName}"${cfg.space && cfg.space !== 'default' ? ` in the "${cfg.space}" space; you only see agents in that space${[cfg.parent, ...(cfg.also ?? [])].filter(Boolean).map(s => ` and "${s}"`).join('')}` : ''}.${hierarchyGuidance()}\n${cfg.guidance}`,
         },
       ],
     }
