@@ -2,13 +2,14 @@
 
 Let your Claude agents find each other and message each other to get work done. Each agent is a Claude Code session; peerlink connects the ones running on your machine.
 
-Each agent gets four tools:
+Each agent gets these tools, among others:
 
 | Tool | What it does |
 | --- | --- |
 | `list_peers` | Lists the other live agents: name, folder, branch, what each is working on, and whether it's busy |
 | `send_message` | Sends a message to a peer agent by name, or to a space's lead with `space:<name>`. The message is delivered into a turn that's running, or starts a turn in an idle agent |
 | `set_summary` | Sets the one-line summary that peers see for this agent |
+| `schedule` | Has the daemon send a prompt to a folder's agent later or on a cron, even with the terminal closed. See [Schedules](#schedules) |
 | `report_issue` | Reports a problem with peerlink itself, such as a reply that never arrived. See [Reporting problems](#reporting-problems) |
 
 Agents treat each other as teammates. Each one knows who else is live and what they're doing, and messages a peer when that peer clearly owns what it needs. Guidance in the system prompt sets the tone and says when a message is worth sending. You can edit that guidance in the web UI.
@@ -121,6 +122,7 @@ Talk to your agents from Discord. Open **Channels** in the web UI and follow the
 3. **Map channels to agents.** Each channel has a **master**, which gets your messages, and any **members**. Start a message with a member's name and a colon (`storefront: how's the build?`) to reach it instead. One agent can be in several channels. Direct messages to the bot go to the agent you pick. Agents are kept by folder, so the mapping survives restarts and `/clear`.
 
 - **Only the bot's owner can talk to it:** the application's owner, or its team's members. Anyone else is ignored.
+- **Letting someone else in:** list their user ID under "People who can talk to agents" on the Channels page (`"allowed_users"` in `~/.peerlink/discord.json`). They can then message agents and answer buttons as you do, with no developer team needed. Their posts arrive under their own name.
 - **Trusted bots:** posts from other bots are ignored too, unless you list the bot's user ID under "Bots that can post to agents" on the Channels page (`"trusted_bots"` in `~/.peerlink/discord.json`). A voice assistant, for one, can then hand tasks to agents. Its posts arrive as "<name> on Discord". peerlink's own posts are never relayed.
 - **Channels for one kind:** each mapped channel carries messages, tasks and announcements. Untick some under **Carries** and it carries only the rest.
   - **A #tasks channel** (tasks only): everything you post there becomes a task for its master. It also shows each task its agents hand out or finish.
@@ -136,6 +138,15 @@ Once approved, the daemon starts Claude Code in that folder: in tmux when tmux i
 **Clearing its context:** open an agent's panel in the web UI and press **Clear context** on its **Controls** tab. The agent runs `/clear` once the turn it's in ends. It keeps its name, space and role, and is given back what it still owes peers. Only you can do this, from the web UI.
 
 **Ending:** open an agent's panel in the web UI and press **Terminate** on its **Controls** tab, or send `/kill <name>` on Discord and confirm with the button. The agent finishes the turn it's in, then its session exits. If it's still running a minute later, the daemon stops its process, after checking it is a Claude Code process. Agents can't end each other. Every termination is logged in `~/.peerlink/terminations.jsonl`, with who asked.
+
+## Schedules
+
+An agent's own timers (`CronCreate`, `/loop`) end with its session, so closing the terminal kills them. The daemon keeps schedules instead: at the time, or on a repeat, it sends a prompt to the agent in a folder, whether or not any terminal is open.
+
+- **Making one:** an agent calls its `schedule` tool with a `prompt` and either `cron` (five fields, minute hour day-of-month month weekday, like `0 9 * * 1-5`) or `at` (`in 30m`, `in 2h`, `in 1d`, or a local date and time like `2026-10-25 09:00`). The folder is its own unless it names another. You can add one yourself on the **Schedules** page of the web UI. Times are this machine's local time.
+- **When it runs:** the prompt arrives as a message from `schedule c3`. When no agent is running in the folder, the daemon starts Claude Code there (in tmux, as an approved `request_spawn` does) and the prompt waits for it. With `start: false` it doesn't start one; the prompt waits up to an hour for the next agent there.
+- **Approval:** a schedule an agent makes that may start an agent waits for you in the Inbox, or with **Approve** and **Deny** buttons on Discord, and expires after a day. One that only messages a running agent, or one you add, starts at once. The agent that made it is told what you decided.
+- **Seeing and cancelling:** the **Schedules** page lists them, with the next run, the last run and what happened, and a **Cancel** button. An agent lists its schedules and cancels its own (or its folder's) with the same tool. They're kept in `~/.peerlink/schedules.json`, so a daemon restart keeps them; a run missed while the daemon was down happens once when it's back.
 
 ## Announcements
 
