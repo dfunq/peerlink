@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.21'
+const DAEMON_VERSION = '0.8.22'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -1198,6 +1198,24 @@ export const register: Register = on => {
       isDeferred: false,
     })
     await $.tool.register({
+      name: 'schedule',
+      description:
+        "Do something later, or on a repeat: the peerlink daemon sends your prompt to the agent in a folder (yours by default) at that time, even after this session or its terminal has closed, and starts Claude Code there if no agent is running. Use it instead of CronCreate or /loop for anything that must outlive this session. One that may start an agent waits for your user's approval first. Times are this machine's local time.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['create', 'list', 'cancel'], description: 'create (the default), list, or cancel' },
+          prompt: { type: 'string', description: 'create: what the agent should do when it runs, written so it stands on its own' },
+          cron: { type: 'string', description: 'create, to repeat: five cron fields, minute hour day-of-month month weekday, like "0 9 * * 1-5"' },
+          at: { type: 'string', description: 'create, to run once: "in 30m", "in 2h", "in 1d", or a local date and time like "2026-10-25 09:00"' },
+          folder: { type: 'string', description: 'create: the folder whose agent runs it; yours if left out' },
+          start: { type: 'boolean', description: 'create: start an agent there when none is running (the default, needs approval); false holds the prompt for the next agent instead' },
+          id: { type: 'string', description: 'cancel: the schedule id, like c3' },
+        },
+      },
+      isDeferred: false,
+    })
+    await $.tool.register({
       name: 'report_issue',
       description:
         "Report a problem with peerlink itself (a message that never arrived or reached the wrong agent, a peer you expected that isn't listed, an error from these tools), or suggest how peerlink could work better for you. It goes into the feedback queue your user reviews; a bug also goes straight to the agent working on peerlink when one is live. Not for problems with your own task or a peer's work.",
@@ -1366,6 +1384,31 @@ export const register: Register = on => {
     const res = await call($, 'POST', '/api/spawns', { by: sessionId, dir: input.dir, purpose: input.purpose, first_prompt: input.first_prompt, space: input.space })
     if (!res.ok) return text(`Not asked: ${res.data.error ?? res.status}`)
     return text(`Asked your user to approve ${res.data.id}.${res.data.note ?? ''} You'll get a message when they decide; carry on meanwhile.`)
+  }).catch(daemonDown)
+
+  on('tool.call', { tool: 'mcp__peerlink__schedule' }, async ($, e) => {
+    const input = e as any
+    const action = input.action || 'create'
+    if (action === 'list') {
+      const res = await call($, 'GET', '/api/schedules')
+      if (!res.ok) return text(`Couldn't list them: ${res.data.error ?? res.status}`)
+      const live = (res.data.schedules as any[]).filter(c => c.status === 'active' || c.status === 'pending')
+      if (!live.length) return text('No schedules are active.')
+      return text(live.map(c => `- ${c.id} ${c.status} · ${c.when_text} · ${c.folder}${c.next_run ? ` · next ${new Date(c.next_run * 1000).toLocaleString()}` : ''} · ${clip(c.prompt, 100)}`).join('\n'))
+    }
+    if (action === 'cancel') {
+      const res = await call($, 'POST', `/api/schedules/${encodeURIComponent(String(input.id ?? '').trim())}/cancel`, { by: sessionId })
+      return text(res.ok ? `Cancelled ${res.data.schedule.id}.` : `Not cancelled: ${res.data.error ?? res.status}`)
+    }
+    const res = await call($, 'POST', '/api/schedules', { by: sessionId, prompt: input.prompt, cron: input.cron, at: input.at, folder: input.folder, start: input.start })
+    if (!res.ok) return text(`Not scheduled: ${res.data.error ?? res.status}`)
+    const c = res.data.schedule
+    const next = c.next_run ? new Date(c.next_run * 1000).toLocaleString() : ''
+    return text(
+      c.status === 'pending'
+        ? `Schedule ${c.id} (${c.when_text}) waits for your user's approval, since it may start an agent. You'll get a message when they decide; carry on meanwhile.`
+        : `Scheduled ${c.id} (${c.when_text}), first run ${next}. It runs whether or not this session is open.`,
+    )
   }).catch(daemonDown)
 
   on('tool.call', { tool: 'mcp__peerlink__update_task' }, async ($, e) => {

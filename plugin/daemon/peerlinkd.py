@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.21"
+VERSION = "0.8.22"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -49,6 +49,7 @@ MESSAGES_PATH = os.path.join(HOME, "messages.jsonl")
 ISSUES_PATH = os.path.join(HOME, "issues.jsonl")
 TASKS_PATH = os.path.join(HOME, "tasks.json")
 SPAWNS_PATH = os.path.join(HOME, "spawns.json")
+SCHEDULES_PATH = os.path.join(HOME, "schedules.json")
 TERMINATIONS_PATH = os.path.join(HOME, "terminations.jsonl")
 DISCORD_PATH = os.path.join(HOME, "discord.json")  # the bot token and the channel mapping, 0600
 # Reports an agent wrote while the daemon was down; the daemon files them when it starts.
@@ -106,6 +107,9 @@ a freeze), send_message with kind "announcement" and to "space". Nobody \
 replies, so keep them rare.
 - When work belongs in a folder no agent is running in, request_spawn asks \
 your user to start one there; nothing starts without their approval.
+- To do something later or on a repeat, use the schedule tool, not \
+CronCreate or /loop: the daemon keeps it after your session or terminal \
+closes, and starts an agent in the folder if none is running.
 - When you need your user to do something only they can (a login, an \
 approval, a decision), send_message to "user": kind "task" for something to \
 do, expects_reply for a question. It waits in their Inbox, and on Discord \
@@ -158,6 +162,12 @@ feedback = {}   # id -> a bug report or idea about peerlink, see report_issue()
 next_task = [1]
 announce_times = {}  # agent id -> when it last announced, for announce_per_hour
 spawns = {}          # id -> a request to start an agent, see request_spawn()
+schedules = {}       # id -> a prompt the daemon sends a folder's agent later or on a repeat, see create_schedule()
+# When an agent last ran in each folder. An implicit lead keeps its space this long after its folder goes quiet,
+# counted from the daemon's start too, so agents reconnecting one by one after a restart don't each take it.
+folder_seen = {}
+LEAD_GRACE_S = 600
+DAEMON_START = time.time()
 spawn_spaces = {}    # folder -> the space an approved agent joins when it registers there
 config = {}
 key = [""]
@@ -459,17 +469,22 @@ def parent_of(rec):
 def note_lone_leads():
     """An agent alone in its space leads it, and keeps leading when others join, until you pick another.
     The default space is where unsorted agents land, not a team, so it has no lead. Called with the lock held."""
-    folders = {}
+    folders, now = {}, time.time()
     for r in sessions.values():
         if is_live(r):
             folders.setdefault(space_of(r)[0], set()).add(r.get("cwd", ""))
+            folder_seen[r.get("cwd", "")] = now
     for space, cwds in folders.items():
         if space == DEFAULT_SPACE or len(cwds) != 1 or "" in cwds:
             continue
         cwd = next(iter(cwds))
-        # A lead you set always wins; an implicit lead elsewhere is gone, as only cwd is live here.
+        # A lead you set always wins. An implicit lead elsewhere gives way once its folder has been quiet a while, or
+        # at once when its agent has moved to another space.
         folder, how = space_lead(space)
         if folder == cwd or how == "set":
+            continue
+        moved = any(is_live(r) and r.get("cwd") == folder for r in sessions.values())
+        if folder and not moved and now - folder_seen.get(folder, DAEMON_START) < LEAD_GRACE_S:
             continue
         config.setdefault("space_leads", {})[space] = {"cwd": cwd, "how": "only", "ts": time.time()}
         save_config()
@@ -701,7 +716,8 @@ def snapshot():
         msgs = messages[-100:]
         task_list = sorted(tasks.values(), key=lambda t: -t["created"])[:500]
         issues = sorted(feedback.values(), key=lambda i: i["ts"])[-500:]
-    return {"status": status, "peers": {"host": HOSTNAME, "peers": peers, "leads": leads_view()}, "messages": {"messages": msgs},
+        sched = sorted(schedules.values(), key=lambda c: -c["created"])[:200]
+    return {"schedules": {"schedules": [{**c, "when_text": when_text(c)} for c in sched]},"status": status, "peers": {"host": HOSTNAME, "peers": peers, "leads": leads_view()}, "messages": {"messages": msgs},
             "tasks": {"tasks": task_list}, "issues": {"issues": issues, "path": ISSUES_PATH}, "inbox": {"items": inbox_items(), "user": USER_NAME}}
 
 
@@ -824,7 +840,9 @@ discord = {"token": "", "app_id": "", "user": "", "enabled": True, "routes": [],
            # What agents may do beyond text, each a switch on the Channels page.
            "buttons": True, "files_out": True, "files_in": True, "max_file_mb": 10,
            # Bot user IDs whose posts reach agents as yours do (a voice assistant, say); other bots are ignored.
-           "trusted_bots": []}
+           "trusted_bots": [],
+           # People's user IDs who may talk to agents and answer buttons as you do, beside the app's owner or team.
+           "allowed_users": []}
 DISCORD_FILES = os.path.join(HOME, "files", "discord")  # what you attach on Discord, for the agent to read
 discord_bot = [None]
 
@@ -852,6 +870,7 @@ def start_discord():
     if discord.get("token") and discord.get("enabled", True):
         discord_bot[0] = discordlink.Bot(discord["token"], on_discord, log, on_press)
         discord_bot[0].trusted_bots = set(discord.get("trusted_bots") or [])
+        discord_bot[0].allowed_users = set(discord.get("allowed_users") or [])
 
 
 def folder_name(cwd):
@@ -1181,6 +1200,8 @@ def on_press(press):
         return on_task_press(press)
     if press["custom_id"].startswith("ps:"):
         return on_spawn_press(press)
+    if press["custom_id"].startswith("pc:"):
+        return on_spawn_press(press, decide_schedule, schedules)
     if press["custom_id"].startswith("pk:"):
         _, sid, idx = (press["custom_id"].split(":") + ["", ""])[:3]
         code, out = terminate(sid, f"Discord ({press['author']})") if idx == "0" else (200, {"kept": True})
@@ -1306,6 +1327,10 @@ def inbox_items():
         out += [{"kind": "approval", "id": x["id"], "who": x["requester"].get("name", ""), "since": x["created"],
                  "title": f"Start an agent in {tilde_path(x['dir'])}", "text": f"{x['purpose']}\n\nSpace: {x['space']}\nFirst prompt: {x['prompt']}"}
                 for x in spawns.values() if x["status"] == "pending"]
+        out += [{"kind": "approval", "id": c["id"], "who": c["requester"].get("name", ""), "since": c["created"],
+                 "title": f"Schedule for {tilde_path(c['folder'])}: {when_text(c)}",
+                 "text": f"{c['prompt']}\n\nIt starts an agent there when none is running."}
+                for c in schedules.values() if c["status"] == "pending"]
     order = {"approval": 0, "task": 1, "question": 2, "feedback": 3}
     return sorted(out, key=lambda x: (order[x["kind"]], x["since"]))
 
@@ -1326,7 +1351,8 @@ def inbox_act(body, discord_from=None):
     if kind == "approval":
         if action not in ("approve", "deny"):
             return 400, {"error": "a request to start an agent is approved or denied"}
-        return decide_spawn(iid, action == "approve", "Discord" if discord_from else "the web UI")
+        decide = decide_schedule if iid in schedules else decide_spawn
+        return decide(iid, action == "approve", "Discord" if discord_from else "the web UI")
     if kind == "feedback":
         if action not in ("accepted", "dismissed"):
             return 400, {"error": "feedback is accepted or dismissed"}
@@ -2222,9 +2248,11 @@ def close_buttons(item):
     threading.Thread(target=edit, daemon=True).start()
 
 
-def on_spawn_press(press):
+def on_spawn_press(press, decide=None, items=None):
+    """Approve or Deny on Discord, for a request to start an agent or a schedule that may start one."""
+    decide, items = decide or decide_spawn, spawns if items is None else items
     _, sid, idx = (press["custom_id"].split(":") + ["", ""])[:3]
-    sp = spawns.get(sid)
+    sp = items.get(sid)
     if not sp or sp["status"] != "pending":
         discordlink.answer_interaction(press["id"], press["token"], 4, {"content": f"{sid} is already {sp['status'] if sp else 'gone'}.", "flags": 64})
         return
@@ -2234,7 +2262,220 @@ def on_spawn_press(press):
             b["disabled"] = True
             b["style"] = 3 if b.get("custom_id") == press["custom_id"] else 2
     discordlink.answer_interaction(press["id"], press["token"], 7, {"components": rows})
-    decide_spawn(sid, idx == "0", f"Discord ({press['author']})")
+    decide(sid, idx == "0", f"Discord ({press['author']})")
+
+
+# Schedules: a prompt the daemon sends a folder's agent at a time or on a cron, whether or not a terminal is open.
+# When none is running there it starts one, as an approved spawn does; a schedule an agent asks for that may do
+# that waits for your approval first. Times are this machine's local time.
+CRON_NAMES = ({}, {}, {}, {m: i + 1 for i, m in enumerate("jan feb mar apr may jun jul aug sep oct nov dec".split())},
+              {d: i for i, d in enumerate("sun mon tue wed thu fri sat".split())})
+CRON_RANGES = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
+
+
+def parse_cron(expr):
+    """The five fields of a cron (minute hour day-of-month month weekday) as sets; ValueError when malformed."""
+    parts = str(expr or "").lower().split()
+    if len(parts) != 5:
+        raise ValueError("a cron has five fields: minute hour day-of-month month weekday, like 0 9 * * 1-5")
+    fields = []
+    for part, (lo, hi), names in zip(parts, CRON_RANGES, CRON_NAMES):
+        values = set()
+        for item in part.split(","):
+            rng, slash, step = item.partition("/")
+            num = lambda v: names[v] if v in names else int(v)
+            try:
+                a, b = (lo, hi) if rng == "*" else (num(rng.split("-")[0]), num(rng.split("-")[1])) if "-" in rng else (num(rng), hi if slash else num(rng))
+                step = int(step) if slash else 1
+            except (ValueError, IndexError):
+                raise ValueError(f"can't read {item!r} in {expr!r}")
+            if not (lo <= a <= b <= hi) or step < 1:
+                raise ValueError(f"{item!r} is out of range in {expr!r}")
+            values.update(range(a, b + 1, step))
+        fields.append(values)
+    if 7 in fields[4]:
+        fields[4] = (fields[4] - {7}) | {0}
+    # As cron reads it: with both day fields restricted, a day matching either runs.
+    fields.append((parts[2] == "*", parts[4] == "*"))
+    return fields
+
+
+def cron_next(expr, after):
+    """The first minute after `after` (epoch seconds) the cron matches, in local time."""
+    import datetime as dt
+    minute, hour, dom, month, dow, (any_dom, any_dow) = parse_cron(expr)
+    t = dt.datetime.fromtimestamp(after).replace(second=0, microsecond=0) + dt.timedelta(minutes=1)
+    for _ in range(100000):
+        wd = t.isoweekday() % 7
+        day_ok = (t.day in dom and wd in dow) if any_dom or any_dow else (t.day in dom or wd in dow)
+        if t.month not in month:
+            t = (t.replace(day=1, hour=0, minute=0) + dt.timedelta(days=32)).replace(day=1)
+        elif not day_ok:
+            t = (t + dt.timedelta(days=1)).replace(hour=0, minute=0)
+        elif t.hour not in hour:
+            t = (t + dt.timedelta(hours=1)).replace(minute=0)
+        elif t.minute not in minute:
+            t += dt.timedelta(minutes=1)
+        else:
+            return t.timestamp()
+    raise ValueError(f"{expr!r} never runs")
+
+
+def parse_at(text, now):
+    """A one-off time: 'in 30m', 'in 2h', 'in 1d', or a local date and time like 2026-10-25 09:00."""
+    import datetime as dt
+    t = str(text or "").strip().lower()
+    m = re.fullmatch(r"(?:in\s+)?(\d+)\s*(m|min|mins|minutes?|h|hrs?|hours?|d|days?)", t)
+    if m:
+        return now + int(m.group(1)) * {"m": 60, "h": 3600, "d": 86400}[m.group(2)[0]]
+    try:
+        when = dt.datetime.fromisoformat(t.replace(" ", "T") if re.match(r"\d{4}-\d\d-\d\d \d", t) else t)
+    except ValueError:
+        raise ValueError(f"can't read {text!r}: give 'in 30m', 'in 2h', 'in 1d' or a local date and time like 2026-10-25 09:00")
+    return when.timestamp()
+
+
+def when_text(c):
+    import datetime as dt
+    if c.get("cron"):
+        return f"cron {c['cron']}"
+    return "once, " + dt.datetime.fromtimestamp(c.get("at") or 0).strftime("%a %b %-d %H:%M")
+
+
+def load_schedules():
+    try:
+        with open(SCHEDULES_PATH) as f:
+            for x in json.load(f):
+                schedules[x["id"]] = x
+    except (OSError, ValueError, KeyError):
+        pass
+
+
+def save_schedules():
+    with open(SCHEDULES_PATH + ".tmp", "w") as f:
+        json.dump(list(schedules.values()), f, indent=1)
+    os.replace(SCHEDULES_PATH + ".tmp", SCHEDULES_PATH)
+
+
+def schedule_told(c, text):
+    """Tell the agent that made a schedule what happened to it. Called with the lock held."""
+    if c["requester"].get("cwd"):
+        task_message(None, c["requester"]["cwd"], text)
+
+
+def create_schedule(body, by=None):
+    """A schedule from an agent (`by`) or from you (None). An agent's that may start one waits for your approval."""
+    now = time.time()
+    folder = os.path.abspath(os.path.expanduser(str(body.get("folder") or (by or {}).get("cwd") or "")))
+    prompt = str(body.get("prompt") or "").strip()
+    cron, at = str(body.get("cron") or "").strip(), body.get("at")
+    start = body.get("start") is not False
+    if not os.path.isdir(folder):
+        return 400, {"error": f"{folder} isn't a folder on this machine"}
+    if not prompt:
+        return 400, {"error": "prompt is required: what the agent should do when it runs"}
+    if bool(cron) == bool(at):
+        return 400, {"error": "give either cron (a repeat, like 0 9 * * 1-5) or at (once, like 'in 2h' or 2026-10-25 09:00)"}
+    try:
+        next_run = cron_next(cron, now) if cron else parse_at(at, now)
+    except ValueError as err:
+        return 400, {"error": str(err)}
+    if not cron and next_run <= now:
+        return 400, {"error": "that time has passed"}
+    with lock:
+        n = max([int(i[1:]) for i in schedules] or [0]) + 1
+        c = {"id": f"c{n}", "folder": folder, "prompt": prompt[:8000], "cron": cron, "at": None if cron else next_run,
+             "start": start, "next_run": next_run, "last_run": None, "runs": 0, "note": "",
+             "requester": {"id": by["id"], "name": display_name(by), "cwd": by.get("cwd", "")} if by else {"name": USER_NAME, "cwd": ""},
+             "status": "pending" if by and start else "active", "created": now, "updated": now}
+        schedules[c["id"]] = c
+        save_schedules()
+        chans = [r for r in routes_for(by.get("cwd", "")) if r["channel_id"] != "dm" and carries(r, "message")] if by else []
+    log("schedule", c["id"], c["status"], tilde_path(folder), when_text(c))
+    if c["status"] == "pending" and chans and discord.get("token") and discord_bot[0]:
+        try:
+            sent = discordlink.post(discord["token"], chans[0]["channel_id"],
+                                    f"**{c['requester']['name']}** asks to schedule `{tilde_path(folder)}` ({when_text(c)}), starting an agent there when none is running: {prompt[:600]}",
+                                    None, discordlink.buttons(["Approve", "Deny"], f"pc:{c['id']}"))
+            with lock:
+                c["discord_out"] = {"channel_id": chans[0]["channel_id"], "message_id": str((sent[-1] or {}).get("id", "")) if sent else ""}
+                save_schedules()
+        except discordlink.DiscordError as err:
+            log("discord", "schedule post failed:", err)
+    return 200, {"schedule": {**c, "when_text": when_text(c)}}
+
+
+def decide_schedule(cid, approve, via):
+    with lock:
+        c = schedules.get(cid)
+        if c is None:
+            return 404, {"error": f"no schedule {cid}"}
+        if c["status"] != "pending":
+            return 409, {"error": f"{cid} is already {c['status']}"}
+        c["status"], c["updated"] = ("active" if approve else "denied"), time.time()
+        schedule_told(c, f"Your user {'approved' if approve else 'denied'} schedule {cid} ({when_text(c)}).")
+        save_schedules()
+    close_buttons(c)
+    log("schedule", cid, c["status"], "via", via)
+    return 200, {"schedule": dict(c)}
+
+
+def cancel_schedule(cid, by=None):
+    """You cancel any schedule; an agent, one it made or one for its folder."""
+    with lock:
+        c = schedules.get(cid)
+        if c is None:
+            return 404, {"error": f"no schedule {cid}"}
+        if by and by["id"] != c["requester"].get("id") and by.get("cwd") not in (c["folder"], c["requester"].get("cwd")):
+            return 403, {"error": f"{cid} isn't yours or your folder's to cancel"}
+        if c["status"] in ("cancelled", "done", "denied", "expired"):
+            return 409, {"error": f"{cid} is already {c['status']}"}
+        c["status"], c["updated"], c["next_run"] = "cancelled", time.time(), None
+        if by is None:
+            schedule_told(c, f"Your user cancelled schedule {cid} ({when_text(c)}).")
+        save_schedules()
+    close_buttons(c)
+    log("schedule", cid, "cancelled", "by", display_name(by) if by else "you")
+    return 200, {"schedule": dict(c)}
+
+
+starting = {}  # folder -> when the daemon last started an agent there for a schedule
+
+
+def fire_schedule(c, now):
+    """Send the prompt to the folder's agent, or hold it for one; the next run is set. Returns c when an agent
+    has to be started for it. Called with the lock held."""
+    msg = {"id": f"m{next_msg[0]}", "ts": now, "from": "peerlink", "from_name": f"schedule {c['id']}", "from_host": HOSTNAME,
+           "from_cwd": "", "to_cwd": c["folder"], "from_space": "", "to_space": "",
+           "text": f"Scheduled ({when_text(c)}; cancel with the schedule tool, id {c['id']}): {c['prompt']}",
+           "expects_reply": False, "reply_to": None, "hops": 0, "status": "queued", "v": 2}
+    next_msg[0] += 1
+    agent = queue_for_folder(c["folder"], msg)
+    c["last_run"], c["runs"], c["updated"] = now, c.get("runs", 0) + 1, now
+    try:
+        c["next_run"] = cron_next(c["cron"], now) if c["cron"] else None
+    except ValueError:
+        c["next_run"] = None
+    if not c["cron"]:
+        c["status"] = "done"
+    c["note"] = f"sent to {display_name(agent)}" if agent else "no agent was running there"
+    save_schedules()
+    log("schedule", c["id"], "ran:", c["note"])
+    # One start per folder at a time: a second run while the first agent is still starting waits for it.
+    if agent or not c["start"] or now - starting.get(c["folder"], 0) < 120:
+        return None
+    starting[c["folder"]] = now
+    return c
+
+
+def start_for_schedule(c):
+    how, err = launch({"dir": c["folder"], "id": c["id"]})
+    with lock:
+        c["note"] = f"started an agent {how}" if how else f"couldn't start an agent: {err}"
+        if err:
+            schedule_told(c, f"Schedule {c['id']} ran, but no agent was running in {tilde_path(c['folder'])} and one couldn't start: {err}. The prompt waits there for an hour.")
+        save_schedules()
+    log("schedule", c["id"], c["note"])
 
 
 # Ending an agent: you ask (web UI, or "/kill <name>" on Discord, confirmed with a button), never an agent.
@@ -2315,6 +2556,12 @@ def reaper():
                 sp["status"], sp["updated"] = "expired", now
                 spawn_told(sp, f"Your request {sp['id']} to start an agent in {sp['dir']} expired: your user didn't answer within a day.")
                 save_spawns()
+            for c in [x for x in schedules.values() if x["status"] == "pending" and now - x["created"] > SPAWN_TTL_S]:
+                c["status"], c["updated"] = "expired", now
+                schedule_told(c, f"Your schedule {c['id']} expired: your user didn't approve it within a day.")
+                save_schedules()
+            due = [c for c in schedules.values() if c["status"] == "active" and c.get("next_run") and c["next_run"] <= now]
+            starts = [fire_schedule(c, now) for c in due]
             # Messages to an agent that has gone for an hour are not coming back.
             for sid in [s for s in inboxes if s not in sessions]:
                 kept = [m for m in inboxes[sid] if now - m["ts"] < 3600]
@@ -2323,6 +2570,8 @@ def reaper():
                     inboxes[sid] = kept
                 else:
                     inboxes.pop(sid)
+        for c in filter(None, starts):
+            start_for_schedule(c)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2345,7 +2594,7 @@ class Handler(BaseHTTPRequestHandler):
                 "routes": discord.get("routes", []), "dm": discord.get("dm", ""),
                 "buttons": discord.get("buttons", True), "files_out": discord.get("files_out", True),
                 "files_in": discord.get("files_in", True), "max_file_mb": discord.get("max_file_mb", 10),
-                "trusted_bots": discord.get("trusted_bots", []),
+                "trusted_bots": discord.get("trusted_bots", []), "allowed_users": discord.get("allowed_users", []),
             })
         if rest == [] and method == "PUT":
             b = self.body()
@@ -2370,12 +2619,13 @@ class Handler(BaseHTTPRequestHandler):
                     discord[k] = bool(b[k])
             if "max_file_mb" in b:
                 discord["max_file_mb"] = max(1, min(500, float(b["max_file_mb"] or 10)))
-            if "trusted_bots" in b:
-                raw = b["trusted_bots"]
-                ids = re.findall(r"\d{15,22}", raw if isinstance(raw, str) else " ".join(map(str, raw or [])))
-                discord["trusted_bots"] = list(dict.fromkeys(ids))
-                if bot:
-                    bot.trusted_bots = set(discord["trusted_bots"])
+            for k in ("trusted_bots", "allowed_users"):
+                if k in b:
+                    raw = b[k]
+                    ids = re.findall(r"\d{15,22}", raw if isinstance(raw, str) else " ".join(map(str, raw or [])))
+                    discord[k] = list(dict.fromkeys(ids))
+                    if bot:
+                        setattr(bot, k, set(discord[k]))
             save_discord()
             if "token" in b or "enabled" in b:
                 start_discord()
@@ -2722,6 +2972,30 @@ class Handler(BaseHTTPRequestHandler):
         if rest == ["spawns"] and method == "POST":
             code, out = request_spawn(self.body())
             return self.reply(code, out)
+        if rest == ["schedules"] and method == "GET":
+            with lock:
+                return self.reply(200, {"schedules": [{**c, "when_text": when_text(c)} for c in sorted(schedules.values(), key=lambda c: -c["created"])]})
+        if rest == ["schedules"] and method == "POST":
+            b = self.body()
+            if browser and not self.key_ok():
+                code, out = create_schedule(b)
+            else:
+                with lock:
+                    by = sessions.get(str(b.get("by") or ""))
+                if by is None:
+                    return self.reply(403, {"error": "unknown agent; register again"})
+                code, out = create_schedule(b, by)
+            return self.reply(code, out)
+        if len(rest) == 3 and rest[0] == "schedules" and rest[2] == "cancel" and method == "POST":
+            if browser and not self.key_ok():
+                code, out = cancel_schedule(rest[1])
+            else:
+                with lock:
+                    by = sessions.get(str(self.body().get("by") or ""))
+                if by is None:
+                    return self.reply(403, {"error": "unknown agent; register again"})
+                code, out = cancel_schedule(rest[1], by)
+            return self.reply(code, out)
         if rest == ["spawns"] and method == "GET":
             with lock:
                 return self.reply(200, {"spawns": sorted(spawns.values(), key=lambda x: -x["created"])})
@@ -2898,6 +3172,7 @@ def serve():
     load_tasks()
     load_feedback()
     load_spawns()
+    load_schedules()
     load_dirs()
     file_pending_issues()
     load_discord()
@@ -3278,6 +3553,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <a href="#inbox" data-nav="inbox">Inbox <span class="count hot" id="n-inbox"></span></a>
 <a href="#agents" data-nav="agents">Agents <span class="count" id="n-agents"></span></a>
 <a href="#tasks" data-nav="tasks">Tasks <span class="count" id="n-tasks"></span></a>
+<a href="#schedules" data-nav="schedules">Schedules <span class="count" id="n-sched"></span></a>
 <a href="#messages" data-nav="messages">Messages <span class="count" id="n-msgs"></span></a>
 <div class="grp" aria-hidden="true">Set up</div>
 <a href="#spaces" data-nav="spaces">Spaces <span class="count" id="n-spaces"></span></a>
@@ -3308,6 +3584,13 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <details class="how"><summary>How spaces work</summary><p>An agent is in the space you put its folder in, from its Details tab on the Agents page. A folder you haven't placed takes the space in the nearest <span class="mono">.peerlink</span> file at or above it, else it's <b>unassigned</b>. Here you pick each space's lead, which gets work sent to the space, and which space it sits inside: its lead then speaks for it there.</p></details>
 <div id="spacelist"></div>
 </section>
+
+<section id="schedules"><h1>Schedules</h1><p class="lead">Prompts the daemon sends a folder's agent at a time or on a repeat, with no terminal open. When none is running there, it starts one. Agents add them with their <span class="mono">schedule</span> tool; one that may start an agent waits for you in the Inbox.</p>
+<form class="card" id="schedform"><div class="addline"><input name="folder" class="grow mono" type="text" placeholder="Folder, like ~/Repos/acme" list="schedfolders"><datalist id="schedfolders"></datalist>
+<input name="when" type="text" placeholder="0 9 * * 1-5, or in 2h" title="A cron (minute hour day month weekday) repeats; 'in 30m', 'in 2h', 'in 1d' or 2026-10-25 09:00 runs once" style="width:190px"></div>
+<textarea name="prompt" rows="2" placeholder="What the agent should do when it runs" style="margin-top:8px;width:100%"></textarea>
+<div class="addline" style="margin-top:8px"><label class="check small"><input type="checkbox" name="start" checked> Start an agent when none is running</label><button type="submit">Add schedule</button><span class="small" id="schedmsg"></span></div></form>
+<div id="schedlist" style="margin-top:12px;display:flex;flex-direction:column;gap:8px"></div></section>
 
 <section id="messages"><h1>Messages</h1><p class="lead">Recent messages between agents, newest first. Click one to read it all.</p>
 <div class="msgbar"><span class="fl"><label class="small mut" for="msgspace">Space</label><select id="msgspace"><option value="">All spaces</option></select></span>
@@ -3490,8 +3773,8 @@ async function refresh(force,snap){
   if(signedOut)return;
   if(!snap){snap=await api('/api/snapshot');lastSnap=snap}
   const {status:st,peers:p,messages:m,tasks:tk,issues:fb,inbox:ib}=snap;
-  allTasks=tk.tasks||[];allFeedback=fb.issues||[];inbox=ib.items||[];
-  const view=JSON.stringify([p.peers.map(({last_seen_s,...x})=>x),p.leads,m.messages.map(x=>[x.id,x.status]),allTasks.map(t=>[t.id,t.status,t.owner,t.note]),allFeedback.map(f=>[f.id,f.status,f.note]),inbox.map(i=>i.id),sel,panelTab,cfg.sessions]);
+  allTasks=tk.tasks||[];allFeedback=fb.issues||[];inbox=ib.items||[];allSched=snap.schedules?.schedules||[];
+  const view=JSON.stringify([p.peers.map(({last_seen_s,...x})=>x),p.leads,m.messages.map(x=>[x.id,x.status]),allTasks.map(t=>[t.id,t.status,t.owner,t.note]),allFeedback.map(f=>[f.id,f.status,f.note]),inbox.map(i=>i.id),allSched.map(c=>[c.id,c.status,c.runs,c.note]),sel,panelTab,cfg.sessions]);
   if(view===lastView&&!force)return;lastView=view;
   $('#hostline').textContent=`${st.host} · daemon ${st.version}`;
   $('#browsers').textContent=`${st.browsers} signed in · links work once and expire after 60 s`;
@@ -3601,8 +3884,27 @@ async function refresh(force,snap){
   // The default space is always listed: it's where every agent with no space set lands.
   const dflt=groups.default?'':`<div class="chart"><div class="orow" style="justify-content:flex-start"><div class="ocol"><div class="sbox"><div class="name">unassigned</div><div class="small mut">agents whose folder has no space · none live</div></div></div></div></div>`;
   $('#spacelist').innerHTML=all((n,seen)=>{const u=sunit(n,seen);return u?`<div class="chart"><div class="orow" style="justify-content:flex-start">${u}</div></div>`:''})+dflt;
-  livePeers=p.peers;lastMsgs=m.messages;renderMessages(lastMsgs);renderTasks();renderFeedback();renderInbox();
+  livePeers=p.peers;lastMsgs=m.messages;renderMessages(lastMsgs);renderTasks();renderFeedback();renderInbox();renderSchedules();
 }
+// Schedules: what's active or waiting first, then the rest, newest first.
+let allSched=[];
+function renderSchedules(){
+  const live=c=>c.status==='active'||c.status==='pending';
+  $('#n-sched').textContent=allSched.filter(live).length||'';
+  $('#schedfolders').innerHTML=[...new Set(livePeers.map(x=>x.cwd))].map(d=>`<option value="${esc(tilde(d))}">`).join('');
+  const when=t=>t?new Date(t*1000).toLocaleString([], {weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):'';
+  const rows=[...allSched.filter(live),...allSched.filter(c=>!live(c))];
+  $('#schedlist').innerHTML=rows.map(c=>`<div class="card"><div class="addline"><b>${esc(c.id)}</b><span class="chip">${esc(c.status)}</span><span>${esc(c.when_text)}</span><span class="mono mut">${esc(tilde(c.folder))}</span>
+    <span style="margin-left:auto" class="small mut">${c.next_run&&live(c)?'next '+when(c.next_run):''}</span>${live(c)?`<button class="ghost small danger" data-schedcancel="${esc(c.id)}">Cancel</button>`:''}</div>
+    <div style="margin-top:6px;white-space:pre-wrap">${esc(c.prompt)}</div>
+    <div class="small mut" style="margin-top:4px">by ${esc(c.requester?.name||'you')}${c.start?' · starts an agent when none is running':' · waits for an agent'}${c.runs?` · ran ${c.runs}×, last ${when(c.last_run)}${c.note?': '+esc(c.note):''}`:''}${c.status==='pending'?' · approve it in the Inbox':''}</div></div>`).join('')||'<div class="empty">No schedules yet.</div>'}
+document.addEventListener('click',async e=>{const b=e.target.closest('[data-schedcancel]');if(!b)return;
+  if(!confirm(`Cancel ${b.dataset.schedcancel}?`))return;const r=await post(`/api/schedules/${encodeURIComponent(b.dataset.schedcancel)}/cancel`);if(r.error)alert(r.error);refresh(true)});
+document.addEventListener('submit',async e=>{if(e.target.id!=='schedform')return;e.preventDefault();const f=e.target,v=n=>f.elements[n].value.trim();
+  const w=v('when'),cron=/^\S+\s+\S+\s+\S+\s+\S+\s+\S+$/.test(w)&&!/^in\s/i.test(w)&&!/^\d{4}-/.test(w);
+  const r=await post('/api/schedules',{folder:v('folder'),prompt:v('prompt'),...(cron?{cron:w}:{at:w}),start:f.elements.start.checked});
+  const out=$('#schedmsg');out.className='small '+(r.error?'err':'ok');out.textContent=r.error||`Added ${r.schedule.id}`;
+  if(!r.error){f.elements.prompt.value='';f.elements.when.value=''}refresh(true)});
 // The Inbox: one row per thing waiting on you, with the action it needs.
 let inbox=[];
 let seenInbox=null;
@@ -3860,6 +4162,9 @@ function renderDiscord(){if(!dState)return;const d=dState,invited=(dGuilds||[]).
     <label class="check"><input type="checkbox" data-dopt="files_out" ${d.files_out?'checked':''}> <span><b>Files from agents:</b> an agent can attach files from this machine to its messages.</span></label>
     <label class="check"><input type="checkbox" data-dopt="files_in" ${d.files_in?'checked':''}> <span><b>Files to agents:</b> what you attach on Discord is saved here, in <span class="mono">~/.peerlink/files/discord</span>, and the agent gets the paths.</span></label>
     <div class="addline" style="margin-top:8px"><label class="small mut" for="dmaxmb">Largest file, either way</label><input id="dmaxmb" type="number" min="1" max="500" step="1" value="${esc(d.max_file_mb)}" style="width:90px" data-dopt="max_file_mb"> <span class="small mut">MB (Discord allows 10 MB without Nitro)</span></div>
+    <h2>People who can talk to agents</h2>
+    <p class="meta">Only you can, as the bot's owner (or its team's members). Add other people's user IDs here, separated by commas: they can then message agents and answer buttons as you do. To find one, turn on Developer Mode in Discord, right-click the person and choose Copy User ID.</p>
+    <div class="addline"><input id="dusers" class="mono" placeholder="e.g. 1562000000000000000" value="${esc((d.allowed_users||[]).join(', '))}" data-dusers style="flex:1;min-width:0"></div>
     <h2>Bots that can post to agents</h2>
     <p class="meta">Other bots are ignored unless listed here. Add their user IDs, separated by commas. To find one, turn on Developer Mode in Discord, right-click the bot and choose Copy User ID. List only bots you control.</p>
     <div class="addline"><input id="dbots" class="mono" placeholder="e.g. 1562000000000000000" value="${esc((d.trusted_bots||[]).join(', '))}" data-dbots style="flex:1;min-width:0"></div>
@@ -3878,6 +4183,7 @@ document.addEventListener('change',e=>{const t=e.target;if(!dDraft)return;
     r.kinds=ks.length?DKINDS.map(x=>x[0]).filter(x=>ks.includes(x)):r.kinds;renderDiscord()}
   if(t.dataset.dopt){const v=t.type==='checkbox'?t.checked:Number(t.value);api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({[t.dataset.dopt]:v})}).then(()=>loadDiscord())}
   if(t.dataset.dbots!==undefined)api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({trusted_bots:t.value})}).then(()=>loadDiscord());
+  if(t.dataset.dusers!==undefined)api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({allowed_users:t.value})}).then(()=>loadDiscord());
   if(t.dataset.dact==='enabled')api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({enabled:t.checked})}).then(()=>loadDiscord())});
 document.addEventListener('click',async e=>{const t=e.target.closest('button');if(!t||!dDraft&&!t.dataset.dact)return;
   if(t.dataset.dremove!==undefined){dDraft.routes.splice(+t.dataset.dremove,1);renderDiscord()}
