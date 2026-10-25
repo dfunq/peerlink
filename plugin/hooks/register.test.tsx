@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.8.21', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.8.22', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (state.forget && path.endsWith('/heartbeat') && 'busy' in body) {
       state.forget = false
       return { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'unknown agent; register again' }) } }
@@ -34,6 +34,9 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     if (path === '/api/issues') return ok({ id: 'i1', logged: '/Users/x/.peerlink/issues.jsonl', sent_to: 'peerlink' })
     if (path.startsWith('/api/tasks/')) return ok({ task: { id: path.split('/').pop(), status: body.status, requester: { name: 'acme' } } })
     if (path === '/api/messages' && body?.kind === 'task') return ok({ id: 'm9', to: body.to, status: 'queued', task: 't3' })
+    if (path === '/api/schedules' && body)
+      return body.cron === 'bad' ? { value: { status: 400, ok: false, headers: {}, text: JSON.stringify({ error: 'a cron has five fields' }) } }
+        : ok({ schedule: { id: 'c1', status: body.start === false ? 'active' : 'pending', when_text: body.cron ? `cron ${body.cron}` : 'once, Sun Oct 25 09:00', next_run: 1_800_000 } })
     const once = state.once
     state.once = {}
     return ok({ name: 'web', config: { poll_interval_ms: 600000, ...config }, inbox: inbox.splice(0), peer_count: peerCount, ...once })
@@ -177,6 +180,20 @@ test('when prompt.compose runs, the guidance is not sent on the prompt as well',
   await $.prompt.compose(COMPOSE)
   const first: any = await $.prompt.submit({ text: 'add an invoice page' })
   expect(first.context?.join('\n') ?? '').not.toContain('Owns the web app.')
+})
+
+test('schedule hands the daemon a prompt for later, and says when it waits for approval', async ($, on) => {
+  engine(on)
+  const daemon = fakeDaemon(on)
+  await $.session.start(START)
+  await settle()
+  const run = async (input: any) => JSON.stringify(await $.tool.call({ tool: 'mcp__peerlink__schedule', ...input } as any))
+  expect(await run({ prompt: 'run the nightly report', cron: '0 2 * * *' })).toContain("waits for your user's approval")
+  expect(await run({ prompt: 'check CI', at: 'in 2h', start: false })).toContain('Scheduled c1 (once, Sun Oct 25 09:00)')
+  expect(await run({ prompt: 'x', cron: 'bad' })).toContain('Not scheduled: a cron has five fields')
+  const sent = daemon.posted.filter(p => p.path === '/api/schedules').map(p => p.body)
+  expect(sent[0]).toMatchObject({ by: 'me-session', prompt: 'run the nightly report', cron: '0 2 * * *' })
+  expect(sent[1]).toMatchObject({ at: 'in 2h', start: false })
 })
 
 test('a new session describes itself from its README, with no model call', async ($, on) => {
@@ -655,7 +672,7 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.8.21 · daemon 0.8.21 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.8.22 · daemon 0.8.22 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the space is listed once', async ($, on) => {
@@ -688,7 +705,7 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.8.21')
+  expect(reg.plugin).toBe('0.8.22')
 })
 
 test('an agent registers again under the folder it started in, wherever the host has moved its root since', async ($, on) => {
@@ -767,7 +784,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.8.22', true], ['0.8.21', false]] as const)
+for (const [installed, reloads] of [['0.8.23', true], ['0.8.22', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     fakeDaemon(on)

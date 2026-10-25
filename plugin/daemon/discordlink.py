@@ -9,7 +9,7 @@ Developer Mode, no copied IDs.
 
 **Who may talk.** Only the application's owner, or its team's members for a team-owned app, read from the
 application when the bot connects. Whoever can paste this bot's token into this daemon already owns it, so that
-is the whole allowlist, and it needs no setting. Anyone else is ignored.
+needs no setting. The owner can let other people in by user ID (`allowed_users`). Anyone else is ignored.
 
 **Reading messages.** Without Discord's Message Content switch a bot sees the text of a message only when it is
 @mentioned or DMed. The daemon asks Discord whether the switch is on and asks for the intent only then: asking
@@ -322,6 +322,7 @@ class Bot:
         self.user = ""
         self.owner_ids = set()
         self.trusted_bots = set()  # bot user IDs whose posts count as the owner's; empty by default
+        self.allowed_users = set()  # people the owner lets in by user ID, beside the app's owner or team
         self.reads_messages = False
         self.guild_channels = {}  # guild id -> {"name", "channels": {id: (position, name)}}
         self.stop = threading.Event()
@@ -438,8 +439,8 @@ class Bot:
         elif kind == "MESSAGE_CREATE":
             author = d.get("author") or {}
             aid = str(author.get("id"))
-            # The owner, or a bot the owner trusts by ID; never this bot itself, so its own posts can't loop.
-            if aid == self.user_id or aid not in (self.trusted_bots if author.get("bot") else self.owner_ids):
+            # The owner, someone they let in, or a bot they trust by ID; never this bot itself, so its own posts can't loop.
+            if aid == self.user_id or aid not in (self.trusted_bots if author.get("bot") else self.owner_ids | self.allowed_users):
                 return
             mentioned = any(str(m.get("id")) == self.user_id for m in d.get("mentions", []))
             text = d.get("content") or ""
@@ -462,8 +463,8 @@ class Bot:
                 self.log("discord", "message handler failed:", err)
         elif kind == "INTERACTION_CREATE" and d.get("type") == 3:
             user = (d.get("member") or {}).get("user") or d.get("user") or {}
-            if str(user.get("id")) not in self.owner_ids:
-                # Only the owner's press counts; anyone else is told so, privately (flag 64).
+            if str(user.get("id")) not in self.owner_ids | self.allowed_users:
+                # Only the owner's press counts, or an allowed user's; anyone else is told so, privately (flag 64).
                 answer_interaction(d["id"], d["token"], 4, {"content": "Only the bot's owner can answer this.", "flags": 64})
                 return
             try:
