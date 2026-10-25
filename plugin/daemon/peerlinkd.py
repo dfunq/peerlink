@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.23"
+VERSION = "0.8.24"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -872,6 +872,7 @@ def start_discord():
         discord_bot[0] = discordlink.Bot(discord["token"], on_discord, log, on_press)
         discord_bot[0].trusted_bots = set(discord.get("trusted_bots") or [])
         discord_bot[0].allowed_users = set(discord.get("allowed_users") or [])
+        discord_bot[0].on_command, discord_bot[0].on_autocomplete = on_slash, on_slash_typing
 
 
 def folder_name(cwd):
@@ -990,6 +991,118 @@ def queue_for_folder(cwd, msg):
     inboxes.setdefault(msg["to"], []).append(msg)
     record(msg)
     return agent
+
+
+def oneline(text):
+    return " ".join(str(text).split())
+
+
+def live_agents():
+    with lock:
+        return sorted((r for r in sessions.values() if is_live(r)), key=lambda r: display_name(r).lower())
+
+
+def agent_named(name):
+    want = str(name or "").lstrip("@").lower()
+    return next((r for r in live_agents() if display_name(r).lower() == want), None)
+
+
+def channel_agent(channel_id, dm):
+    """The agent a channel's messages go to: its master's, or your DMs'."""
+    cwd = discord.get("dm") if dm else next((r.get("master") for r in discord.get("routes", []) if r["channel_id"] == channel_id), "")
+    with lock:
+        return successor(cwd) if cwd else None
+
+
+def on_slash(cmd):
+    """/peerlink <sub> on Discord: (the reply, any buttons)."""
+    sub, opt, who = cmd["sub"], cmd["options"], f"Discord ({cmd['author']})"
+    if sub == "status":
+        lim = limit_view()
+        with lock:
+            queued = sum(len(b) for b in inboxes.values())
+        held = (f"held{', resets ' + time.strftime('%a %H:%M', time.localtime(lim['resets_at'])) if lim.get('resets_at') else ''} (/peerlink resume lifts it)") if lim else "fine"
+        return f"peerlink {VERSION} on {HOSTNAME} · {len(live_agents())} agents running · {queued} messages queued · usage limit: {held}", None
+    if sub == "inbox":
+        return inbox_text(cmd["channel_id"]), None
+    if sub == "peers":
+        rows = [f"• **{display_name(r)}** {'🛠️' if r.get('busy') else '💤'}{' 🔇' if session_cfg(r['id']).get('muted') else ''} `{tilde_path(r.get('cwd', ''))}`"
+                + (f": {oneline(r.get('summary') or '')[:90]}" if r.get("summary") else "") for r in live_agents()]
+        return "\n".join(rows) or "No agents are running.", None
+    if sub == "spaces":
+        leads, by_space = leads_view(), {}
+        for r in live_agents():
+            by_space.setdefault(space_of(r)[0], []).append(display_name(r))
+        lines = []
+        for space in sorted(set(by_space) | set(leads), key=lambda x: (x == DEFAULT_SPACE, x)):
+            lead, parent = leads.get(space) or {}, space_parent(space)
+            head = f"**{'unassigned' if space == DEFAULT_SPACE else space}**" + (f" (in {parent})" if parent else "") + (f" · lead {lead['name']}" if lead else "")
+            lines.append(f"{head}: {', '.join(by_space.get(space, [])) or 'nobody running'}")
+        return "\n".join(lines) or "No spaces yet.", None
+    if sub == "schedules":
+        with lock:
+            live = sorted((c for c in schedules.values() if c["status"] in ("active", "pending")), key=lambda c: c.get("next_run") or 0)
+        rows = [f"• {c['id']} · {when_text(c)} · `{tilde_path(c['folder'])}`{' · waiting for approval' if c['status'] == 'pending' else ''}: {oneline(c['prompt'])[:90]}" for c in live]
+        return ("\n".join(rows) + "\nCancel one with /peerlink cancel.") if rows else "No schedules.", None
+    if sub == "cancel":
+        code, out = cancel_schedule(str(opt.get("id", "")).strip())
+        return (f"Cancelled {out['schedule']['id']}." if code == 200 else out["error"]), None
+    if sub == "resume":
+        if not usage_limit:
+            return "No usage limit is held.", None
+        lift_limit(f"resumed on Discord by {cmd['author']}")
+        return "Lifted: agents carry on with what was held.", None
+    if sub == "clear" and str(opt.get("agent", "")).lower() == "all":
+        n = len(live_agents())
+        return f"Clear the context of all {n} running agents? Each finishes its current turn first.", discordlink.buttons(["Clear all", "Keep"], "pa:all")
+    agent = agent_named(opt["agent"]) if opt.get("agent") else channel_agent(cmd["channel_id"], cmd["dm"]) if sub == "run" else None
+    if agent is None:
+        return (f"No running agent is called {opt['agent']}." if opt.get("agent") else "No agent is running for this channel; name one with agent:"), None
+    name = display_name(agent)
+    if sub == "clear":
+        code, out = clear_context(agent["id"], who)
+        return (f"Clearing {name}'s context{' after its current turn' if agent.get('busy') else ''}." if code == 200 else out["error"]), None
+    if sub == "kill":
+        return f"End **{name}** ({tilde_path(agent.get('cwd', ''))})? It finishes its current turn first.", discordlink.buttons(["End it", "Keep it"], f"pk:{agent['id']}")
+    if sub in ("mute", "unmute"):
+        with lock:
+            config["sessions"].setdefault(agent["id"], {})["muted"] = sub == "mute"
+            save_config()
+        return f"{name} {'is muted: it hears from no peers' if sub == 'mute' else 'hears from peers again'}.", None
+    if sub == "run":
+        line = str(opt.get("command", "")).strip().lstrip("/")
+        command, _, args = line.partition(" ")
+        if not command:
+            return "Say which command, like loop 5m check the deploy.", None
+        with lock:
+            agent.setdefault("run", []).append({"command": command, "args": args.strip(), "by": who})
+        log("run", f"/{line}", "in", name, "by", who)
+        return f"Running `/{line}` in {name}{' after its current turn' if agent.get('busy') else ''}.", None
+    return f"Unknown: {sub}", None
+
+
+def on_slash_typing(cmd):
+    """Choices for the option being typed in a /peerlink subcommand."""
+    typed = str(cmd["options"].get(cmd["focused"]) or "").lower()
+    if cmd["focused"] == "id":
+        with lock:
+            names = [(f"{c['id']} · {when_text(c)}: {oneline(c['prompt'])}"[:100], c["id"]) for c in schedules.values() if c["status"] in ("active", "pending")]
+    else:
+        names = [(display_name(r), display_name(r)) for r in live_agents()] + ([("all (every running agent)", "all")] if cmd["sub"] == "clear" else [])
+    return [{"name": n, "value": v} for n, v in names if typed in n.lower()]
+
+
+def on_clear_all_press(press):
+    rows = (press["message"] or {}).get("components") or []
+    for row in rows:
+        for b in row.get("components", []):
+            b["disabled"], b["style"] = True, 3 if b.get("custom_id") == press["custom_id"] else 2
+    discordlink.answer_interaction(press["id"], press["token"], 7, {"components": rows})
+    if press["custom_id"].endswith(":0"):
+        agents = live_agents()
+        for r in agents:
+            clear_context(r["id"], f"Discord ({press['author']})")
+        discordlink.post(discord["token"], press["channel_id"], f"Clearing {len(agents)} agents' context, each once its current turn ends.")
 
 
 def on_discord(d):
@@ -1203,6 +1316,8 @@ def on_press(press):
         return on_spawn_press(press)
     if press["custom_id"].startswith("pc:"):
         return on_spawn_press(press, decide_schedule, schedules)
+    if press["custom_id"].startswith("pa:"):
+        return on_clear_all_press(press)
     if press["custom_id"].startswith("pl:"):
         discordlink.answer_interaction(press["id"], press["token"], 7, {"components": []})
         return lift_limit(f"resumed on Discord by {press['author']}")
@@ -1422,6 +1537,19 @@ INBOX_VERBS = {"done": ("task", "done"), "failed": ("task", "failed"), "fail": (
                "dismiss": (None, "dismiss"), "approve": ("approval", "approve"), "deny": ("approval", "deny")}
 
 
+def inbox_text(channel):
+    """Your Inbox as a numbered list; "1 done" and the like in this channel then refer to it."""
+    items = inbox_items()
+    inbox_lists[channel] = (time.time(), [(i["kind"], i["id"]) for i in items])
+    if not items:
+        return "Your Inbox is empty."
+    icon = {"approval": "🚀", "task": "☑️", "question": "❓", "feedback": "💡"}
+    lines = [f"**Inbox** ({len(items)})"] + [
+        f"{n}. {icon[i['kind']]} {i['id']} · {i['who']} · {ago_text(time.time() - i['since'])}: {i['title']}" for n, i in enumerate(items[:20], 1)]
+    lines.append('Answer with the number: "1 approve" or "1 deny", "2 done" or "2 failed: why", "3 <your answer>", "4 accept" or "4 dismiss".')
+    return "\n".join(lines)
+
+
 def inbox_command(d):
     """Handle what you write on Discord to work your Inbox. True when it was one of those, not a message for an agent."""
     text, channel = d["text"].strip(), d["channel_id"]
@@ -1449,16 +1577,7 @@ def inbox_command(d):
                          d["message_id"], discordlink.buttons(["End it", "Keep it"], f"pk:{agent['id']}"))
         return True
     if text.lower() in ("/inbox", "inbox"):
-        items = inbox_items()
-        inbox_lists[channel] = (time.time(), [(i["kind"], i["id"]) for i in items])
-        if not items:
-            say("Your Inbox is empty.")
-            return True
-        icon = {"approval": "🚀", "task": "☑️", "question": "❓", "feedback": "💡"}
-        lines = [f"**Inbox** ({len(items)})"] + [
-            f"{n}. {icon[i['kind']]} {i['id']} · {i['who']} · {ago_text(time.time() - i['since'])}: {i['title']}" for n, i in enumerate(items[:20], 1)]
-        lines.append('Answer with the number: "1 approve" or "1 deny", "2 done" or "2 failed: why", "3 <your answer>", "4 accept" or "4 dismiss".')
-        say("\n".join(lines))
+        say(inbox_text(channel))
         return True
     listed = inbox_lists.get(channel)
     match = re.match(r"^(\d+)[\s.:)]+(.+)$", text, re.S)
@@ -2983,6 +3102,8 @@ class Handler(BaseHTTPRequestHandler):
                 out["terminate"] = rec["terminate"]
             if rec.get("clear"):
                 out["clear"] = rec.pop("clear")
+            if rec.get("run"):
+                out["run"] = rec.pop("run")
             return self.reply(200, out)
 
         if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "config" and method == "POST":

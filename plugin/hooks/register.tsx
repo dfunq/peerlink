@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.23'
+const DAEMON_VERSION = '0.8.24'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -114,6 +114,8 @@ const chased = new Set<string>()
 // The account's usage limit, as the daemon has it: while set, nothing is put to this agent, so what arrives waits
 // here (unacked, so the daemon still has it) instead of starting a turn that would die on it.
 let limit: { resets_at?: number; by?: string } | null = null
+// Claude Code commands you asked for on Discord (/peerlink run): one at a time, each when the agent is idle.
+let toRun: { command: string; args: string; by?: string }[] = []
 // The messages the current turn was given, so a turn the limit kills hands them back; and how the API failed it.
 let turnGiven: string[] = []
 let lastGiven: string[] = []
@@ -585,6 +587,19 @@ async function limitCheck($: EngineInterface, reason: string) {
   return !!hit
 }
 
+// The next command you asked for from Discord, typed into this session as if at its prompt.
+async function runNext($: EngineInterface) {
+  const next = busy || clearing ? undefined : toRun.shift()
+  if (!next) return
+  const line = `/${next.command}${next.args ? ' ' + next.args : ''}`
+  $.ui.log(`peerlink: running ${line}, as asked from ${next.by ?? 'the user'}.`)
+  try {
+    await $.command.run({ command: next.command, args: next.args })
+  } catch (err) {
+    $.ui.log(`peerlink: ${line} didn't run: ${String(err)}`)
+  }
+}
+
 async function clearNow($: EngineInterface) {
   if (!clearing) return
   clearing = false
@@ -641,6 +656,10 @@ async function poll($: EngineInterface) {
     clearing = true
     $.ui.log(`peerlink: clearing this session's context${busy ? ' after the current turn' : ''}, as asked from ${res.data.clear.by ?? 'the user'}.`)
     if (!busy) await clearNow($)
+  }
+  if (Array.isArray(res.data.run) && res.data.run.length) {
+    toRun.push(...res.data.run)
+    await runNext($)
   }
   // The daemon hands a message out again until it's acked: skip one already here or already in the session.
   const held = new Set([...pending, ...notices].map(m => m.id))
@@ -1372,7 +1391,8 @@ export const register: Register = on => {
       if (clearing) {
         midTurn = []
         void clearNow($)
-      } else void chase($).then(() => deliver($))
+      } else if (toRun.length) void runNext($)
+      else void chase($).then(() => deliver($))
       void summarize($)
     }
     return done

@@ -101,7 +101,7 @@ def call(token, method, path, body=None, retried=False, files=None):
 
 def invite_url(app_id):
     return ("https://discord.com/oauth2/authorize"
-            f"?client_id={app_id}&scope=bot&permissions={INVITE_PERMISSIONS}")
+            f"?client_id={app_id}&scope=bot+applications.commands&permissions={INVITE_PERMISSIONS}")
 
 
 def inspect_token(token):
@@ -188,6 +188,36 @@ def post(token, channel_id, text, reply_to=None, components=None, files=None):
 def answer_interaction(interaction_id, interaction_token, kind, data=None):
     """Acknowledge a button press within Discord's three seconds: 7 rewrites the message it was on."""
     call("", "POST", f"/interactions/{interaction_id}/{interaction_token}/callback", {"type": kind, **({"data": data} if data else {})})
+
+
+# The /peerlink slash command: one entry in Discord's picker, its subcommands under it. Discord registers commands
+# per server, not per channel, so it shows wherever the bot can see; Server Settings → Integrations narrows that.
+def _agent(desc, required=True):
+    return {"type": 3, "name": "agent", "description": desc, "required": required, "autocomplete": True}
+
+
+SLASH = {"type": 1, "name": "peerlink", "description": "peerlink: your agents", "options": [
+    {"type": 1, "name": "status", "description": "The daemon, how many agents run, and the usage limit"},
+    {"type": 1, "name": "inbox", "description": "What's waiting on you: approvals, tasks, questions"},
+    {"type": 1, "name": "peers", "description": "The agents running now"},
+    {"type": 1, "name": "spaces", "description": "The spaces, their leads and agents"},
+    {"type": 1, "name": "run", "description": "Run a Claude Code command in an agent, as if typed there: loop, goal, compact…",
+     "options": [{"type": 3, "name": "command", "description": 'e.g. "loop 5m check the deploy" or "goal ship the beta"', "required": True},
+                 _agent("Which agent; this channel's own if left out", False)]},
+    {"type": 1, "name": "clear", "description": "Clear an agent's context, or every agent's with all", "options": [_agent("An agent, or all")]},
+    {"type": 1, "name": "kill", "description": "End an agent, once its current turn is done", "options": [_agent("Which agent")]},
+    {"type": 1, "name": "mute", "description": "Stop an agent hearing from peers", "options": [_agent("Which agent")]},
+    {"type": 1, "name": "unmute", "description": "Let an agent hear from peers again", "options": [_agent("Which agent")]},
+    {"type": 1, "name": "schedules", "description": "Scheduled prompts, with their next run"},
+    {"type": 1, "name": "cancel", "description": "Cancel a schedule",
+     "options": [{"type": 3, "name": "id", "description": "The schedule, like c3", "required": True, "autocomplete": True}]},
+    {"type": 1, "name": "resume", "description": "Lift a usage-limit hold, after switching accounts"},
+]}
+
+
+def register_commands(token, app_id, guild_id):
+    """Put /peerlink in a server; a server's commands show at once, where global ones take up to an hour."""
+    call(token, "PUT", f"/applications/{app_id}/guilds/{guild_id}/commands", [SLASH])
 
 
 def download(url, limit):
@@ -325,6 +355,10 @@ class Bot:
         self.allowed_users = set()  # people the owner lets in by user ID, beside the app's owner or team
         self.reads_messages = False
         self.guild_channels = {}  # guild id -> {"name", "channels": {id: (position, name)}}
+        self.app_id = ""
+        self.commands_in = set()  # servers /peerlink was put in since the daemon started
+        self.on_command = lambda cmd: ("", None)  # (reply, buttons) for a /peerlink subcommand
+        self.on_autocomplete = lambda cmd: []  # choices for the option being typed
         self.stop = threading.Event()
         self.ws = None
         self.thread = threading.Thread(target=self._run, name="discord", daemon=True)
@@ -417,13 +451,48 @@ class Bot:
             elif op == 0:
                 self._dispatch(ev.get("t"), ev.get("d") or {})
 
+    def _register(self, guild_id):
+        try:
+            register_commands(self.token, self.app_id, guild_id)
+        except DiscordError as err:
+            self.commands_in.discard(guild_id)
+            self.log("discord", "couldn't add /peerlink to a server:", err)
+
+    def _command(self, d):
+        """A /peerlink subcommand (type 2), or the option being typed in one (type 4): answered within three seconds."""
+        user = (d.get("member") or {}).get("user") or d.get("user") or {}
+        sub = ((d.get("data") or {}).get("options") or [{}])[0]
+        cmd = {"sub": sub.get("name", ""), "options": {o["name"]: o.get("value") for o in sub.get("options") or []},
+               "focused": next((o["name"] for o in sub.get("options") or [] if o.get("focused")), ""),
+               "channel_id": str(d.get("channel_id")), "dm": not d.get("guild_id"),
+               "author": user.get("global_name") or user.get("username", "you")}
+        if str(user.get("id")) not in self.owner_ids | self.allowed_users:
+            if d.get("type") == 2:
+                answer_interaction(d["id"], d["token"], 4, {"content": "Only the bot's owner can use this.", "flags": 64})
+            else:
+                answer_interaction(d["id"], d["token"], 8, {"choices": []})
+            return
+        try:
+            if d.get("type") == 4:
+                return answer_interaction(d["id"], d["token"], 8, {"choices": self.on_autocomplete(cmd)[:25]})
+            text, rows = self.on_command(cmd)
+        except Exception as err:
+            self.log("discord", "command failed:", err)
+            text, rows = f"That failed: {err}", None
+        answer_interaction(d["id"], d["token"], 4, {"content": (text or "Done.")[:2000], "allowed_mentions": {"parse": []},
+                                                    **({"components": rows} if rows else {})})
+
     def _dispatch(self, kind, d):
         if kind == "READY":
             self.user_id = str(d["user"]["id"])
             self.user = d["user"].get("username", "")
+            self.app_id = str((d.get("application") or {}).get("id") or self.user_id)
             self.state, self.error = "online", ""
             self.log("discord", "online as", self.user)
         elif kind in ("GUILD_CREATE", "GUILD_UPDATE"):
+            if kind == "GUILD_CREATE" and str(d["id"]) not in self.commands_in and self.app_id:
+                self.commands_in.add(str(d["id"]))
+                threading.Thread(target=self._register, args=(str(d["id"]),), daemon=True).start()
             self.guild_channels[str(d["id"])] = {
                 "name": d.get("name", "?"),
                 "channels": {str(c["id"]): (c.get("position", 0), c.get("name", "?")) for c in d.get("channels", []) if c.get("type") in POSTABLE}}
@@ -461,6 +530,8 @@ class Bot:
                 })
             except Exception as err:  # one bad message must not drop the connection
                 self.log("discord", "message handler failed:", err)
+        elif kind == "INTERACTION_CREATE" and d.get("type") in (2, 4):
+            self._command(d)
         elif kind == "INTERACTION_CREATE" and d.get("type") == 3:
             user = (d.get("member") or {}).get("user") or d.get("user") or {}
             if str(user.get("id")) not in self.owner_ids | self.allowed_users:
