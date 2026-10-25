@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.22"
+VERSION = "0.8.23"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -717,6 +717,7 @@ def snapshot():
         task_list = sorted(tasks.values(), key=lambda t: -t["created"])[:500]
         issues = sorted(feedback.values(), key=lambda i: i["ts"])[-500:]
         sched = sorted(schedules.values(), key=lambda c: -c["created"])[:200]
+        status["limit"] = limit_view()
     return {"schedules": {"schedules": [{**c, "when_text": when_text(c)} for c in sched]},"status": status, "peers": {"host": HOSTNAME, "peers": peers, "leads": leads_view()}, "messages": {"messages": msgs},
             "tasks": {"tasks": task_list}, "issues": {"issues": issues, "path": ISSUES_PATH}, "inbox": {"items": inbox_items(), "user": USER_NAME}}
 
@@ -1202,6 +1203,9 @@ def on_press(press):
         return on_spawn_press(press)
     if press["custom_id"].startswith("pc:"):
         return on_spawn_press(press, decide_schedule, schedules)
+    if press["custom_id"].startswith("pl:"):
+        discordlink.answer_interaction(press["id"], press["token"], 7, {"components": []})
+        return lift_limit(f"resumed on Discord by {press['author']}")
     if press["custom_id"].startswith("pk:"):
         _, sid, idx = (press["custom_id"].split(":") + ["", ""])[:3]
         code, out = terminate(sid, f"Discord ({press['author']})") if idx == "0" else (200, {"kept": True})
@@ -2478,6 +2482,62 @@ def start_for_schedule(c):
     log("schedule", c["id"], c["note"])
 
 
+# The account's usage limit: an agent whose turn died on it says so, and until it lifts nothing new is put to agents
+# (their plugins hold what arrives) and no schedule runs. It lifts at the reset time Claude gave, when any agent's
+# turn goes through again (a swapped account), or when you press Resume.
+usage_limit = {}
+LIMIT_FALLBACK_S = 5 * 3600  # how long a limit with no reset time holds before agents try again
+
+
+def hit_limit(rec, body):
+    """An agent's turn ended on the usage limit: hold everything, put back what that turn was given, tell you."""
+    now = time.time()
+    resets = body.get("resets_at")
+    resets = resets if isinstance(resets, (int, float)) and resets > now else None
+    with lock:
+        mine = handed.setdefault(rec["id"], {})
+        back = [m for m in messages if m["id"] in set(map(str, body.get("ids") or []))]
+        for m in back:
+            mine[m["id"]] = (m, 0)  # handed out again as soon as the limit lifts
+        fresh = not usage_limit
+        usage_limit.update({"since": usage_limit.get("since", now), "resets_at": resets or usage_limit.get("resets_at"),
+                            "kind": str(body.get("kind") or usage_limit.get("kind") or ""), "by": display_name(rec)})
+        chans = [r for r in routes_for(rec.get("cwd", "")) if r["channel_id"] != "dm"] or discord.get("routes", [])
+    log("limit", "hit by", display_name(rec), "resets", time.strftime("%H:%M", time.localtime(resets)) if resets else "unknown",
+        f"({len(back)} message{'s' if len(back) != 1 else ''} put back)")
+    if fresh and chans and discord.get("token") and discord_bot[0]:
+        when = f"resets {time.strftime('%a %H:%M', time.localtime(resets))}" if resets else "no reset time given"
+        try:
+            sent = discordlink.post(discord["token"], chans[0]["channel_id"],
+                                    f"⏸️ **Usage limit reached** ({when}; hit by {display_name(rec)}). Agents hold their messages and schedules wait. "
+                                    "Press Resume after switching accounts; it also lifts by itself at the reset, or when any agent's turn goes through.",
+                                    None, discordlink.buttons(["Resume now"], "pl"))
+            with lock:
+                usage_limit["discord_out"] = {"channel_id": chans[0]["channel_id"], "message_id": str((sent[-1] or {}).get("id", "")) if sent else ""}
+        except discordlink.DiscordError as err:
+            log("discord", "limit post failed:", err)
+    return 200, {"limit": limit_view()}
+
+
+def lift_limit(why):
+    with lock:
+        if not usage_limit:
+            return 200, {"limit": None}
+        was = dict(usage_limit)
+        usage_limit.clear()
+    log("limit", "lifted:", why)
+    close_buttons(was)
+    out = was.get("discord_out") or {}
+    if out.get("channel_id") and discord.get("token") and discord_bot[0]:
+        threading.Thread(target=lambda: discordlink.post(discord["token"], out["channel_id"], f"▶️ Usage limit lifted ({why}): agents carry on with what was held.", out.get("message_id")),
+                         daemon=True).start()
+    return 200, {"limit": None}
+
+
+def limit_view():
+    return {k: v for k, v in usage_limit.items() if k != "discord_out"} or None
+
+
 # Ending an agent: you ask (web UI, or "/kill <name>" on Discord, confirmed with a button), never an agent.
 # Its plugin ends the session once the turn it's in finishes; a minute later, if it's still there, the daemon
 # ends the process itself.
@@ -2560,7 +2620,9 @@ def reaper():
                 c["status"], c["updated"] = "expired", now
                 schedule_told(c, f"Your schedule {c['id']} expired: your user didn't approve it within a day.")
                 save_schedules()
-            due = [c for c in schedules.values() if c["status"] == "active" and c.get("next_run") and c["next_run"] <= now]
+            lapsed = usage_limit and now >= (usage_limit.get("resets_at") or usage_limit["since"] + LIMIT_FALLBACK_S)
+            # While the limit holds, a due schedule waits: it runs once the limit lifts.
+            due = [] if usage_limit else [c for c in schedules.values() if c["status"] == "active" and c.get("next_run") and c["next_run"] <= now]
             starts = [fire_schedule(c, now) for c in due]
             # Messages to an agent that has gone for an hour are not coming back.
             for sid in [s for s in inboxes if s not in sessions]:
@@ -2570,6 +2632,8 @@ def reaper():
                     inboxes[sid] = kept
                 else:
                     inboxes.pop(sid)
+        if lapsed:
+            lift_limit("its reset time came" if usage_limit.get("resets_at") else "agents try again after five hours")
         for c in filter(None, starts):
             start_for_schedule(c)
 
@@ -2914,7 +2978,7 @@ class Handler(BaseHTTPRequestHandler):
             with lock:
                 mine = reach(rec)
             others = sum(1 for p in local_peers() if p["id"] != sid and peer_reach(p) & mine) + len(config.get("remotes", []))
-            out = {"name": display_name(rec), "config": cfg, "inbox": inbox, "peer_count": others}
+            out = {"name": display_name(rec), "config": cfg, "inbox": inbox, "peer_count": others, "limit": limit_view()}
             if rec.get("terminate"):
                 out["terminate"] = rec["terminate"]
             if rec.get("clear"):
@@ -3002,6 +3066,21 @@ class Handler(BaseHTTPRequestHandler):
         if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "ack" and method == "POST":
             ack(rest[1], self.body().get("ids"))
             return self.reply(200, {"ok": True})
+        if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "limit" and method == "POST":
+            # The agent's plugin: its turn died on the usage limit, or (lifted) one went through again.
+            with lock:
+                rec = sessions.get(rest[1])
+            if rec is None:
+                return self.reply(404, {"error": "unknown agent; register again"})
+            b = self.body()
+            code, out = lift_limit(f"{display_name(rec)}'s turn went through") if b.get("lifted") else hit_limit(rec, b)
+            return self.reply(code, out)
+        if rest == ["limit", "resume"] and method == "POST":
+            # Only you, in the browser; an agent lifts it by getting a turn through.
+            if not browser or self.key_ok():
+                return self.reply(403, {"error": "the usage limit is resumed from the web UI or Discord"})
+            code, out = lift_limit("resumed in the web UI")
+            return self.reply(code, out)
         if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "clear" and method == "POST":
             # Only you, in the browser: no agent wipes another's context.
             if not browser or self.key_ok():
@@ -3461,6 +3540,7 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)
 .panel label{display:flex;flex-direction:column;gap:4px;font-size:13px;font-weight:500}.panel label .hint{font-weight:400;font-size:12px;color:var(--mut)}
 .panel label.check{flex-direction:row;align-items:center;gap:8px}.ok{color:var(--ok)}
 #stalebar .mono{white-space:nowrap}#stalebar{background:var(--card);border:1px solid var(--warn);border-radius:10px;padding:10px 14px;margin-bottom:14px}
+#limitbar{background:var(--card);border:1px solid var(--warn);border-radius:10px;padding:10px 14px;margin-bottom:14px}
 #offline{display:none;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin-bottom:14px;color:var(--mut)}
 #signedout{display:none;background:var(--card);border:1px solid var(--warn);border-radius:10px;padding:10px 14px;margin-bottom:14px}
 .msgbar{display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap}.msgbar select{width:auto}
@@ -3563,7 +3643,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <a href="#settings" data-nav="settings">Settings</a>
 <a href="#controls" data-nav="controls">Controls</a>
 </nav>
-<main><div id="stalebar" style="display:none" class="small"></div><div id="offline">Can't reach the peerlink daemon. This page reconnects once it's back.</div><div id="signedout">Signed out. Run <span class="mono">/peerlink web</span> in any agent to sign in again.</div>
+<main><div id="limitbar" style="display:none" class="small"></div><div id="stalebar" style="display:none" class="small"></div><div id="offline">Can't reach the peerlink daemon. This page reconnects once it's back.</div><div id="signedout">Signed out. Run <span class="mono">/peerlink web</span> in any agent to sign in again.</div>
 
 <section id="agents"><h1>Agents</h1><p class="lead">Your live agents, by space. Click one to see or change it.</p>
 <div class="msgbar"><span class="seg" role="group" aria-label="Layout"><button class="ghost small" data-alayout="chart">Chart</button><button class="ghost small" data-alayout="list">List</button></span>
@@ -3774,6 +3854,8 @@ async function refresh(force,snap){
   if(!snap){snap=await api('/api/snapshot');lastSnap=snap}
   const {status:st,peers:p,messages:m,tasks:tk,issues:fb,inbox:ib}=snap;
   allTasks=tk.tasks||[];allFeedback=fb.issues||[];inbox=ib.items||[];allSched=snap.schedules?.schedules||[];
+  const lim=st.limit;$('#limitbar').style.display=lim?'block':'none';
+  $('#limitbar').innerHTML=lim?`<b>⏸️ Usage limit reached</b> (${lim.resets_at?'resets '+new Date(lim.resets_at*1000).toLocaleString([], {weekday:'short',hour:'numeric',minute:'2-digit'}):'no reset time given'}; hit by ${esc(lim.by)}). Agents hold their messages and schedules wait. <button class="ghost small" data-limresume>Resume now</button> after switching accounts.`:'';
   const view=JSON.stringify([p.peers.map(({last_seen_s,...x})=>x),p.leads,m.messages.map(x=>[x.id,x.status]),allTasks.map(t=>[t.id,t.status,t.owner,t.note]),allFeedback.map(f=>[f.id,f.status,f.note]),inbox.map(i=>i.id),allSched.map(c=>[c.id,c.status,c.runs,c.note]),sel,panelTab,cfg.sessions]);
   if(view===lastView&&!force)return;lastView=view;
   $('#hostline').textContent=`${st.host} · daemon ${st.version}`;
@@ -4170,6 +4252,7 @@ function renderDiscord(){if(!dState)return;const d=dState,invited=(dGuilds||[]).
     <div class="addline"><input id="dbots" class="mono" placeholder="e.g. 1562000000000000000" value="${esc((d.trusted_bots||[]).join(', '))}" data-dbots style="flex:1;min-width:0"></div>
     <h2>Bot</h2>
     <label class="check"><input type="checkbox" data-dact="enabled" ${d.enabled?'checked':''}> Bot running</label>`}
+document.addEventListener('click',e=>{if(e.target.closest('[data-limresume]'))post('/api/limit/resume',{}).then(()=>refresh(true))});
 document.addEventListener('submit',async e=>{if(e.target.id!=='dtoken')return;e.preventDefault();const t=e.target.token.value.trim();if(!t)return;
   dBusy=true;renderDiscord();const r=await api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({token:t})});dBusy=false;
   if(r.error){renderDiscord();$('#dtokerr').textContent=r.error;return}dGuilds=null;dDraft=null;await loadDiscord()});
