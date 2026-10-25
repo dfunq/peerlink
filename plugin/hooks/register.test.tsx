@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.8.17', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.8.18', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (state.forget && path.endsWith('/heartbeat') && 'busy' in body) {
       state.forget = false
       return { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'unknown agent; register again' }) } }
@@ -306,6 +306,51 @@ test('a message that arrives mid-turn reaches the model and is shown to the pers
   expect(logged).toContain('↘ api · m5: Heads up: /invoices now paginates.')
 })
 
+test('a message that arrives mid-turn and is left unanswered is put to the agent again, once', async ($, on) => {
+  const { clock, woke } = engine(on)
+  mock.session(on)
+  on('turn.start', (_: any, e: any) => ({ turnId: e.turnId }))
+  const inbox: any[] = []
+  const daemon = fakeDaemon(on, 1, null, inbox, { wake_delay_s: 0 })
+  await $.session.start(START)
+  await settle()
+  const ask = { id: 'm26', from: 'discord:123', from_name: 'dillon on Discord', from_host: 'discord', text: 'Ask legion for the env files', expects_reply: true, reply_to: null, hops: 0 }
+  const fyi = { id: 'm27', from: 'api-id', from_name: 'api', from_host: 'Mac', text: 'FYI: deployed', expects_reply: false, reply_to: null, hops: 0 }
+  await $.turn.start({ text: 'start the dev servers', turnId: 't1' } as any)
+  inbox.push(ask, fyi)
+  await clock.advance(600000)
+  for (let i = 0; i < 10; i++) await settle()
+  expect(woke).toEqual([])
+  // The turn ends with m26 still owed: it comes back as a turn of its own. The FYI wanted no reply, so it doesn't.
+  daemon.state.threads = { owes: [{ id: 'm26', with: 'dillon on Discord', ago_s: 30, text: 'Ask legion' }], waiting: [] }
+  await $.turn.complete(TURN)
+  for (let i = 0; i < 10; i++) await settle()
+  expect(woke.length).toBe(1)
+  expect(woke[0]).toContain('m26 · reply expected · unanswered from your last turn')
+  expect(woke[0]).not.toContain('m27')
+  // Read past again: it isn't chased a second time.
+  await $.turn.complete(TURN)
+  for (let i = 0; i < 10; i++) await settle()
+  expect(woke.length).toBe(1)
+})
+
+test('a message answered in the turn it arrived in is not put again', async ($, on) => {
+  const { clock, woke } = engine(on)
+  mock.session(on)
+  on('turn.start', (_: any, e: any) => ({ turnId: e.turnId }))
+  const inbox: any[] = []
+  fakeDaemon(on, 1, null, inbox, { wake_delay_s: 0 })
+  await $.session.start(START)
+  await settle()
+  await $.turn.start({ text: 'start the dev servers', turnId: 't1' } as any)
+  inbox.push({ id: 'm26', from: 'discord:123', from_name: 'dillon on Discord', from_host: 'discord', text: 'Status?', expects_reply: true, reply_to: null, hops: 0 })
+  await clock.advance(600000)
+  for (let i = 0; i < 10; i++) await settle()
+  await $.turn.complete(TURN)
+  for (let i = 0; i < 10; i++) await settle()
+  expect(woke).toEqual([])
+})
+
 test('a delivered message hides its redundant result line, a failed one keeps it', async ($, on) => {
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e) as any
@@ -563,7 +608,7 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.8.17 · daemon 0.8.17 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.8.18 · daemon 0.8.18 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the team is listed once', async ($, on) => {
@@ -596,7 +641,7 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.8.17')
+  expect(reg.plugin).toBe('0.8.18')
 })
 
 test('an agent registers again under the folder it started in, wherever the host has moved its root since', async ($, on) => {
@@ -675,7 +720,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.8.18', true], ['0.8.17', false]] as const)
+for (const [installed, reloads] of [['0.8.19', true], ['0.8.18', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     fakeDaemon(on)
