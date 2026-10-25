@@ -16,7 +16,7 @@ Agents treat each other as teammates. Each one knows who else is live and what t
 ## How agents know about each other
 
 - **Names.** An agent is named after its folder, such as `web` or `billing-api`. A suffix is added only when two live agents share a folder name. You can rename an agent with `/peerlink-agent name <name>`.
-- **Roles.** Put `role:` lines in the `.peerlink` of an agent's own folder to say what it's there for. You can also set it on the Details tab of the agent's panel in the web UI. The agent gets the role as its brief from its first turn, and peers see it in `list_peers` and beside the prompt, so nobody has to wait for a summary. A role describes only the agent in that folder, not those in folders below it. A `.peerlink` with only a role doesn't change the agent's space.
+- **Roles.** Put `role:` lines in the `.peerlink` of an agent's own folder to say what it's there for. That's the role of every agent opened there. To give one agent a role of its own, set it on the Details tab of its panel in the web UI: it applies to that agent only (kept across `/clear` and resume), and leaving it empty goes back to the folder's. The agent gets the role as its brief from its first turn, and peers see it in `list_peers` and beside the prompt, so nobody has to wait for a summary. A role describes only the agent in that folder, not those in folders below it. A `.peerlink` with only a role doesn't change the agent's space.
 
   ```
   # ~/Repos/acme/auth/.peerlink
@@ -37,23 +37,23 @@ Agents treat each other as teammates. Each one knows who else is live and what t
 
 Spaces keep groups of agents apart. An agent only sees and messages agents in its own space: the peer list, `list_peers` and `send_message` all stop at the space's edge, and the daemon enforces it. Agents with no space set are in `default`, so nothing changes until you set one.
 
-An agent's space comes from the first of these that applies:
+An agent's space belongs to its folder, so every agent opened there is in it, across `/clear`, resume and restarts. It comes from the first of these that applies:
 
-1. **An override for that agent.** Set it with `/peerlink-spaces <name>`, or under Manage on the agent's card in the web UI. It lasts as long as the session's config entry.
+1. **The space you put the folder in.** Open the agent on the Agents page and set **Space** on its **Details** tab, or run `/peerlink-spaces <name>` in it. This works for any folder, wherever it is, and every agent there is told it moved. Clear it to fall back to the next step.
 2. **The nearest `.peerlink` file** in the agent's folder or a folder above it, below your home folder:
    ```
    space: acme
    ```
-   Commit it, and the space travels with the repo. `/peerlink-spaces file <name>`, or "Space for this folder" in the web UI, writes it for you: it edits the repo's own `.peerlink`, or creates one at the repo root. It never rewrites a `.peerlink` above the repo, because that file sets the space for other folders too.
-3. **A folder rule**, in the Spaces page of the web UI or `space_rules` in the config. For example, `~/Repos/acme = acme` covers that folder and everything inside it. The most specific rule wins.
+   Commit it, and the space travels with the repo. It only places folders you haven't put in a space yourself.
+3. Otherwise the agent is **unassigned** (the `default` space).
 
-**Adding an agent to more spaces.** An agent's folder fixes its own space, but you can make it a member of other spaces too, wherever its folder is. Open it on the Agents page and fill in **Also a member of** on its **Details** tab, such as `acme`. It then sees and messages the agents in those spaces, and they see it, as well as its own. On the Agents page it stays in its own space, with a badge for each space it also joined, such as `+acme`. The Spaces page lists it in those spaces too, with its own space beside its name. It's told it was added. This is kept for its folder (`space_members` in the config), so it lasts across sessions. Only you can set it, in the web UI: an agent can't add itself to a space.
+**Also in other spaces.** Rarely needed: under **Also in other spaces** on the Details tab, you can make an agent a member of more spaces on top of its own. It sees and messages their agents, and they see it. On the Agents page it stays in its own space, with a badge for each extra one, such as `+acme`. It's kept for its folder (`space_members` in the config). Only you can set it, in the web UI: an agent can't add itself to a space.
 
 Space names are lowercased. Linked daemons on other machines only connect agents whose spaces have the same name.
 
-### Nested spaces
+### Spaces inside spaces
 
-A space can sit inside another one. Add `parent:` to its `.peerlink`:
+A space can sit inside another one. Set it on the **Spaces** page, where each space's box has **Inside** and **Lead** pickers, or run `/peerlink-spaces parent <name>` in one of its agents. A `parent:` line in a `.peerlink` does the same for a space you haven't placed there:
 
 ```
 # ~/Repos/acme/storefront/.peerlink
@@ -61,20 +61,19 @@ space: storefront
 parent: acme
 ```
 
-- **The lead** is the agent running in the folder that holds that `.peerlink`, here `~/Repos/acme/storefront`. It's in both spaces: it sees the agents in `storefront` and the agents in `acme`.
+- **The lead** of `storefront` is in both spaces: it sees the agents in `storefront` and the agents in `acme`, and speaks for its space there.
 - **Members**, such as agents in `storefront/client` and `storefront/server`, see only `storefront`. Agents in `acme` see the lead but not the members. The daemon enforces this.
 - **Guidance follows the shape.** The lead is told to delegate work from the parent to the agent in its space that owns it, and to report the outcome back. Members are told to report to the lead. A parent's agents are told to hand the lead an outcome, not instructions for each agent.
-- In the peer list a lead shows as `storefront [leads storefront]`. On the web UI's Agents page, the chart shows each space as a box: a lead sits in its parent's box, and its team hangs beneath it. Top-level spaces sit side by side across the window. The page opens in **List**, the same tree as nested rows, one per agent. Switch to **Chart** for the org chart, and each browser remembers your choice. `/peerlink-spaces` prints the same chart in the terminal.
-- Click an agent in the web UI to open its settings: its name, the space for its folder, the space that one sits inside, a space for this agent only, wake and mute. Save changes only what you edited.
+- In the peer list a lead shows as `storefront [leads storefront]`. On the web UI's Agents page each space is a box: a lead sits in its parent's box, with its own space beneath it. Top-level spaces sit side by side across the window. The page opens in **List**, the same tree as nested rows, one per agent. Switch to **Chart** for the org chart, and each browser remembers your choice. `/peerlink-spaces` prints the same chart in the terminal.
 
-Spaces can nest to any depth. `/peerlink-spaces parent <name>` writes the key for you, and `/peerlink-spaces` prints the tree.
+Spaces can nest to any depth; the Spaces page refuses a loop.
 
 ### Space leads
 
 Any named space can have a lead, nested or not. Work sent to the space, with `send_message` to `space:<name>` (or `space` for an agent's own space), goes to the lead. The lead decides who owns the work and delegates it.
 
 - **An agent alone in a space leads it.** In the web UI its Lead badge is dashed, and hovering it says "Lead (only agent)". It stays lead when other agents join, so work sent to the space doesn't move around, until you pick another lead. The `default` space has no lead.
-- **You pick a lead in the web UI.** Open an agent and choose **Make lead**. To remove the lead, choose **Clear lead**. Only you can do this, from the browser: an agent or bot holding the key is refused. A lead you pick wins over the folder of a nesting `.peerlink`, and that folder's lead wins over an implicit one. The old lead and the new one are both told.
+- **You pick a lead in the web UI,** with the **Lead** picker on the Spaces page, or **Make lead** on an agent's Controls tab. Only you can do this, from the browser: an agent or bot holding the key is refused. A lead you pick wins over one that was alone. The old lead and the new one are both told.
 - **The lead belongs to a folder,** so it survives `/clear` and restarts. While it's offline it stays pinned at the top of its space, greyed. Work sent to the space waits for the next agent in that folder.
 - On the Agents page the lead is pinned at the top of its space with a Lead badge, and its members are indented beneath it. A nested space hangs under its lead. Peers see the lead as `name [leads <space>]`.
 - Each card and agent panel shows the agent's git branch: the branch name, plus the worktree's name in a linked worktree, or `detached @ <sha>`. It's re-read every 10 seconds, so a branch switch shows up. Folders that aren't git repos show none.
@@ -166,7 +165,7 @@ It's standard-library Python like the rest of the daemon, with no `py-cord` to i
 
 - **A name is what the agent is shown as**, its nickname once it has one. The folder it was named after doesn't count, so a renamed agent's old name can't land on someone else.
 - **A name stays with its folder.** A new session in a folder you named (a restart, a resume) gets the same name back.
-- **An agent is its project root**, where its session started. A shell `cd` into another folder doesn't make it a different agent, or a lead of another team.
+- **An agent is its project root**, where its session started. A shell `cd` into another folder doesn't make it a different agent, or a lead of another space.
 - **A reply goes back to whoever sent the message it answers**, whatever name the model wrote, and even across spaces: `reply_to` already says who, and they reached you, so you can answer. `to` can be left out of a reply.
 - **A long message is refused** past `max_message_chars` (8000), with a note to write the details to a file and send the path. The whole message would otherwise land in the other agent's context.
 - **A message isn't lost on the way in.** The agent confirms each message once it's in its session, and the daemon hands it out again every 45 seconds until it does, for up to a day. That covers a message that arrives while the plugin reloads, or one whose prompt never started a turn. If a turn can't start, the message goes into the transcript instead, to be read with your next prompt. A message is never shown twice.
@@ -215,14 +214,13 @@ In Claude Code:
 | Command | |
 | --- | --- |
 | `/peerlink` or `/peerlink status` | Daemon, this agent, its summary |
-| `/peerlink web` | Open the web UI with a one-time sign-in link. Its sidebar has Agents (an org chart of spaces and teams), Spaces, Messages, Settings and Controls |
+| `/peerlink web` | Open the web UI with a one-time sign-in link. Its sidebar has Agents (an org chart of spaces), Spaces, Messages, Settings and Controls |
 | `/peerlink issues` | The last problems agents reported with peerlink |
 | `/peerlink restart` | Restart the daemon. Agents reconnect, and queued messages are kept |
 | `/peerlink rotate-key` | Make a new key, which signs out every browser |
 | `/peerlink-spaces` | The space tree on this machine, and this agent's place in it |
-| `/peerlink-spaces <name>` or `clear` | Override the space for this agent only |
-| `/peerlink-spaces file <name>` or `clear` | Set the space in this project's `.peerlink` |
-| `/peerlink-spaces parent <name>` or `clear` | Nest this project's space inside another one |
+| `/peerlink-spaces <name>` or `clear` | Put this agent's folder in a space (`clear`: back to its `.peerlink`) |
+| `/peerlink-spaces parent <name>` or `clear` | Put this agent's space inside another one |
 | `/peerlink-peers` | List live agents |
 | `/peerlink-peers mute <agent>`, `unmute <agent>` | Stop or resume deliveries to an agent |
 | `/peerlink-agent` | This agent's name, space, wake setting and summary |
@@ -230,7 +228,7 @@ In Claude Code:
 | `/peerlink-agent summary <text>` | Set what peers see for this agent |
 | `/peerlink-agent wake on\|off\|default` | Whether a message starts a turn in this agent while it's idle |
 
-`/peerlink <subcommand>` still runs every one of these, as in `/peerlink space file acme` or `/peerlink mute web`.
+`/peerlink <subcommand>` still runs every one of these, as in `/peerlink space acme` or `/peerlink mute web`.
 
 In a shell, the daemon writes a launcher to `~/.peerlink/bin/peerlink`. You can add that folder to your `PATH`.
 
@@ -315,8 +313,9 @@ You can change these in the web UI, with `peerlink config <name> <value>`, or in
 | `auto_reload` | true | Agents reload their plugins by themselves when a newer peerlink is installed |
 | `max_message_chars` | 8000 | Longer messages are refused, with a note to send a file path instead |
 | `issue_agent` | peerlink | The agent that `report_issue` reports are also sent to, when it's live |
-| `sessions` | `{}` | Per-agent `nickname`, `muted`, `auto_wake` and `space`, keyed by Claude Code session id |
-| `space_rules` | `[]` | Folder rules, such as `[{"path": "~/Repos/acme", "space": "acme"}]` |
+| `sessions` | `{}` | Per-agent `nickname`, `role`, `muted` and `auto_wake`, keyed by Claude Code session id |
+| `folder_spaces` | `{}` | The space you put each folder in, such as `{"/Users/you/Repos/games": "acme"}` |
+| `space_parents` | `{}` | The space each space sits inside, set on the Spaces page (`""` for the top level) |
 | `folder_names` | `{}` | The name each folder's agents get, kept when you name an agent |
 | `remotes`, `listen_host`, `token` | | Settings for linking daemons across machines |
 

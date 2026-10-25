@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.19'
+const DAEMON_VERSION = '0.8.20'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -29,16 +29,16 @@ type PeerMessage = {
 
 type ClientConfig = {
   space: string
-  space_source: 'override' | 'file' | 'rule' | 'default'
+  space_source: 'set' | 'file' | 'default'
   space_from: string
   // Set when this agent leads a space nested in another: the space it also sits in and speaks for its own.
   parent?: string
-  // How this agent leads its space: you picked it, its folder holds the nesting .peerlink, or it was alone there.
-  leads?: '' | 'set' | 'file' | 'only'
+  // How this agent leads its space: you picked it, or it was alone there.
+  leads?: '' | 'set' | 'only'
   space_parent?: string
   // Spaces your user added this agent's folder to, on top of its own.
   also?: string[]
-  // What this agent is here for: the role: lines of its folder's .peerlink.
+  // What this agent is here for: the role your user set for it, else the role: lines of its folder's .peerlink.
   role?: string
   // The agent that leads this agent's space, and the leads of spaces nested inside it.
   lead?: string
@@ -77,9 +77,8 @@ const HELP = `peerlink commands:
   /peerlink rotate-key     new key; signs out every browser
 
   /peerlink-spaces                 the space tree, and this agent's place in it
-  /peerlink-spaces <name> | clear  override the space for this agent only
-  /peerlink-spaces file <name> | clear    set the space in this project's .peerlink
-  /peerlink-spaces parent <name> | clear  nest this project's space inside another
+  /peerlink-spaces <name> | clear  put this folder in a space (clear: back to its .peerlink)
+  /peerlink-spaces parent <name> | clear  put this agent's space inside another
 
   /peerlink-peers                  list live agents
   /peerlink-peers mute <agent> | unmute <agent>
@@ -89,7 +88,7 @@ const HELP = `peerlink commands:
   /peerlink-agent summary <text>   set what peers see for this agent
   /peerlink-agent wake on|off|default    whether a message starts a turn here when idle
 
-/peerlink <subcommand> runs any of these too, as in /peerlink space file acme.`
+/peerlink <subcommand> runs any of these too, as in /peerlink space acme.`
 
 // Module state: a hot reload starts it over and session.start registers again.
 let sessionId = ''
@@ -766,9 +765,8 @@ async function listPeers($: EngineInterface, withIds: boolean) {
 function spaceLine() {
   if (!cfg?.space) return 'space: default'
   const from =
-    cfg.space_source === 'override' ? 'override for this agent'
+    cfg.space_source === 'set' ? 'set for this folder'
     : cfg.space_source === 'file' ? `from ${cfg.space_from}`
-    : cfg.space_source === 'rule' ? `folder rule ${cfg.space_from}`
     : 'no space set'
   const nest = cfg.parent ? `, leads it inside "${cfg.parent}"` : cfg.leads ? ', leads it' : cfg.lead ? `, led by ${cfg.lead}` : ''
   const also = cfg.also?.length ? `; also a member of ${cfg.also.join(', ')}` : ''
@@ -786,8 +784,8 @@ function spaceTag(p: any) {
 function hierarchyGuidance() {
   if (!cfg) return ''
   const lines: string[] = []
-  // Your user's brief for this agent, from its folder's .peerlink; other agents see it too.
-  if (cfg.role) lines.push(`Your role here, as your user set it in this folder's .peerlink (other agents see it too): ${cfg.role}`)
+  // Your user's brief for this agent; other agents see it too.
+  if (cfg.role) lines.push(`Your role here, as your user set it (other agents see it too): ${cfg.role}`)
   const chans = (cfg.discord ?? []).filter(c => c.channel_id !== 'dm')
   const dm = (cfg.discord ?? []).some(c => c.channel_id === 'dm')
   if (chans.length || dm) {
@@ -854,8 +852,8 @@ const COMMANDS: { name: string; description: string; argumentHint: string; args:
   },
   {
     name: 'peerlink-spaces',
-    description: "peerlink: the space tree, or set this agent's space, .peerlink file or parent space",
-    argumentHint: '[<name> | clear | file <name> | parent <name>]',
+    description: "peerlink: the space tree, or set this folder's space or the space it sits inside",
+    argumentHint: '[<name> | clear | parent <name>]',
     args: a => `spaces ${a}`,
   },
   {
@@ -878,7 +876,7 @@ const USAGE: Record<string, string> = {
 }
 
 // The spaces on this machine as an org chart: a space lists its own agents and the leads of the spaces under it,
-// each lead's team indented beneath it. Spaces with teams come first, so the top of the org is at the top.
+// the space each lead speaks for indented beneath it. Spaces with spaces inside come first, so the top of the org is at the top.
 async function spaceTree($: EngineInterface) {
   const res = await call($, 'GET', '/api/peers')
   if (!res.ok) return `Daemon error: ${res.data.error ?? res.status}`
@@ -913,7 +911,7 @@ async function spaceTree($: EngineInterface) {
       const own = p.leads && !p.parent ? (p.leads === 'only' ? '  lead (only agent)' : '  lead') : ''
       lines.push(`${pad}${p.name.padEnd(width)}  ${p.cwd.replace(/^\/Users\/[^/]+/, '~')}${tag}${own}${p.id === sessionId ? '  ← you' : ''}`)
       if (tag && !seen.has(p.space) && p === leads.filter(l => l.space === p.space).at(-1)) {
-        lines.push(`${pad}  └ ${p.space} team`)
+        lines.push(`${pad}  └ ${p.space}`)
         tier(p.space, `${pad}      `)
       }
     }
@@ -1049,21 +1047,12 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
     case 'space': {
       const [what = '', name = ''] = rest
       if (!what) return `This agent's ${spaceLine()}.`
-      if (what === 'parent') {
-        if (!name) return 'Usage: /peerlink-spaces parent <name> | clear'
-        const res = await call($, 'POST', `/api/sessions/${sessionId}/space-file`, { parent: name === 'clear' ? '' : name })
-        if (!res.ok) return `Could not write .peerlink: ${res.data.error ?? res.status}`
-        await poll($)
-        return `${name === 'clear' ? 'Cleared the parent in' : 'Wrote'} ${res.data.path}. This agent's ${spaceLine()}.`
-      }
-      if (what === 'file') {
-        if (!name) return 'Usage: /peerlink-spaces file <name> | clear'
-        const res = await call($, 'POST', `/api/sessions/${sessionId}/space-file`, { space: name === 'clear' ? '' : name })
-        if (!res.ok) return `Could not write .peerlink: ${res.data.error ?? res.status}`
-        await poll($)
-        return `${name === 'clear' ? 'Cleared the space in' : 'Wrote'} ${res.data.path}. This agent's ${spaceLine()}.`
-      }
-      await setAgentConfig($, sessionId, { space: what === 'clear' ? '' : what })
+      // `file` is what older versions called setting the folder's space.
+      const parent = what === 'parent'
+      const value = parent || what === 'file' ? name : what
+      if (!value) return `Usage: /peerlink-spaces ${parent ? 'parent ' : ''}<name> | clear`
+      const res = await call($, 'POST', `/api/sessions/${sessionId}/space`, parent ? { parent: value === 'clear' ? '' : value } : { space: value === 'clear' ? '' : value })
+      if (!res.ok) return `Could not set it: ${res.data.error ?? res.status}`
       await poll($)
       return `This agent's ${spaceLine()}.`
     }
