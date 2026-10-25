@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.17'
+const DAEMON_VERSION = '0.8.18'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -23,6 +23,8 @@ type PeerMessage = {
   kind?: string
   // false: nothing in it needs a turn of its own (an FYI, a reply to a reply), so it waits for the agent's next one.
   wake?: boolean
+  // Set when it arrived during a turn that ended without an answer to it, and is put to the agent again.
+  unanswered?: boolean
 }
 
 type ClientConfig = {
@@ -106,6 +108,10 @@ let clearing = false
 // Messages that reached the session, so one the daemon hands out again isn't shown twice; and acks it hasn't taken yet.
 const placed = new Set<string>()
 let unacked: string[] = []
+// Messages wanting a reply that arrived during the current turn. One the agent ends the turn without answering is
+// put to it again, once, as a turn of its own: a message that lands mid-task is easy to read past.
+let midTurn: PeerMessage[] = []
+const chased = new Set<string>()
 let pid: number | undefined
 
 // This Claude Code process, so the daemon can end it if a requested exit doesn't happen.
@@ -329,7 +335,7 @@ async function announce($: EngineInterface, succeeds?: string) {
   return res.ok
 }
 
-type Frame = { id: string; from: string; re?: string; reply: boolean; task?: string; body: string }
+type Frame = { id: string; from: string; re?: string; reply: boolean; unanswered?: boolean; task?: string; body: string }
 
 // Reads back what frame() wrote, wherever it sits in the row's text.
 function parseFrames(text: string): Frame[] {
@@ -342,6 +348,7 @@ function parseFrames(text: string): Frame[] {
       id: match[2],
       re: tags.match(/re (m\d+)/)?.[1],
       reply: tags.includes('reply expected'),
+      unanswered: tags.includes('unanswered from your last turn'),
       task: tags.match(/task (t\d+)/)?.[1],
       body: match[4],
     })
@@ -367,13 +374,13 @@ function MessageRow(ui: any, arrow: '↘' | '↗', who: string, tags: string[], 
 }
 
 function inboundTags(f: Frame) {
-  return [f.id, f.task ? `task ${f.task}` : '', f.re ? `re ${f.re}` : '', f.task ? '' : f.reply ? 'reply expected' : ''].filter(Boolean)
+  return [f.id, f.task ? `task ${f.task}` : '', f.re ? `re ${f.re}` : '', f.task ? '' : f.reply ? 'reply expected' : '', f.unanswered ? 'unanswered from your last turn' : ''].filter(Boolean)
 }
 
 function frame(m: PeerMessage) {
   const from = m.from.includes('@') ? m.from : m.from_name
   // A task is always answered, through update_task, so it needs no "reply expected".
-  const tags = [m.id, m.kind === 'announcement' ? 'announcement' : '', m.task ? `task ${m.task}` : '', m.reply_to ? `re ${m.reply_to}` : '', m.expects_reply && !m.task ? 'reply expected' : ''].filter(Boolean)
+  const tags = [m.id, m.kind === 'announcement' ? 'announcement' : '', m.task ? `task ${m.task}` : '', m.reply_to ? `re ${m.reply_to}` : '', m.expects_reply && !m.task ? 'reply expected' : '', m.unanswered ? 'unanswered from your last turn' : ''].filter(Boolean)
   return `${MESSAGE_MARK}${from} · ${tags.join(' · ')}\n${m.text}`
 }
 
@@ -420,6 +427,20 @@ function acked($: EngineInterface, batch: PeerMessage[]) {
     .catch(() => unacked.push(...ids))
 }
 
+// The messages that arrived mid-turn and are still owed a reply when it ends go back to the front of the queue.
+async function chase($: EngineInterface) {
+  const arrived = midTurn
+  midTurn = []
+  if (!arrived.length || !sessionId) return
+  const res = await call($, 'GET', `/api/sessions/${sessionId}/threads`).catch(() => undefined)
+  if (!res?.ok) return
+  const owed = new Set(((res.data.owes ?? []) as any[]).map(t => t.id))
+  const again = arrived.filter(m => owed.has(m.id) && !chased.has(m.id) && !pending.some(p => p.id === m.id))
+  for (const m of again) chased.add(m.id)
+  if (chased.size > 500) for (const id of [...chased].slice(0, chased.size - 500)) chased.delete(id)
+  if (again.length) pending = [...again.map(m => ({ ...m, unanswered: true, wake: true })), ...pending]
+}
+
 async function deliver($: EngineInterface) {
   if (pending.length === 0 || !cfg) {
     wakeAt = undefined
@@ -436,6 +457,7 @@ async function deliver($: EngineInterface) {
       return
     }
     acked($, batch)
+    midTurn.push(...batch.filter(m => m.expects_reply && !m.task && !chased.has(m.id)))
     // The model reads the row above, which the person never sees: show each message as a transcript line too.
     for (const m of batch) $.ui.log(frame(m).replace('\n', ': '))
     $.ui.toast(`Message from ${batch.map(m => m.from_name).join(', ')}`)
@@ -1223,8 +1245,10 @@ export const register: Register = on => {
     if (e.agentId === undefined) {
       busy = false
       turnsSinceSummary++
-      if (clearing) void clearNow($)
-      else void deliver($)
+      if (clearing) {
+        midTurn = []
+        void clearNow($)
+      } else void chase($).then(() => deliver($))
       void summarize($)
     }
     return done
