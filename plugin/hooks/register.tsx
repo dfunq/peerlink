@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.20'
+const DAEMON_VERSION = '0.8.21'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -123,6 +123,14 @@ async function processId($: EngineInterface) {
 }
 let cancelPoll: (() => void) | undefined
 let lastRoster = ''
+// Whether this session's prompt.compose and prompt.context hooks have run. An org's managed plugin can send those
+// events past every user plugin; then what they carry (the role and guidance, open threads, announcements) rides on
+// the next prompt instead, sent again only when it changes or the conversation starts over.
+let composeRan = false
+let contextRan = false
+let sentGuidance = ''
+let sentThreads = false
+let contextFor = ''
 let manualSummaryAt = -Infinity
 let lastSummaryAt = -Infinity
 let summarizing = false
@@ -534,6 +542,8 @@ async function poll($: EngineInterface) {
     const old = sessionId
     sessionId = now
     lastRoster = ''
+    sentGuidance = ''
+    sentThreads = false
     await announce($, old)
     return
   }
@@ -778,6 +788,42 @@ function spaceTag(p: any) {
   // `parent` alone: a peer on another machine whose daemon predates `leads`.
   if (p.leads || p.parent) return ` [leads ${p.space}]`
   return cfg && p.space && p.space !== cfg.space ? ` [${p.space}]` : ''
+}
+
+// The system prompt's peerlink section: who this agent is to its peers, its role, and how to work with them.
+function guidanceText() {
+  if (!cfg || cfg.muted) return ''
+  return `# Peer agents\nPeers know you as "${myName}"${cfg.space && cfg.space !== 'default' ? ` in the "${cfg.space}" space; you only see agents in that space${[cfg.parent, ...(cfg.also ?? [])].filter(Boolean).map(s => ` and "${s}"`).join('')}` : ''}.${hierarchyGuidance()}\n${cfg.guidance ?? ''}`
+}
+
+// What the prompt.compose and prompt.context hooks would have sent, for a prompt, when they didn't run.
+async function skippedContext($: EngineInterface) {
+  const out: string[] = []
+  // A /clear or resume is a new conversation under a new id: it hasn't seen any of it.
+  const id = await $.session.id().catch(() => sessionId)
+  if (id !== contextFor) {
+    contextFor = id
+    sentGuidance = ''
+    sentThreads = false
+  }
+  if (!composeRan) {
+    const guidance = guidanceText()
+    if (guidance && guidance !== sentGuidance) out.push(guidance)
+    sentGuidance = guidance
+  }
+  if (!contextRan) {
+    if (!sentThreads) {
+      sentThreads = true
+      const threads = await openThreadsBlock($).catch(() => '')
+      if (threads) out.push(threads)
+    }
+    const heard = notices.splice(0)
+    if (heard.length) {
+      acked($, heard)
+      out.push(`Announced to your space since your last turn (no reply expected):\n\n${heard.map(frame).join('\n\n')}`)
+    }
+  }
+  return out
 }
 
 // What a place in a nested space asks of this agent; the daemon enforces who can reach whom.
@@ -1251,13 +1297,14 @@ export const register: Register = on => {
       void postSummary($, `${base}${base ? ' · ' : ''}now: ${task}`, 'seed').catch(() => {})
     }
     if (!sessionId || e.command) return next(e)
-    const roster = await rosterContext($)
-    return next(roster ? { ...e, context: [...(e.context ?? []), roster] } : e)
+    const add = [await rosterContext($), ...(await skippedContext($))].filter((t): t is string => !!t)
+    return next(add.length ? { ...e, context: [...(e.context ?? []), ...add] } : e)
   }).catch(($, e, next) => next(e))
 
   // A conversation's first context, and again after compaction or /clear: what this agent still owes peers and
   // waits on, so a reset context doesn't drop a commitment.
   on('prompt.context', async ($, e, next) => {
+    contextRan = true
     const out = await next(e)
     const threads = await openThreadsBlock($).catch(() => '')
     const heard = notices.splice(0)
@@ -1272,18 +1319,22 @@ export const register: Register = on => {
   })
 
   on('prompt.compose', async ($, e, next) => {
+    composeRan = true
     const composed = await next(e)
-    if (!cfg || cfg.muted) return composed
-    return {
-      sections: [
-        ...composed.sections,
-        {
-          id: 'peerlink:guidance',
-          scope: 'session',
-          text: `# Peer agents\nPeers know you as "${myName}"${cfg.space && cfg.space !== 'default' ? ` in the "${cfg.space}" space; you only see agents in that space${[cfg.parent, ...(cfg.also ?? [])].filter(Boolean).map(s => ` and "${s}"`).join('')}` : ''}.${hierarchyGuidance()}\n${cfg.guidance}`,
-        },
-      ],
+    const text = guidanceText()
+    if (!text) return composed
+    return { sections: [...composed.sections, { id: 'peerlink:guidance', scope: 'session', text }] }
+  })
+
+  // A compacted conversation keeps the system prompt, but the prompt that carried what the skipped hooks would have
+  // sent is summarized away: send it again.
+  on('session.compact', async ($, e, next) => {
+    const out = await next(e)
+    if ((e as any).agentId === undefined) {
+      sentGuidance = ''
+      sentThreads = false
     }
+    return out
   })
 
   on('tool.call', { tool: 'mcp__peerlink__list_peers' }, async $ => text(await listPeers($, true))).catch(daemonDown)

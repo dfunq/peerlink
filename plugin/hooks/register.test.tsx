@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.8.20', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.8.21', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (state.forget && path.endsWith('/heartbeat') && 'busy' in body) {
       state.forget = false
       return { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'unknown agent; register again' }) } }
@@ -144,6 +144,39 @@ test('the model is told about peers beside the prompt, again only when who is th
   const fourth: any = await $.prompt.submit({ text: 'and now' })
   expect(fourth.context?.join('\n')).toContain('search: ~/r/search [main] — Indexing')
   expect(fourth.context?.join('\n')).toContain('Migrating invoices to v2')
+})
+
+test("when an org plugin skips peerlink's compose and context hooks, the role, guidance and announcements ride on the prompt", async ($, on) => {
+  const { clock } = engine(on)
+  const inbox: any[] = []
+  fakeDaemon(on, 1, null, inbox, { space: 'acme', space_source: 'set', space_from: '', role: 'Owns the web app.', guidance: 'Be brief.' })
+  await $.session.start(START)
+  await settle()
+  const first: any = await $.prompt.submit({ text: 'add an invoice page' })
+  const said = first.context.join('\n')
+  expect(said).toContain('Peers know you as "web" in the "acme" space')
+  expect(said).toContain('Your role here, as your user set it (other agents see it too): Owns the web app.')
+  expect(said).toContain('Be brief.')
+  // Unchanged, it isn't sent again.
+  const second: any = await $.prompt.submit({ text: 'now style it' })
+  expect(second.context).toBeUndefined()
+  // An announcement, which prompt.context would carry, comes with the next prompt.
+  inbox.push({ id: 'm8', kind: 'announcement', from: 'p1', from_name: 'billing-api', from_host: 'Mac', text: 'Deploy freeze until 5pm', expects_reply: false, reply_to: null, hops: 0 })
+  await clock.advance(600000)
+  for (let i = 0; i < 10; i++) await settle()
+  const third: any = await $.prompt.submit({ text: 'next' })
+  expect(third.context.join('\n')).toContain('Deploy freeze until 5pm')
+})
+
+test('when prompt.compose runs, the guidance is not sent on the prompt as well', async ($, on) => {
+  engine(on)
+  on('prompt.compose', () => ({ sections: [] }))
+  fakeDaemon(on, 1, null, [], { space: 'acme', space_source: 'set', space_from: '', role: 'Owns the web app.' })
+  await $.session.start(START)
+  await settle()
+  await $.prompt.compose(COMPOSE)
+  const first: any = await $.prompt.submit({ text: 'add an invoice page' })
+  expect(first.context?.join('\n') ?? '').not.toContain('Owns the web app.')
 })
 
 test('a new session describes itself from its README, with no model call', async ($, on) => {
@@ -622,7 +655,7 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.8.20 · daemon 0.8.20 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.8.21 · daemon 0.8.21 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the space is listed once', async ($, on) => {
@@ -655,7 +688,7 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.8.20')
+  expect(reg.plugin).toBe('0.8.21')
 })
 
 test('an agent registers again under the folder it started in, wherever the host has moved its root since', async ($, on) => {
@@ -734,7 +767,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.8.21', true], ['0.8.20', false]] as const)
+for (const [installed, reloads] of [['0.8.22', true], ['0.8.21', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     fakeDaemon(on)
