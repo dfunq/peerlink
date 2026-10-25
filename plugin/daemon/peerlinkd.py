@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.18"
+VERSION = "0.8.19"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -3518,10 +3518,7 @@ async function refresh(force,snap){
   $('#hostline').textContent=`${st.host} · daemon ${st.version}`;
   $('#browsers').textContent=`${st.browsers} signed in · links work once and expire after 60 s`;
   $('#keypath').textContent=st.home+'/key';
-  // An agent you added to other spaces shows there, not in its own space as well, marked with its own space.
-  // A lead you picked stays to head its own space, marked with the spaces it also joined.
-  const stays=x=>!(x.also||[]).length||x.leads==='set'||x.leads==='file';
-  const groups={};for(const x of p.peers)if(stays(x))(groups[x.space||'default']??=[]).push(x);
+  const groups={};for(const x of p.peers)(groups[x.space||'default']??=[]).push(x);
   const names=[...new Set(p.peers.map(x=>x.space||'default'))];
   // An org chart. A space is a box of its own agents; the lead of a space inside it sits in that box too, with
   // its team's box hanging beneath it. Charts with teams in them come first, so the top of the org is at the top.
@@ -3533,7 +3530,9 @@ async function refresh(force,snap){
   const inside={},kids={},leads={};for(const x of [...p.peers,...ghosts])if(x.parent){(leads[x.space]??=[]).push(x);if(!inside[x.space]){inside[x.space]={parent:x.parent,lead:x.name,peer:x};(kids[x.parent]??=[]).push(x.space)}}
   for(const n in inside)inside[n].lead=leads[n].map(x=>x.name).join(', ');
   for(const n of Object.keys(kids))if(!groups[n])groups[n]=[];
-  const guests={};for(const x of p.peers)if(!stays(x))for(const n of x.also){(guests[n]??=[]).push({...x,leads:'',parent:'',guest:x.space});groups[n]??=[]}
+  // An agent you added to other spaces shows once, in its own space, with a badge for each space it also joined.
+  // The Spaces chart still names it in each of them, with its own space beside it.
+  const joined={};for(const x of p.peers)for(const n of x.also||[])(joined[n]??=[]).push(x);
   const size=(n,seen=new Set())=>{if(seen.has(n))return 0;seen.add(n);return (groups[n]||[]).length+(kids[n]||[]).reduce((t,c)=>t+size(c,seen),0)};
   const order=(a,b)=>a==='default'?1:b==='default'?-1:((kids[b]||[]).length>0)-((kids[a]||[]).length>0)||size(b)-size(a)||a.localeCompare(b);
   const roots=Object.keys(groups).filter(n=>!inside[n]||n===inside[n].parent).sort(order);
@@ -3542,7 +3541,7 @@ async function refresh(force,snap){
   // A space's box: its members, then the leads of the spaces under it.
   const isLead=(x,n)=>!!(inside[n]&&inside[n].parent!==n&&x.parent&&x.space===n);
   const members=n=>[...groups[n].filter(x=>!isLead(x,n)&&!(x.leads&&!x.parent)).sort(rank).sort((a,b)=>a.name.localeCompare(b.name)),
-    ...(guests[n]||[]).sort((a,b)=>a.name.localeCompare(b.name)),...(kids[n]||[]).filter(c=>c!==n).sort().map(c=>inside[c].peer)];
+    ...(kids[n]||[]).filter(c=>c!==n).sort().map(c=>inside[c].peer)];
   const short=d=>{const t=tilde(d).split('/');return t.length>3?'…/'+t.slice(-2).join('/'):t.join('/')};
   const state=x=>(x.busy?'working':'idle')+(x.busy_since?' '+ago(x.busy_since):'');
   // Messages sent in the last hour, flagged from 20: each one can cost its recipient a turn.
@@ -3551,7 +3550,7 @@ async function refresh(force,snap){
   // A lead is told apart by its outline (and says which team on hover), so every card keeps its context in one place.
   // The badge sits in the name row, left of the context; an offline lead's clear link goes beneath.
   // An implicit lead (it was alone in the space) has a dashed badge, and says so on hover, so the name keeps its room.
-  const badge=x=>(x.leads&&(x.also||[]).length?`<span class="badge guest" title="Also a member of ${esc(x.also.join(', '))}">+${esc(x.also.join(', '))}</span>`:'')+(x.guest?`<span class="badge guest" title="A member you added; its own space is ${esc(x.guest)}">${esc(x.guest)}</span>`:x.leads?`<span class="badge${x.leads==='only'?' only':''}" title="${x.leads==='only'?'Lead (only agent): it was the only agent in the space':'Lead'}">Lead</span>`:'');
+  const badge=x=>(x.also||[]).map(n=>`<span class="badge guest" title="Also a member of ${esc(n)}">+${esc(n)}</span>`).join('')+(x.leads?`<span class="badge${x.leads==='only'?' only':''}" title="${x.leads==='only'?'Lead (only agent): it was the only agent in the space':'Lead'}">Lead</span>`:'');
   const clearOff=x=>x.leads&&x.offline?`<div><span class="small mut" data-clearlead="${esc(x.space)}" title="Clear this lead" style="cursor:pointer">clear</span></div>`:'';
   const node=x=>`<${x.offline?'div':'button'} class="node${x.leads?' is-lead':''}${x.offline?' off':''}${x.id&&x.id===sel?' sel':''}"${x.offline?'':` data-sel="${esc(x.id)}"`}${x.leads?` title="Leads the ${esc(x.space)} ${x.parent?'team':'space'}${x.offline?' (offline)':''}"`:''}>
     <div class="nm"><span title="${esc(x.name)}">${x.offline?'':`<span class="dot ${x.busy?'busy':''}"></span>`}${esc(x.name)}</span><span class="rt">${badge(x)}${ctx(x)}</span></div>${clearOff(x)}
@@ -3569,7 +3568,7 @@ async function refresh(force,snap){
     const row=`<div class="orow${stack?' stack':''}">${cols.join('')||'<span class="mut small">no other live agents</span>'}</div>`;
     return `<div class="unit"><div class="unit-h">${esc(n)}${inside[n]&&inside[n].parent!==n?' team':''} · ${count}</div>${top.length?`<div class="orow stack">${top.map(node).join('')}</div>${cols.length?`<div class="under">${row}</div>`:''}`:row}</div>`};
   const sunit=(n,seen)=>{if(seen.has(n))return '';seen.add(n);
-    const own=[...groups[n].filter(x=>!isLead(x,n)&&!(x.leads&&!x.parent)).map(x=>esc(x.name)),...(guests[n]||[]).map(x=>esc(x.name)+` <span class="mut">(${esc(x.guest)})</span>`)];
+    const own=[...groups[n].filter(x=>!isLead(x,n)&&!(x.leads&&!x.parent)).map(x=>esc(x.name)),...(joined[n]||[]).map(x=>esc(x.name)+` <span class="mut">(${esc(x.space||'default')})</span>`)];
     const ledBy=inside[n]?inside[n].lead:tops(n).map(x=>x.name+(x.offline?' (offline)':'')).join(', ');
     const ch=(kids[n]||[]).filter(c=>c!==n&&!seen.has(c)).sort();
     return `<div class="ocol"><div class="sbox${ledBy?' led':''}"><div class="name">${esc(n)}</div>
@@ -3588,7 +3587,7 @@ async function refresh(force,snap){
   const lspace=(n,seen)=>{if(seen.has(n))return '';seen.add(n);
     const nested=inside[n]&&inside[n].parent!==n;
     const head=nested?(leads[n]||[]):tops(n);
-    const own=[...groups[n].filter(x=>!isLead(x,n)&&!(x.leads&&!x.parent)).sort(rank).sort((a,b)=>a.name.localeCompare(b.name)),...(guests[n]||[]).sort((a,b)=>a.name.localeCompare(b.name))];
+    const own=[...groups[n].filter(x=>!isLead(x,n)&&!(x.leads&&!x.parent)).sort(rank).sort((a,b)=>a.name.localeCompare(b.name))];
     const ch=(kids[n]||[]).filter(c=>c!==n&&!seen.has(c)).sort();
     const body=own.map(lrow).join('')+ch.map(c=>lspace(c,seen)).join('');
     // Counted as the chart counts: a top-level lead and the leads of teams inside sit with this space; a team's own lead sits with its parent.
