@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.25"
+VERSION = "0.8.26"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -1318,7 +1318,7 @@ def on_press(press):
         return on_spawn_press(press, decide_schedule, schedules)
     if press["custom_id"].startswith("pa:"):
         return on_clear_all_press(press)
-    if press["custom_id"].startswith("pl:"):
+    if press["custom_id"] in ("pr:0", "pl:0"):  # "pl:0" from before 0.8.26; an agent's buttons are "pl:<message>:<n>"
         discordlink.answer_interaction(press["id"], press["token"], 7, {"components": []})
         return lift_limit(f"resumed on Discord by {press['author']}")
     if press["custom_id"].startswith("pk:"):
@@ -2646,7 +2646,7 @@ def hit_limit(rec, body):
             sent = discordlink.post(discord["token"], chans[0]["channel_id"],
                                     f"⏸️ **Usage limit reached** ({when}; hit by {display_name(rec)}). Agents hold their messages and schedules wait. "
                                     "Press Resume after switching accounts; it also lifts by itself at the reset, or when any agent's turn goes through.",
-                                    None, discordlink.buttons(["Resume now"], "pl"))
+                                    None, discordlink.buttons(["Resume now"], "pr"))
             with lock:
                 usage_limit["discord_out"] = {"channel_id": chans[0]["channel_id"], "message_id": str((sent[-1] or {}).get("id", "")) if sent else ""}
         except discordlink.DiscordError as err:
