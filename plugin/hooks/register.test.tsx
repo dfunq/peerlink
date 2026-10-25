@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.8.19', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.8.20', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (state.forget && path.endsWith('/heartbeat') && 'busy' in body) {
       state.forget = false
       return { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'unknown agent; register again' }) } }
@@ -427,7 +427,21 @@ test('a lead of a top-level space is told work sent to the space comes to it, an
   expect(text).toContain('You lead the "acme" space. Work sent to the space (to "space:acme") comes to you')
 })
 
-test('/peerlink-spaces draws an org chart: a lead in its parent, its team beneath', async ($, on) => {
+test('/peerlink-spaces <name> puts the folder in a space; parent and the old file form go to the same place', async ($, on) => {
+  engine(on)
+  const daemon = fakeDaemon(on, 1, null, [], { space: 'acme', space_source: 'set', space_from: '/Users/x/r/web' })
+  await $.session.start(START)
+  await settle()
+  const sent = () => daemon.posted.filter(p => p.path === '/api/sessions/me-session/space').map(p => p.body)
+  const { text } = (await $.command.run({ command: 'peerlink-spaces', args: 'acme' })) as any
+  expect(text).toContain('space: acme (set for this folder)')
+  await $.command.run({ command: 'peerlink-spaces', args: 'file billing' })
+  await $.command.run({ command: 'peerlink-spaces', args: 'parent clear' })
+  await $.command.run({ command: 'peerlink-spaces', args: 'clear' })
+  expect(sent()).toEqual([{ space: 'acme' }, { space: 'billing' }, { parent: '' }, { space: '' }])
+})
+
+test('/peerlink-spaces draws an org chart: a lead in its parent, its space beneath', async ($, on) => {
   engine(on)
   const daemon = fakeDaemon(on, 1, null, [], { space: 'billing', space_source: 'file', space_from: '/Users/x/r/web/.peerlink', parent: 'acme' })
   daemon.peers.splice(0, 1,
@@ -437,7 +451,7 @@ test('/peerlink-spaces draws an org chart: a lead in its parent, its team beneat
   )
   await $.session.start(START)
   const { text } = (await $.command.run({ command: 'peerlink-spaces' })) as any
-  expect(text).toContain('acme\n  acme  ~/r\n  web   ~/r/web  leads billing  ← you\n    └ billing team\n        api  ~/r/web/api')
+  expect(text).toContain('acme\n  acme  ~/r\n  web   ~/r/web  leads billing  ← you\n    └ billing\n        api  ~/r/web/api')
 })
 
 test('topic commands reject what belongs to another topic', async ($, on) => {
@@ -608,10 +622,10 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.8.19 · daemon 0.8.19 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.8.20 · daemon 0.8.20 · web'))).toBe(true)
 })
 
-test('two sessions in a lead folder both sit with the parent; the team is listed once', async ($, on) => {
+test('two sessions in a lead folder both sit with the parent; the space is listed once', async ($, on) => {
   engine(on)
   const daemon = fakeDaemon(on)
   daemon.peers.splice(0, 1,
@@ -622,7 +636,7 @@ test('two sessions in a lead folder both sit with the parent; the team is listed
   )
   await $.session.start(START)
   const { text } = (await $.command.run({ command: 'peerlink-spaces' })) as any
-  expect(text).toContain('top\n  top   ~/r\n  pg    ~/r/pg  leads pg\n  pg-2  ~/r/pg  leads pg\n    └ pg team\n        client  ~/r/pg/client')
+  expect(text).toContain('top\n  top   ~/r\n  pg    ~/r/pg  leads pg\n  pg-2  ~/r/pg  leads pg\n    └ pg\n        client  ~/r/pg/client')
 })
 
 test("a CLAUDE.md's stock first line is not taken as the project's description", async ($, on) => {
@@ -641,7 +655,7 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.8.19')
+  expect(reg.plugin).toBe('0.8.20')
 })
 
 test('an agent registers again under the folder it started in, wherever the host has moved its root since', async ($, on) => {
@@ -666,7 +680,7 @@ test("an agent is given its role from .peerlink, and peers see a peer's role bes
   const first: any = await $.prompt.submit({ text: 'go' })
   expect(first.context?.join('\n')).toContain('billing-api: ~/r/billing [main] — Owns the billing API: invoices and payments. · now: Owns the invoice schema')
   const composed: any = await $.prompt.compose(COMPOSE)
-  expect(composed.sections.find((s: any) => s.id === 'peerlink:guidance').text).toContain('Your role here, as your user set it in this folder\'s .peerlink (other agents see it too): Owns the web app: pages, styles, the build.')
+  expect(composed.sections.find((s: any) => s.id === 'peerlink:guidance').text).toContain('Your role here, as your user set it (other agents see it too): Owns the web app: pages, styles, the build.')
 })
 
 test('an agent you added to another space is told it is a member there, and sees it', async ($, on) => {
@@ -720,7 +734,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.8.20', true], ['0.8.19', false]] as const)
+for (const [installed, reloads] of [['0.8.21', true], ['0.8.20', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     fakeDaemon(on)
