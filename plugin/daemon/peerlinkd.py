@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.24"
+VERSION = "0.8.25"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -320,7 +320,7 @@ def load_config():
 
 
 def save_config():
-    tmp = CONFIG_PATH + ".tmp"
+    tmp = f"{CONFIG_PATH}.{os.getpid()}.tmp"  # daemons starting together each write their own
     with open(tmp, "w") as f:
         json.dump(config, f, indent=2)
     os.replace(tmp, CONFIG_PATH)
@@ -1042,7 +1042,7 @@ def on_slash(cmd):
     if sub == "schedules":
         with lock:
             live = sorted((c for c in schedules.values() if c["status"] in ("active", "pending")), key=lambda c: c.get("next_run") or 0)
-        rows = [f"• {c['id']} · {when_text(c)} · `{tilde_path(c['folder'])}`{' · waiting for approval' if c['status'] == 'pending' else ''}: {oneline(c['prompt'])[:90]}" for c in live]
+        rows = [f"• {c['id']} · {when_text(c)} · {c['agent'] + ' ' if c.get('agent') else ''}`{tilde_path(c['folder'])}`{' · waiting for approval' if c['status'] == 'pending' else ''}: {oneline(c['prompt'])[:90]}" for c in live]
         return ("\n".join(rows) + "\nCancel one with /peerlink cancel.") if rows else "No schedules.", None
     if sub == "cancel":
         code, out = cancel_schedule(str(opt.get("id", "")).strip())
@@ -2487,9 +2487,19 @@ def schedule_told(c, text):
 
 
 def create_schedule(body, by=None):
-    """A schedule from an agent (`by`) or from you (None). An agent's that may start one waits for your approval."""
+    """A schedule from an agent (`by`) or from you (None). An agent's that may start one waits for your approval.
+    It goes to an agent by name (its folder's other agent, or a new one there, when it isn't running), or to a folder."""
     now = time.time()
-    folder = os.path.abspath(os.path.expanduser(str(body.get("folder") or (by or {}).get("cwd") or "")))
+    name = str(body.get("agent") or "").strip().lstrip("@")
+    target = agent_named(name) if name else None
+    if name and target is None:
+        # The web UI's one field takes either: a name no agent has is a folder.
+        if body.get("folder") or not os.path.isdir(os.path.expanduser(name)):
+            return 400, {"error": f"{name} isn't a folder on this machine" if "/" in name else f"no running agent is called {name}; give its folder instead"}
+        body, name = {**body, "folder": name}, ""
+    if not name and not body.get("folder") and by:
+        target = by  # an agent's own schedule is its own
+    folder = os.path.abspath(os.path.expanduser(str((target or {}).get("cwd") if target else body.get("folder") or "")))
     prompt = str(body.get("prompt") or "").strip()
     cron, at = str(body.get("cron") or "").strip(), body.get("at")
     start = body.get("start") is not False
@@ -2507,14 +2517,14 @@ def create_schedule(body, by=None):
         return 400, {"error": "that time has passed"}
     with lock:
         n = max([int(i[1:]) for i in schedules] or [0]) + 1
-        c = {"id": f"c{n}", "folder": folder, "prompt": prompt[:8000], "cron": cron, "at": None if cron else next_run,
+        c = {"id": f"c{n}", "folder": folder, "agent": display_name(target) if target else "", "prompt": prompt[:8000], "cron": cron, "at": None if cron else next_run,
              "start": start, "next_run": next_run, "last_run": None, "runs": 0, "note": "",
              "requester": {"id": by["id"], "name": display_name(by), "cwd": by.get("cwd", "")} if by else {"name": USER_NAME, "cwd": ""},
              "status": "pending" if by and start else "active", "created": now, "updated": now}
         schedules[c["id"]] = c
         save_schedules()
         chans = [r for r in routes_for(by.get("cwd", "")) if r["channel_id"] != "dm" and carries(r, "message")] if by else []
-    log("schedule", c["id"], c["status"], tilde_path(folder), when_text(c))
+    log("schedule", c["id"], c["status"], c["agent"] or tilde_path(folder), when_text(c))
     if c["status"] == "pending" and chans and discord.get("token") and discord_bot[0]:
         try:
             sent = discordlink.post(discord["token"], chans[0]["channel_id"],
@@ -2573,7 +2583,13 @@ def fire_schedule(c, now):
            "text": f"Scheduled ({when_text(c)}; cancel with the schedule tool, id {c['id']}): {c['prompt']}",
            "expects_reply": False, "reply_to": None, "hops": 0, "status": "queued", "v": 2}
     next_msg[0] += 1
-    agent = queue_for_folder(c["folder"], msg)
+    # Its agent when that one runs; else the folder's, or the next to start there.
+    own = agent_named(c.get("agent")) if c.get("agent") else None
+    if own:
+        msg["to"], msg["to_name"] = own["id"], display_name(own)
+        inboxes.setdefault(own["id"], []).append(msg)
+        record(msg)
+    agent = own or queue_for_folder(c["folder"], msg)
     c["last_run"], c["runs"], c["updated"] = now, c.get("runs", 0) + 1, now
     try:
         c["next_run"] = cron_next(c["cron"], now) if c["cron"] else None
@@ -2581,7 +2597,7 @@ def fire_schedule(c, now):
         c["next_run"] = None
     if not c["cron"]:
         c["status"] = "done"
-    c["note"] = f"sent to {display_name(agent)}" if agent else "no agent was running there"
+    c["note"] = (f"sent to {display_name(agent)}" + (f" ({c['agent']} wasn't running)" if c.get("agent") and agent is not own else "")) if agent else "no agent was running there"
     save_schedules()
     log("schedule", c["id"], "ran:", c["note"])
     # One start per folder at a time: a second run while the first agent is still starting waits for it.
@@ -3786,8 +3802,8 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <div id="spacelist"></div>
 </section>
 
-<section id="schedules"><h1>Schedules</h1><p class="lead">Prompts the daemon sends a folder's agent at a time or on a repeat, with no terminal open. When none is running there, it starts one. Agents add them with their <span class="mono">schedule</span> tool; one that may start an agent waits for you in the Inbox.</p>
-<form class="card" id="schedform"><div class="addline"><input name="folder" class="grow mono" type="text" placeholder="Folder, like ~/Repos/acme" list="schedfolders"><datalist id="schedfolders"></datalist>
+<section id="schedules"><h1>Schedules</h1><p class="lead">Prompts the daemon sends an agent at a time or on a repeat, with no terminal open. When that agent isn't running, another in its folder gets it, or a new one starts there. Agents add them with their <span class="mono">schedule</span> tool; one that may start an agent waits for you in the Inbox.</p>
+<form class="card" id="schedform"><div class="addline"><input name="target" class="grow mono" type="text" placeholder="Agent, or a folder like ~/Repos/acme" list="schedfolders"><datalist id="schedfolders"></datalist>
 <input name="when" type="text" placeholder="0 9 * * 1-5, or in 2h" title="A cron (minute hour day month weekday) repeats; 'in 30m', 'in 2h', 'in 1d' or 2026-10-25 09:00 runs once" style="width:190px"></div>
 <textarea name="prompt" rows="2" placeholder="What the agent should do when it runs" style="margin-top:8px;width:100%"></textarea>
 <div class="addline" style="margin-top:8px"><label class="check small"><input type="checkbox" name="start" checked> Start an agent when none is running</label><button type="submit">Add schedule</button><span class="small" id="schedmsg"></span></div></form>
@@ -4094,10 +4110,10 @@ let allSched=[];
 function renderSchedules(){
   const live=c=>c.status==='active'||c.status==='pending';
   $('#n-sched').textContent=allSched.filter(live).length||'';
-  $('#schedfolders').innerHTML=[...new Set(livePeers.map(x=>x.cwd))].map(d=>`<option value="${esc(tilde(d))}">`).join('');
+  $('#schedfolders').innerHTML=livePeers.filter(x=>!x.remote).map(x=>`<option value="${esc(x.name)}">${esc(tilde(x.cwd))}</option>`).join('')+[...new Set(livePeers.filter(x=>!x.remote).map(x=>x.cwd))].map(d=>`<option value="${esc(tilde(d))}">`).join('');
   const when=t=>t?new Date(t*1000).toLocaleString([], {weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):'';
   const rows=[...allSched.filter(live),...allSched.filter(c=>!live(c))];
-  $('#schedlist').innerHTML=rows.map(c=>`<div class="card"><div class="addline"><b>${esc(c.id)}</b><span class="chip">${esc(c.status)}</span><span>${esc(c.when_text)}</span><span class="mono mut">${esc(tilde(c.folder))}</span>
+  $('#schedlist').innerHTML=rows.map(c=>`<div class="card"><div class="addline"><b>${esc(c.id)}</b><span class="chip">${esc(c.status)}</span><span>${esc(c.when_text)}</span>${c.agent?`<b>${esc(c.agent)}</b>`:''}<span class="mono mut">${esc(tilde(c.folder))}</span>
     <span style="margin-left:auto" class="small mut">${c.next_run&&live(c)?'next '+when(c.next_run):''}</span>${live(c)?`<button class="ghost small danger" data-schedcancel="${esc(c.id)}">Cancel</button>`:''}</div>
     <div style="margin-top:6px;white-space:pre-wrap">${esc(c.prompt)}</div>
     <div class="small mut" style="margin-top:4px">by ${esc(c.requester?.name||'you')}${c.start?' · starts an agent when none is running':' · waits for an agent'}${c.runs?` · ran ${c.runs}×, last ${when(c.last_run)}${c.note?': '+esc(c.note):''}`:''}${c.status==='pending'?' · approve it in the Inbox':''}</div></div>`).join('')||'<div class="empty">No schedules yet.</div>'}
@@ -4105,7 +4121,7 @@ document.addEventListener('click',async e=>{const b=e.target.closest('[data-sche
   if(!confirm(`Cancel ${b.dataset.schedcancel}?`))return;const r=await post(`/api/schedules/${encodeURIComponent(b.dataset.schedcancel)}/cancel`);if(r.error)alert(r.error);refresh(true)});
 document.addEventListener('submit',async e=>{if(e.target.id!=='schedform')return;e.preventDefault();const f=e.target,v=n=>f.elements[n].value.trim();
   const w=v('when'),cron=/^\S+\s+\S+\s+\S+\s+\S+\s+\S+$/.test(w)&&!/^in\s/i.test(w)&&!/^\d{4}-/.test(w);
-  const r=await post('/api/schedules',{folder:v('folder'),prompt:v('prompt'),...(cron?{cron:w}:{at:w}),start:f.elements.start.checked});
+  const r=await post('/api/schedules',{agent:v('target'),prompt:v('prompt'),...(cron?{cron:w}:{at:w}),start:f.elements.start.checked});
   const out=$('#schedmsg');out.className='small '+(r.error?'err':'ok');out.textContent=r.error||`Added ${r.schedule.id}`;
   if(!r.error){f.elements.prompt.value='';f.elements.when.value=''}refresh(true)});
 // The Inbox: one row per thing waiting on you, with the action it needs.
@@ -4258,7 +4274,10 @@ document.addEventListener('drop',async e=>{const t=target(e),task=dragging;if(!t
 function panelTasks(x){
   const mine=allTasks.filter(t=>t.owner_cwd&&t.owner_cwd===x.cwd),asked=allTasks.filter(t=>t.requester?.id===x.id||(x.cwd&&t.requester?.cwd===x.cwd));
   const sec=(title,list,none)=>`<div class="k small">${title}</div>${list.length?byLive(list).map(t=>taskRow(t,false)).join(''):`<div class="small mut">${none}</div>`}`;
-  return `<div class="ptasks">${sec('Owns',mine,'No tasks for this agent.')}${sec('Asked for',asked,'It hasn\'t handed out any tasks.')}</div>`}
+  // Its schedules: named for it, or for its folder with no agent named.
+  const sched=allSched.filter(c=>(c.status==='active'||c.status==='pending')&&(c.agent?c.agent===x.name:c.folder===x.cwd));
+  const srow=c=>`<div class="small" style="margin:4px 0"><b>${esc(c.id)}</b> ${esc(c.when_text)}${c.agent?'':' <span class="mut">(its folder)</span>'}: ${esc(c.prompt.length>120?c.prompt.slice(0,119)+'…':c.prompt)}</div>`;
+  return `<div class="ptasks">${sec('Owns',mine,'No tasks for this agent.')}${sec('Asked for',asked,'It hasn\'t handed out any tasks.')}<div class="k small">Schedules</div>${sched.length?sched.map(srow).join(''):'<div class="small mut">None. Add one on the Schedules page.</div>'}</div>`}
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-ptab],[data-tact]');if(!b)return;
   if(b.dataset.ptab){panelTab=b.dataset.ptab;editing=false;refresh(true);return}
   const id=b.closest('[data-task]').dataset.task,was=allTasks.find(t=>t.id===id)?.status;

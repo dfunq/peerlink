@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.24'
+const DAEMON_VERSION = '0.8.25'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -1278,7 +1278,7 @@ export const register: Register = on => {
     await $.tool.register({
       name: 'schedule',
       description:
-        "Do something later, or on a repeat: the peerlink daemon sends your prompt to the agent in a folder (yours by default) at that time, even after this session or its terminal has closed, and starts Claude Code there if no agent is running. Use it instead of CronCreate or /loop for anything that must outlive this session. One that may start an agent waits for your user's approval first. Times are this machine's local time.",
+        "Do something later, or on a repeat: the peerlink daemon sends your prompt to an agent (you by default) at that time, even after this session or its terminal has closed, and starts Claude Code there if no agent is running. Use it instead of CronCreate or /loop for anything that must outlive this session. One that may start an agent waits for your user's approval first. Times are this machine's local time.",
       inputSchema: {
         type: 'object',
         properties: {
@@ -1286,7 +1286,8 @@ export const register: Register = on => {
           prompt: { type: 'string', description: 'create: what the agent should do when it runs, written so it stands on its own' },
           cron: { type: 'string', description: 'create, to repeat: five cron fields, minute hour day-of-month month weekday, like "0 9 * * 1-5"' },
           at: { type: 'string', description: 'create, to run once: "in 30m", "in 2h", "in 1d", or a local date and time like "2026-10-25 09:00"' },
-          folder: { type: 'string', description: 'create: the folder whose agent runs it; yours if left out' },
+          agent: { type: 'string', description: "create: the agent that runs it, by name; when it isn't running, its folder's agent or a new one there does. You if this and folder are left out" },
+          folder: { type: 'string', description: 'create: a folder whose agent runs it, whichever one that is, instead of a named agent' },
           start: { type: 'boolean', description: 'create: start an agent there when none is running (the default, needs approval); false holds the prompt for the next agent instead' },
           id: { type: 'string', description: 'cancel: the schedule id, like c3' },
         },
@@ -1485,13 +1486,13 @@ export const register: Register = on => {
       if (!res.ok) return text(`Couldn't list them: ${res.data.error ?? res.status}`)
       const live = (res.data.schedules as any[]).filter(c => c.status === 'active' || c.status === 'pending')
       if (!live.length) return text('No schedules are active.')
-      return text(live.map(c => `- ${c.id} ${c.status} · ${c.when_text} · ${c.folder}${c.next_run ? ` · next ${new Date(c.next_run * 1000).toLocaleString()}` : ''} · ${clip(c.prompt, 100)}`).join('\n'))
+      return text(live.map(c => `- ${c.id} ${c.status} · ${c.when_text} · ${c.agent ? `${c.agent} ` : ''}${c.folder}${c.next_run ? ` · next ${new Date(c.next_run * 1000).toLocaleString()}` : ''} · ${clip(c.prompt, 100)}`).join('\n'))
     }
     if (action === 'cancel') {
       const res = await call($, 'POST', `/api/schedules/${encodeURIComponent(String(input.id ?? '').trim())}/cancel`, { by: sessionId })
       return text(res.ok ? `Cancelled ${res.data.schedule.id}.` : `Not cancelled: ${res.data.error ?? res.status}`)
     }
-    const res = await call($, 'POST', '/api/schedules', { by: sessionId, prompt: input.prompt, cron: input.cron, at: input.at, folder: input.folder, start: input.start })
+    const res = await call($, 'POST', '/api/schedules', { by: sessionId, prompt: input.prompt, cron: input.cron, at: input.at, agent: input.agent, folder: input.folder, start: input.start })
     if (!res.ok) return text(`Not scheduled: ${res.data.error ?? res.status}`)
     const c = res.data.schedule
     const next = c.next_run ? new Date(c.next_run * 1000).toLocaleString() : ''
