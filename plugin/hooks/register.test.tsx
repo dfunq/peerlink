@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.8.22', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.8.23', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (state.forget && path.endsWith('/heartbeat') && 'busy' in body) {
       state.forget = false
       return { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'unknown agent; register again' }) } }
@@ -68,7 +68,9 @@ function engine(on: any, { turns = 0, readme = '', claudeMd = '', installed = ''
   })
   on('session.repo', () => ({ value: { root: '/Users/x/r/web', remote: null, internal: false, name: null } }))
   on('session.model', () => ({ value: 'opus' }))
-  on('session.usage', () => ({ value: { context: { window: 200000, tokens: 170000, percent: 85 } } }))
+  // The account's rate-limit windows, as the last API response reported them.
+  const limits: { kind: string; percentUsed: number; resetsAt?: string }[] = []
+  on('session.usage', () => ({ value: { context: { window: 200000, tokens: 170000, percent: 85 }, rateLimits: limits } }))
   on('session.turns', () => ({ value: turns }))
   on('session.messages', () => ({ value: [{ role: 'user', text: 'build the invoice page', toolUses: [] }] }))
   // What git says about the agent's folder: dirs are git-dir, common dir and top level; null outside a repo.
@@ -124,7 +126,7 @@ function engine(on: any, { turns = 0, readme = '', claudeMd = '', installed = ''
       calls.model++
       return { value: { isAnswered: true, text, usage: {} } }
     })
-  return { clock, calls, answer, writes, ids, pinned, git, where, woke, submits }
+  return { clock, calls, answer, writes, ids, pinned, git, where, woke, submits, limits }
 }
 
 test('the model is told about peers beside the prompt, again only when who is there changes', async ($, on) => {
@@ -672,7 +674,7 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.8.22 · daemon 0.8.22 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.8.23 · daemon 0.8.23 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the space is listed once', async ($, on) => {
@@ -705,7 +707,7 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.8.22')
+  expect(reg.plugin).toBe('0.8.23')
 })
 
 test('an agent registers again under the folder it started in, wherever the host has moved its root since', async ($, on) => {
@@ -784,7 +786,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.8.23', true], ['0.8.22', false]] as const)
+for (const [installed, reloads] of [['0.8.24', true], ['0.8.23', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     fakeDaemon(on)
@@ -933,4 +935,44 @@ test('an announcement does not wake the agent: it is read at the start of its ne
   expect(out.blocks.find((b: any) => b.name === 'peerlink announcements').text).toContain('↘ api · m8 · announcement\nFreeze on main until 5pm.')
   const again: any = await $.prompt.context({ blocks: [] } as any)
   expect(again.blocks.find((b: any) => b.name === 'peerlink announcements')).toBeUndefined()
+})
+
+test('a turn the usage limit kills puts back what it was given, holds new messages, and the next good turn lifts it', async ($, on) => {
+  const { clock, woke, limits } = engine(on)
+  mock.session(on)
+  on('turn.start', (_: any, e: any) => ({ turnId: e.turnId }))
+  const reset = '2026-10-25T15:00:00Z'
+  limits.push({ kind: 'five_hour', percentUsed: 40, resetsAt: reset })
+  const inbox: any[] = []
+  const daemon = fakeDaemon(on, 1, null, inbox, { wake_delay_s: 0 })
+  await $.session.start(START)
+  await settle()
+  const msg = (id: string) => ({ id, from: 'api-id', from_name: 'api', from_host: 'Mac', text: `do ${id}`, expects_reply: true, reply_to: null, hops: 0 })
+  inbox.push(msg('m1'))
+  await clock.advance(600000)
+  for (let i = 0; i < 10; i++) await settle()
+  expect(woke.length).toBe(1)
+  // That turn dies on the limit: the daemon hears it, with m1 to hand back and the window's reset time.
+  limits[0].percentUsed = 100
+  await $.turn.complete({ ...TURN, reason: 'error' })
+  for (let i = 0; i < 10; i++) await settle()
+  const hit = daemon.posted.find(p => p.path.endsWith('/limit'))?.body
+  expect(hit).toEqual({ resets_at: Date.parse(reset) / 1000, kind: 'five_hour', ids: ['m1'] })
+  // While the daemon says the limit holds, a new message (and m1, handed out again) waits instead of waking it.
+  daemon.state.once = { limit: { resets_at: Date.parse(reset) / 1000, by: 'web' } }
+  inbox.push(msg('m2'), msg('m1'))
+  await clock.advance(600000)
+  for (let i = 0; i < 10; i++) await settle()
+  expect(woke.length).toBe(1)
+  // You prompt it after swapping accounts and the turn goes through: the limit lifts, and the held ones go out.
+  limits[0].percentUsed = 0
+  await $.turn.start({ text: 'carry on', turnId: 't2' } as any)
+  await $.turn.complete(TURN)
+  for (let i = 0; i < 10; i++) await settle()
+  expect(daemon.posted.some(p => p.path.endsWith('/limit') && p.body?.lifted)).toBe(true)
+  await clock.advance(600000)
+  for (let i = 0; i < 10; i++) await settle()
+  expect(woke.length).toBe(2)
+  expect(woke[1]).toContain('m2')
+  expect(woke[1]).toContain('m1')
 })

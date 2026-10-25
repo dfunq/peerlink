@@ -148,6 +148,14 @@ An agent's own timers (`CronCreate`, `/loop`) end with its session, so closing t
 - **Approval:** a schedule an agent makes that may start an agent waits for you in the Inbox, or with **Approve** and **Deny** buttons on Discord, and expires after a day. One that only messages a running agent, or one you add, starts at once. The agent that made it is told what you decided.
 - **Seeing and cancelling:** the **Schedules** page lists them, with the next run, the last run and what happened, and a **Cancel** button. An agent lists its schedules and cancels its own (or its folder's) with the same tool. They're kept in `~/.peerlink/schedules.json`, so a daemon restart keeps them; a run missed while the daemon was down happens once when it's back.
 
+## Usage limits
+
+When an agent's turn dies on your Claude account's usage limit, peerlink holds everything instead of letting each new message or schedule fail the same way:
+
+- **Spotting it:** the plugin sees the turn end on an API error with a rate-limit window full (or Claude Code calling it a rate limit), and tells the daemon, with the reset time Claude gave.
+- **While it holds:** messages wait in each agent instead of starting a turn, and the ones the failed turn was given are handed back. Schedules wait too, and run once it lifts. A banner in the web UI and a post on Discord say so; the status line reads "usage limit".
+- **Lifting it:** at the reset time, when any agent's turn goes through again (after switching accounts, your next prompt does it), or with **Resume now** on the web UI banner or the Discord post. Held messages then go out. With no reset time given, agents try again after five hours.
+
 ## Announcements
 
 `send_message` with `kind: "announcement"` and `to: "space"` (or `"space:<name>"`, for a space the agent can reach) goes to every live agent in that space. It doesn't wake anyone: each agent reads it at the start of its next turn, and nobody replies. In the chat it shows straight away as a line. An agent can send 6 an hour (`announce_per_hour`), so they stay rare.

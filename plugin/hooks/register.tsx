@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.22'
+const DAEMON_VERSION = '0.8.23'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -111,6 +111,13 @@ let unacked: string[] = []
 // put to it again, once, as a turn of its own: a message that lands mid-task is easy to read past.
 let midTurn: PeerMessage[] = []
 const chased = new Set<string>()
+// The account's usage limit, as the daemon has it: while set, nothing is put to this agent, so what arrives waits
+// here (unacked, so the daemon still has it) instead of starting a turn that would die on it.
+let limit: { resets_at?: number; by?: string } | null = null
+// The messages the current turn was given, so a turn the limit kills hands them back; and how the API failed it.
+let turnGiven: string[] = []
+let lastGiven: string[] = []
+let failure = ''
 let pid: number | undefined
 
 // This Claude Code process, so the daemon can end it if a requested exit doesn't happen.
@@ -407,7 +414,7 @@ function placeText() {
 let surface = ''
 let statusLine = ''
 function showStatus($: EngineInterface) {
-  const waiting = pending.length ? ` · ${pending.length} waiting` : ''
+  const waiting = pending.length ? ` · ${pending.length} ${limit ? 'held: usage limit' : 'waiting'}` : limit ? ' · usage limit' : ''
   const next = myName ? `⇄ peerlink · ${myName}${placeText()} · ${peerCount} peer${peerCount === 1 ? '' : 's'}${waiting}${daemonVer ? ` · ${daemonVer}` : ''}` : ''
   if (next === statusLine) return
   statusLine = next
@@ -464,10 +471,19 @@ async function deliver($: EngineInterface) {
       return
     }
     acked($, batch)
+    turnGiven.push(...batch.map(m => m.id))
     midTurn.push(...batch.filter(m => m.expects_reply && !m.task && !chased.has(m.id)))
     // The model reads the row above, which the person never sees: show each message as a transcript line too.
     for (const m of batch) $.ui.log(frame(m).replace('\n', ': '))
     $.ui.toast(`Message from ${batch.map(m => m.from_name).join(', ')}`)
+    return
+  }
+  if (limit) {
+    for (const m of batch.filter(m => !shownWaiting.has(m.id))) {
+      shownWaiting.add(m.id)
+      $.ui.log(`${frame(m).replace('\n', ': ')}  (held: the usage limit is reached)`)
+    }
+    showStatus($)
     return
   }
   if (cfg.auto_wake_idle === false) {
@@ -525,6 +541,48 @@ async function deliver($: EngineInterface) {
     return
   }
   acked($, batch)
+  turnGiven.push(...batch.map(m => m.id))
+}
+
+// Whether a turn that died on an API error hit the account's usage limit: a window the API reports full, or
+// Claude Code's own word for the failure. The reset time is the full window's.
+async function limitHit($: EngineInterface, failed: string) {
+  const windows = (await $.session.usage().catch(() => undefined))?.rateLimits ?? []
+  const full = windows.filter(w => w.percentUsed >= 100)
+  if (!full.length && failed !== 'rate_limit') return undefined
+  const resets = full.map(w => Date.parse(w.resetsAt ?? '')).filter(t => t > 0)
+  return { resets_at: resets.length ? Math.max(...resets) / 1000 : undefined, kind: full[0]?.kind ?? failed }
+}
+
+// The limit killed a turn: the daemon puts back what that turn was given and holds everything until it lifts.
+function limitReached($: EngineInterface, hit: { resets_at?: number; kind: string }) {
+  const given = lastGiven
+  lastGiven = []
+  for (const id of given) placed.delete(id)
+  midTurn = []
+  limit = { resets_at: hit.resets_at }
+  $.ui.log(`peerlink: the usage limit is reached; messages wait here until it lifts${given.length ? ` (${given.length} from that turn put back)` : ''}.`)
+  showStatus($)
+  void call($, 'POST', `/api/sessions/${sessionId}/limit`, { ...hit, ids: given }).catch(() => undefined)
+}
+
+// At a main-loop turn's end. True when the limit killed it. One that went through while a limit was held means
+// the account works again (a swap, a reset), and lifts it for everyone.
+async function limitCheck($: EngineInterface, reason: string) {
+  lastGiven = turnGiven
+  turnGiven = []
+  const failed = failure
+  failure = ''
+  if (!sessionId) return false
+  if (reason !== 'error' && reason !== 'aborted' && limit) {
+    limit = null
+    void call($, 'POST', `/api/sessions/${sessionId}/limit`, { lifted: true }).catch(() => undefined)
+    return false
+  }
+  if (reason !== 'error') return false
+  const hit = limit ? { resets_at: limit.resets_at, kind: 'rate_limit' } : await limitHit($, failed)
+  if (hit) limitReached($, hit)
+  return !!hit
 }
 
 async function clearNow($: EngineInterface) {
@@ -566,6 +624,7 @@ async function poll($: EngineInterface) {
   const before = cfg?.poll_interval_ms
   cfg = res.data.config
   myName = res.data.name
+  limit = res.data.limit ?? null
   const hadPeers = peerCount > 0
   peerCount = Number(res.data.peer_count ?? 0)
   // The first peer to show up gets a real summary to read.
@@ -1273,6 +1332,17 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // Claude Code's word for the API error that ends a turn: rate_limit is the usage limit.
+  // It may come after the turn's end: then it settles the turn that just ended.
+  on('classic.StopFailure', async ($, e, next) => {
+    failure = String((e as any).error ?? '')
+    if (failure === 'rate_limit' && !busy && !limit && sessionId) {
+      failure = ''
+      limitReached($, { kind: 'rate_limit' })
+    }
+    return next(e)
+  })
+
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
       busy = true
@@ -1298,6 +1368,7 @@ export const register: Register = on => {
     if (e.agentId === undefined) {
       busy = false
       turnsSinceSummary++
+      if (await limitCheck($, e.reason).catch(() => false)) return done
       if (clearing) {
         midTurn = []
         void clearNow($)
