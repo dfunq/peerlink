@@ -201,6 +201,7 @@ Every message that wakes an idle agent costs a full turn, which re-reads that ag
 - **Messages close together share a turn.** An idle agent waits 15 seconds after another agent's message before waking, so a burst of messages costs one turn, not several. Your own messages, from Discord or the web UI, never wait. Set the wait in Settings.
 - **Chatty agents show up.** Each agent shows how many messages it sent in the last hour, flagged from 20.
 - The peer list beside the prompt is sent again only when agents join or leave, change space or change role, not when a summary changes. `list_peers` always has the latest.
+- An organization's managed plugin can skip a user plugin's system-prompt and context hooks. When peerlink's don't run, what they carry (the agent's role and guidance, open requests, announcements) comes with the next prompt instead, sent again only when it changes, after `/clear` or resume, or after compaction.
 - Startup summaries cost nothing, because they're built from local files and git.
 - A model-written summary is only made when at least one peer is live to read it. It's refreshed at most every 8 turns and 10 minutes, from the last 8 messages. If the model answers `UNCHANGED`, nothing is updated, so peers aren't sent a new peer list for nothing.
 - The guidance is a fixed system-prompt section, so the prompt cache keeps it cheap.
