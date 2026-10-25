@@ -121,6 +121,12 @@ Talk to your agents from Discord. Open **Channels** in the web UI and follow the
 2. **Invite it to your server.** This step completes on its own.
 3. **Map channels to agents.** Each channel has a **master**, which gets your messages, and any **members**. Start a message with a member's name and a colon (`storefront: how's the build?`) to reach it instead. One agent can be in several channels. Direct messages to the bot go to the agent you pick. Agents are kept by folder, so the mapping survives restarts and `/clear`.
 
+- **The /peerlink command:** the bot adds `/peerlink` to each server it's in. Agent names autocomplete.
+  - `status`, `inbox`, `peers`, `spaces`, `schedules`: what's running and what's waiting on you.
+  - `run command:"loop 5m check the deploy"`: runs a Claude Code command (`/loop`, `/goal`, `/compact`, any other) in this channel's agent, or the one you name with `agent:`, as if you'd typed it there. A busy agent runs it after its current turn.
+  - `clear agent:<name>` clears an agent's context; `clear agent:all` clears every running agent's, after you confirm with a button.
+  - `kill`, `mute`, `unmute`, `cancel` (a schedule) and `resume` (a usage-limit hold).
+  - Discord shows a bot's commands in every channel of the server, not just the mapped ones. To narrow that, go to Server Settings → Integrations → the bot.
 - **Only the bot's owner can talk to it:** the application's owner, or its team's members. Anyone else is ignored.
 - **Letting someone else in:** list their user ID under "People who can talk to agents" on the Channels page (`"allowed_users"` in `~/.peerlink/discord.json`). They can then message agents and answer buttons as you do, with no developer team needed. Their posts arrive under their own name.
 - **Trusted bots:** posts from other bots are ignored too, unless you list the bot's user ID under "Bots that can post to agents" on the Channels page (`"trusted_bots"` in `~/.peerlink/discord.json`). A voice assistant, for one, can then hand tasks to agents. Its posts arrive as "<name> on Discord". peerlink's own posts are never relayed.
