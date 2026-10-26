@@ -356,4 +356,9 @@ plugin/hooks/hooks.json           points at the hooks module
 plugin/hooks/register.tsx         tools, /peerlink, polling, delivery, summaries, guidance, chat rows
 plugin/hooks/register.test.tsx    tests (claude plugin test plugin)
 plugin/daemon/peerlinkd.py        daemon, CLI and web UI
+plugin/daemon/discordlink.py      the Discord bot: gateway, REST, buttons, /peerlink
 ```
+
+## License
+
+MIT, in [LICENSE](LICENSE).

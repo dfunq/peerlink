@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.26"
+VERSION = "0.8.27"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -302,6 +302,29 @@ def log(*parts):
     print(time.strftime("%H:%M:%S"), *parts, flush=True)
 
 
+# Settings that must be at least 1: zero would reap every agent at once or block every message.
+CONFIG_MIN_1 = {"poll_interval_ms", "peer_ttl_s", "max_hops", "rate_limit_per_min", "max_message_chars"}
+
+
+def config_value(name, value):
+    """(value, None) with the value as the setting's own type, or (None, why it can't be)."""
+    want = DEFAULT_CONFIG[name]
+    if isinstance(want, bool):
+        if isinstance(value, str) and value.lower() in ("true", "false", "on", "off", "yes", "no"):
+            value = value.lower() in ("true", "on", "yes")
+        return (value, None) if isinstance(value, bool) else (None, f"{name} is true or false")
+    if isinstance(want, int):
+        try:
+            value = int(float(value))
+        except (TypeError, ValueError):
+            return None, f"{name} is a number"
+        floor = 1 if name in CONFIG_MIN_1 else 0
+        return (value, None) if value >= floor else (None, f"{name} is at least {floor}")
+    if isinstance(want, str):
+        return (value, None) if isinstance(value, str) else (None, f"{name} is text")
+    return (value, None) if isinstance(value, type(want)) else (None, f"{name} is a {type(want).__name__}")
+
+
 def load_config():
     os.makedirs(HOME, exist_ok=True)
     data = {}
@@ -312,6 +335,9 @@ def load_config():
         except (OSError, ValueError) as err:
             log("config unreadable, using defaults:", err)
     merged = {**DEFAULT_CONFIG, **data}
+    for k in DEFAULT_CONFIG:
+        if config_value(k, merged[k])[1]:  # a bad value saved by an older daemon: back to the default
+            merged[k] = DEFAULT_CONFIG[k]
     if merged.get("guidance") == OLD_GUIDANCE_V1:  # an untouched old default follows the new one
         merged["guidance"] = ""
     config.clear()
@@ -750,6 +776,12 @@ def remote_peers():
     for base in config.get("remotes", []):
         try:
             for p in remote_call(base, "/api/peers?local=1").get("peers", []):
+                if not isinstance(p, dict):
+                    continue
+                # The web UI puts these in its markup unescaped, as the numbers they should be.
+                for k in ("context", "sent_hour", "open_tasks"):
+                    if p.get(k) is not None and not isinstance(p[k], (int, float)) or isinstance(p.get(k), bool):
+                        p[k] = None if k == "context" else 0
                 p["remote"] = base
                 found.append(p)
         except Exception as err:  # a remote being down is normal
@@ -825,6 +857,17 @@ def load_messages():
             inboxes.setdefault(m["to"], []).append(m)
         else:
             m["status"] = "expired"
+
+
+def session_gone(sid):
+    """An agent ended or stopped checking in: what it was handed but never acked goes back in its queue, which
+    waits an hour for the next agent in its folder (adopt() hands it over)."""
+    sessions.pop(sid, None)
+    unacked = [m for m, _ in handed.pop(sid, {}).values()]
+    box = inboxes.setdefault(sid, [])
+    box.extend(m for m in unacked if m not in box)
+    if not box:
+        inboxes.pop(sid)
 
 
 def expire(box):
@@ -1318,7 +1361,7 @@ def on_press(press):
         return on_spawn_press(press, decide_schedule, schedules)
     if press["custom_id"].startswith("pa:"):
         return on_clear_all_press(press)
-    if press["custom_id"] in ("pr:0", "pl:0"):  # "pl:0" from before 0.8.26; an agent's buttons are "pl:<message>:<n>"
+    if press["custom_id"] in ("pr:0", "pl:0"):  # "pl:0" from before 0.8.27; an agent's buttons are "pl:<message>:<n>"
         discordlink.answer_interaction(press["id"], press["token"], 7, {"components": []})
         return lift_limit(f"resumed on Discord by {press['author']}")
     if press["custom_id"].startswith("pk:"):
@@ -1571,6 +1614,8 @@ def inbox_command(d):
         with lock:
             agent = next((r for r in sessions.values() if is_live(r) and display_name(r).lower() == name), None)
         if not agent:
+            if not text.startswith("/"):
+                return False  # "kill it" is a message for the agent, not a command
             say(f"No running agent is called {kill.group(1)}.")
             return True
         discordlink.post(discord["token"], channel, f"End **{display_name(agent)}** ({tilde_path(agent.get('cwd', ''))})? It finishes its current turn first.",
@@ -1585,8 +1630,7 @@ def inbox_command(d):
         return False
     n, rest = int(match.group(1)), match.group(2).strip()
     if not 1 <= n <= len(listed[1]):
-        say(f"There's no {n} in your Inbox; send /inbox for the list.")
-        return True
+        return False  # "3. also update the README": a numbered line for the agent
     kind, iid = listed[1][n - 1]
     verb, _, note = rest.partition(":")
     want = INBOX_VERBS.get(verb.strip().lower())
@@ -1600,8 +1644,7 @@ def inbox_command(d):
     elif kind == "question":
         code, out = inbox_act({"kind": kind, "id": iid, "action": "reply", "text": rest}, discord_from=d)
     else:
-        say(f'{iid} is a {kind}: answer {"done or failed" if kind == "task" else "approve or deny" if kind == "approval" else "accept or dismiss"}.')
-        return True
+        return False  # no verb it takes: a message for the agent that happens to start with a number
     say(f"{iid}: {out.get('error')}" if code != 200 else f"{iid}: {action if want else 'answer sent'}.")
     return True
 
@@ -2546,6 +2589,8 @@ def decide_schedule(cid, approve, via):
         if c["status"] != "pending":
             return 409, {"error": f"{cid} is already {c['status']}"}
         c["status"], c["updated"] = ("active" if approve else "denied"), time.time()
+        if approve and c["cron"]:
+            c["next_run"] = cron_next(c["cron"], time.time())  # from now, not from when it was asked for
         schedule_told(c, f"Your user {'approved' if approve else 'denied'} schedule {cid} ({when_text(c)}).")
         save_schedules()
     close_buttons(c)
@@ -2742,35 +2787,41 @@ def hard_stop(sid, grace=60):
 def reaper():
     while True:
         time.sleep(10)
-        now = time.time()
-        with lock:
-            for sid in [s for s, r in sessions.items() if now - r["last_seen"] > config["peer_ttl_s"] * 10]:
-                sessions.pop(sid, None)
-                expire(inboxes.pop(sid, []))
-            for sp in [x for x in spawns.values() if x["status"] == "pending" and now - x["created"] > SPAWN_TTL_S]:
-                sp["status"], sp["updated"] = "expired", now
-                spawn_told(sp, f"Your request {sp['id']} to start an agent in {sp['dir']} expired: your user didn't answer within a day.")
-                save_spawns()
-            for c in [x for x in schedules.values() if x["status"] == "pending" and now - x["created"] > SPAWN_TTL_S]:
-                c["status"], c["updated"] = "expired", now
-                schedule_told(c, f"Your schedule {c['id']} expired: your user didn't approve it within a day.")
-                save_schedules()
-            lapsed = usage_limit and now >= (usage_limit.get("resets_at") or usage_limit["since"] + LIMIT_FALLBACK_S)
-            # While the limit holds, a due schedule waits: it runs once the limit lifts.
-            due = [] if usage_limit else [c for c in schedules.values() if c["status"] == "active" and c.get("next_run") and c["next_run"] <= now]
-            starts = [fire_schedule(c, now) for c in due]
-            # Messages to an agent that has gone for an hour are not coming back.
-            for sid in [s for s in inboxes if s not in sessions]:
-                kept = [m for m in inboxes[sid] if now - m["ts"] < 3600]
-                expire([m for m in inboxes[sid] if now - m["ts"] >= 3600])
-                if kept:
-                    inboxes[sid] = kept
-                else:
-                    inboxes.pop(sid)
-        if lapsed:
-            lift_limit("its reset time came" if usage_limit.get("resets_at") else "agents try again after five hours")
-        for c in filter(None, starts):
-            start_for_schedule(c)
+        try:
+            reap()
+        except Exception as err:  # one bad pass must not stop reaping, schedules and the limit for good
+            log("reaper failed:", repr(err))
+
+
+def reap():
+    now = time.time()
+    with lock:
+        for sid in [s for s, r in sessions.items() if now - r["last_seen"] > config["peer_ttl_s"] * 10]:
+            session_gone(sid)
+        for sp in [x for x in spawns.values() if x["status"] == "pending" and now - x["created"] > SPAWN_TTL_S]:
+            sp["status"], sp["updated"] = "expired", now
+            spawn_told(sp, f"Your request {sp['id']} to start an agent in {sp['dir']} expired: your user didn't answer within a day.")
+            save_spawns()
+        for c in [x for x in schedules.values() if x["status"] == "pending" and now - x["created"] > SPAWN_TTL_S]:
+            c["status"], c["updated"] = "expired", now
+            schedule_told(c, f"Your schedule {c['id']} expired: your user didn't approve it within a day.")
+            save_schedules()
+        lapsed = usage_limit and now >= (usage_limit.get("resets_at") or usage_limit["since"] + LIMIT_FALLBACK_S)
+        # While the limit holds, a due schedule waits: it runs once the limit lifts.
+        due = [] if usage_limit else [c for c in schedules.values() if c["status"] == "active" and c.get("next_run") and c["next_run"] <= now]
+        starts = [fire_schedule(c, now) for c in due]
+        # Messages to an agent that has gone for an hour are not coming back.
+        for sid in [s for s in inboxes if s not in sessions]:
+            kept = [m for m in inboxes[sid] if now - m["ts"] < 3600]
+            expire([m for m in inboxes[sid] if now - m["ts"] >= 3600])
+            if kept:
+                inboxes[sid] = kept
+            else:
+                inboxes.pop(sid)
+    if lapsed:
+        lift_limit("its reset time came" if usage_limit.get("resets_at") else "agents try again after five hours")
+    for c in filter(None, starts):
+        start_for_schedule(c)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2912,9 +2963,10 @@ class Handler(BaseHTTPRequestHandler):
         if not n:
             return {}
         try:
-            return json.loads(self.rfile.read(n))
+            out = json.loads(self.rfile.read(n))
         except ValueError:
             return {}
+        return out if isinstance(out, dict) else {}
 
     def is_local(self):
         return self.client_address[0] in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
@@ -3020,10 +3072,12 @@ class Handler(BaseHTTPRequestHandler):
             if method == "GET":
                 return self.reply(200, {**config, "default_guidance": DEFAULT_GUIDANCE})
             if method in ("PUT", "POST"):
+                checked = {k: config_value(k, v) for k, v in self.body().items() if k in DEFAULT_CONFIG}
+                bad = [why for _, why in checked.values() if why]
+                if bad:
+                    return self.reply(400, {"error": "; ".join(bad)})
                 with lock:
-                    for k, v in self.body().items():
-                        if k in DEFAULT_CONFIG:
-                            config[k] = v
+                    config.update({k: v for k, (v, _) in checked.items()})
                     save_config()
                 forget_spaces()
                 return self.reply(200, config)
@@ -3160,7 +3214,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if len(rest) == 2 and rest[0] == "sessions" and method == "DELETE":
             with lock:
-                sessions.pop(rest[1], None)  # its queue waits for the next agent in its folder (an hour, as on restart)
+                session_gone(rest[1])
             return self.reply(200, {"ok": True})
 
         if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "threads" and method == "GET":
@@ -3279,9 +3333,13 @@ class Handler(BaseHTTPRequestHandler):
         if rest == ["messages"]:
             if method == "GET":
                 with lock:
-                    return self.reply(200, {"messages": messages[-int(q.get("limit", ["100"])[0]):]})
+                    return self.reply(200, {"messages": messages[-max(1, int(q.get("limit", ["100"])[0])):]})
             if method == "POST":
-                code, res = send(self.body())
+                b = self.body()
+                if not self.is_local() and "@" not in str(b.get("from", "")):
+                    # Another machine's daemon forwards its agents as id@host; it can't speak as you or as a local agent.
+                    return self.reply(403, {"error": "a remote message comes from id@host"})
+                code, res = send(b)
                 return self.reply(code, res)
 
         if rest and rest[0] == "discord":
@@ -3311,17 +3369,26 @@ class Handler(BaseHTTPRequestHandler):
 
         return self.reply(404, {"error": "not found"})
 
+    def handle_route(self, method):
+        try:
+            self.route(method)
+        except (ValueError, TypeError, KeyError, AttributeError) as err:  # a malformed request, e.g. ?limit=abc
+            try:
+                self.reply(400, {"error": f"bad request: {err}"})
+            except OSError:
+                pass
+
     def do_GET(self):
-        self.route("GET")
+        self.handle_route("GET")
 
     def do_POST(self):
-        self.route("POST")
+        self.handle_route("POST")
 
     def do_PUT(self):
-        self.route("PUT")
+        self.handle_route("PUT")
 
     def do_DELETE(self):
-        self.route("DELETE")
+        self.handle_route("DELETE")
 
 
 def local_call(method, path, body=None, timeout=3):

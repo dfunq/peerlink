@@ -1,7 +1,12 @@
 {
   "name": "peerlink",
-  "version": "0.8.26",
+  "version": "0.8.27",
   "description": "Lets your Claude agents discover and message each other through one lightweight daemon per machine, with a CLI and a signed-in web UI.",
-  "author": { "name": "Dillon" },
+  "author": {
+    "name": "Dillon",
+    "url": "https://github.com/dfunq"
+  },
+  "homepage": "https://github.com/dfunq/peerlink",
+  "repository": "https://github.com/dfunq/peerlink",
   "license": "MIT"
 }

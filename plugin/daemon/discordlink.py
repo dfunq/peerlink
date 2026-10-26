@@ -20,6 +20,7 @@ The token lives in discord.json, 0600, beside the key; the API never echoes it, 
 import base64
 import json
 import os
+import queue
 import random
 import socket
 import ssl
@@ -323,9 +324,10 @@ class WebSocket:
                 if b1 & 0x80:
                     return json.loads(message)
 
-    def close(self):
+    def close(self, code=1000):
+        """1000 ends the gateway session; any other code keeps it open for a resume."""
         try:
-            self._frame(0x8, struct.pack(">H", 1000))
+            self._frame(0x8, struct.pack(">H", code))
         except OSError:
             pass
         try:
@@ -357,9 +359,14 @@ class Bot:
         self.guild_channels = {}  # guild id -> {"name", "channels": {id: (position, name)}}
         self.app_id = ""
         self.commands_in = set()  # servers /peerlink was put in since the daemon started
+        self.resume = None  # [session id, resume url, last seq]: a dropped connection picks up what it missed
         self.on_command = lambda cmd: ("", None)  # (reply, buttons) for a /peerlink subcommand
         self.on_autocomplete = lambda cmd: []  # choices for the option being typed
         self.stop = threading.Event()
+        # Handlers run off the gateway thread, so a slow one (downloads, starting an agent) can't miss heartbeats:
+        # messages one at a time in order, button presses and commands each at once, inside Discord's 3 seconds.
+        self.jobs = queue.Queue()
+        threading.Thread(target=self._work, name="discord-messages", daemon=True).start()
         self.ws = None
         self.thread = threading.Thread(target=self._run, name="discord", daemon=True)
         self.thread.start()
@@ -398,6 +405,9 @@ class Bot:
                 backoff = 2
             except ConnectionError as err:
                 code = str(err)
+                self.log("discord", "connection dropped:", code)
+                if any(c in code for c in ("4007", "4009", "op 9 False")):
+                    self.resume = None
                 if "4004" in code:
                     self.state, self.error = "error", "Discord rejected the token; paste a new one."
                     return
@@ -406,23 +416,25 @@ class Bot:
                     self.reads_messages = False
                 self.state, self.error = "connecting", f"reconnecting ({code})"
             except (DiscordError, OSError, ValueError) as err:
+                self.log("discord", "connection dropped:", err)
                 self.state, self.error = "error", str(err)
             if self.stop.wait(backoff):
                 return
             backoff = min(backoff * 2, 120)
 
     def _session(self):
-        self.ws = ws = WebSocket(GATEWAY)
+        resume = self.resume
+        self.ws = ws = WebSocket(resume[1] if resume else GATEWAY)
         hello = ws.recv()
         interval = hello["d"]["heartbeat_interval"] / 1000
-        seq = [None]
+        seq = [resume[2] if resume else None]
         acked = [True]
 
         def beat():
             time.sleep(interval * random.random())
             while not self.stop.is_set():
                 if not acked[0]:
-                    ws.close()  # a zombied connection: reconnect
+                    ws.close(4000)  # a zombied connection: reconnect, and resume
                     return
                 acked[0] = False
                 try:
@@ -434,8 +446,12 @@ class Bot:
 
         threading.Thread(target=beat, name="discord-heartbeat", daemon=True).start()
         intents = INTENTS | (MESSAGE_CONTENT if self.reads_messages else 0)
-        ws.send({"op": 2, "d": {"token": self.token, "intents": intents,
-                                "properties": {"os": "macos", "browser": "peerlink", "device": "peerlink"}}})
+        if resume:
+            # Discord replays what was sent while the connection was down, messages and button presses included.
+            ws.send({"op": 6, "d": {"token": self.token, "session_id": resume[0], "seq": resume[2]}})
+        else:
+            ws.send({"op": 2, "d": {"token": self.token, "intents": intents,
+                                    "properties": {"os": "macos", "browser": "peerlink", "device": "peerlink"}}})
         while not self.stop.is_set():
             ev = ws.recv()
             if ev.get("s") is not None:
@@ -446,10 +462,36 @@ class Bot:
             elif op == 1:
                 ws.send({"op": 1, "d": seq[0]})
             elif op in (7, 9):
-                ws.close()
-                raise ConnectionError(f"op {op}")
+                ws.close(4000)
+                raise ConnectionError(f"op {op}" + (f" {ev.get('d')}" if op == 9 else ""))
             elif op == 0:
-                self._dispatch(ev.get("t"), ev.get("d") or {})
+                try:
+                    self._dispatch(ev.get("t"), ev.get("d") or {})
+                except (DiscordError, OSError, KeyError, ValueError) as err:  # e.g. a press replayed after its 3 seconds
+                    self.log("discord", ev.get("t"), "handler failed:", err)
+                if self.resume and seq[0] is not None:
+                    self.resume[2] = seq[0]
+
+    def _work(self):
+        while True:
+            self._guarded(self.on_message, self.jobs.get())
+
+    def _guarded(self, fn, arg):
+        try:
+            fn(arg)
+        except Exception as err:  # one bad message or press must not stop the others
+            self.log("discord", getattr(fn, "__name__", "handler"), "failed:", err)
+
+    def _press(self, d):
+        user = (d.get("member") or {}).get("user") or d.get("user") or {}
+        if str(user.get("id")) not in self.owner_ids | self.allowed_users:
+            # Only the owner's press counts, or an allowed user's; anyone else is told so, privately (flag 64).
+            return answer_interaction(d["id"], d["token"], 4, {"content": "Only the bot's owner can answer this.", "flags": 64})
+        self.on_press({
+            "id": d["id"], "token": d["token"], "custom_id": (d.get("data") or {}).get("custom_id", ""),
+            "channel_id": str(d.get("channel_id")), "message": d.get("message") or {},
+            "author": user.get("global_name") or user.get("username", "you"),
+        })
 
     def _register(self, guild_id):
         try:
@@ -487,8 +529,13 @@ class Bot:
             self.user_id = str(d["user"]["id"])
             self.user = d["user"].get("username", "")
             self.app_id = str((d.get("application") or {}).get("id") or self.user_id)
+            url = d.get("resume_gateway_url")
+            self.resume = [d["session_id"], url.rstrip("/") + "/?v=10&encoding=json", None] if url and d.get("session_id") else None
             self.state, self.error = "online", ""
             self.log("discord", "online as", self.user)
+        elif kind == "RESUMED":
+            self.state, self.error = "online", ""
+            self.log("discord", "resumed")
         elif kind in ("GUILD_CREATE", "GUILD_UPDATE"):
             if kind == "GUILD_CREATE" and str(d["id"]) not in self.commands_in and self.app_id:
                 self.commands_in.add(str(d["id"]))
@@ -520,29 +567,14 @@ class Bot:
                      for a in d.get("attachments", []) if a.get("url")]
             if not text and not files:
                 return
-            try:
-                self.on_message({
+            self.jobs.put({
                     "channel_id": str(d["channel_id"]), "message_id": str(d["id"]),
                     "guild_id": str(d.get("guild_id") or ""), "author": author.get("global_name") or author.get("username", "you"),
                     "author_id": str(author["id"]), "text": text, "dm": not d.get("guild_id"), "mentioned": mentioned,
                     "ref": str((d.get("message_reference") or {}).get("message_id") or ""),  # the message it replies to
                     "files": files, "bot": bool(author.get("bot")),
                 })
-            except Exception as err:  # one bad message must not drop the connection
-                self.log("discord", "message handler failed:", err)
         elif kind == "INTERACTION_CREATE" and d.get("type") in (2, 4):
-            self._command(d)
+            threading.Thread(target=self._guarded, args=(self._command, d), daemon=True).start()
         elif kind == "INTERACTION_CREATE" and d.get("type") == 3:
-            user = (d.get("member") or {}).get("user") or d.get("user") or {}
-            if str(user.get("id")) not in self.owner_ids | self.allowed_users:
-                # Only the owner's press counts, or an allowed user's; anyone else is told so, privately (flag 64).
-                answer_interaction(d["id"], d["token"], 4, {"content": "Only the bot's owner can answer this.", "flags": 64})
-                return
-            try:
-                self.on_press({
-                    "id": d["id"], "token": d["token"], "custom_id": (d.get("data") or {}).get("custom_id", ""),
-                    "channel_id": str(d.get("channel_id")), "message": d.get("message") or {},
-                    "author": user.get("global_name") or user.get("username", "you"),
-                })
-            except Exception as err:
-                self.log("discord", "button handler failed:", err)
+            threading.Thread(target=self._guarded, args=(self._press, d), daemon=True).start()

@@ -1,5 +1,15 @@
 {
   "name": "peerlink",
-  "owner": { "name": "Dillon" },
-  "plugins": [{ "name": "peerlink", "source": "./plugin" }]
+  "description": "peerlink: Claude Code agents that talk to each other and to you.",
+  "owner": {
+    "name": "Dillon",
+    "url": "https://github.com/dfunq"
+  },
+  "plugins": [
+    {
+      "name": "peerlink",
+      "source": "./plugin",
+      "description": "Your Claude Code agents message each other, and you, through one local daemon per machine: web UI, Discord, schedules."
+    }
+  ]
 }
