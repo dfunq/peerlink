@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.29"
+VERSION = "0.8.30"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -1366,7 +1366,7 @@ def on_press(press):
         return on_spawn_press(press, decide_schedule, schedules)
     if press["custom_id"].startswith("pa:"):
         return on_clear_all_press(press)
-    if press["custom_id"] in ("pr:0", "pl:0"):  # "pl:0" from before 0.8.29; an agent's buttons are "pl:<message>:<n>"
+    if press["custom_id"] in ("pr:0", "pl:0"):  # "pl:0" from before 0.8.30; an agent's buttons are "pl:<message>:<n>"
         discordlink.answer_interaction(press["id"], press["token"], 7, {"components": []})
         return lift_limit(f"resumed on Discord by {press['author']}")
     if press["custom_id"].startswith("pk:"):
@@ -1782,6 +1782,8 @@ def send(body):
         if session_cfg(target["id"])["muted"]:
             return 403, {"error": f"{display_name(target)} is muted by the user"}
         if target["id"] == sender:
+            if str(to).strip().lower().startswith(("space", "lead")):
+                return 400, {"error": "you lead that space, so this would come back to you; to reach everyone in it, send with kind \"announcement\""}
             return 400, {"error": "that is you"}
         msg = {
             "id": f"m{next_msg[0]}",
