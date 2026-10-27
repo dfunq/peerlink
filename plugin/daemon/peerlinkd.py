@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.37"
+VERSION = "0.8.38"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -2995,7 +2995,7 @@ class Handler(BaseHTTPRequestHandler):
         return self.reply(404, {"error": "not found"})
 
     def reply(self, code, body, ctype="application/json", headers=None):
-        data = body.encode() if isinstance(body, str) else json.dumps(body).encode()
+        data = body if isinstance(body, bytes) else body.encode() if isinstance(body, str) else json.dumps(body).encode()
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
@@ -3098,6 +3098,12 @@ class Handler(BaseHTTPRequestHandler):
 
         if rest == ["health"]:
             return self.reply(200, {"ok": True, "version": VERSION, "code": CODE, "pid": os.getpid(), "host": HOSTNAME})
+        # The icons an installed web UI (Dock, home screen, Chrome's Install) shows: fetched without the sign-in cookie.
+        if method == "GET" and url.path == "/manifest.webmanifest":
+            return self.reply(200, MANIFEST, "application/manifest+json")
+        if method == "GET" and url.path in ("/apple-touch-icon.png", "/icon-512.png"):
+            with open(os.path.join(_here, "icons", url.path.lstrip("/")), "rb") as f:
+                return self.reply(200, f.read(), "image/png", {"Cache-Control": "max-age=86400"})
 
         if method == "GET" and url.path == "/login":
             cookie = redeem(q.get("t", [""])[0])
@@ -3754,16 +3760,21 @@ def cli_help():
     print(f"\nPEERLINK_HOME={HOME}  PEERLINK_PORT={PORT}")
 
 
+MANIFEST = {"name": "Peerlink", "short_name": "Peerlink", "start_url": "/", "display": "standalone",
+            "background_color": "#faf9f7", "theme_color": "#c96442",
+            "icons": [{"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
+                      {"src": "/apple-touch-icon.png", "sizes": "180x180", "type": "image/png"}]}
+
 UI_HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Peerlink</title><link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23c96442'/><path d='M7 11.5h17M19.5 7l4.5 4.5-4.5 4.5M25 20.5H8M12.5 16 8 20.5l4.5 4.5' fill='none' stroke='%23fff' stroke-width='2.8' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+<title>Peerlink</title><link rel="apple-touch-icon" href="/apple-touch-icon.png"><link rel="manifest" href="/manifest.webmanifest"><link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23c96442'/><path d='M7 11.5h17M19.5 7l4.5 4.5-4.5 4.5M25 20.5H8M12.5 16 8 20.5l4.5 4.5' fill='none' stroke='%23fff' stroke-width='2.8' stroke-linecap='round' stroke-linejoin='round'/></svg>">
 <style>
 :root{color-scheme:light dark;--bg:#faf9f7;--side:#f2f0ec;--fg:#1f1e1c;--mut:#6b6862;--line:#e4e1db;--card:#fff;--acc:#c96442;--ok:#2f7d4f;--warn:#b7791f;--bad:#c0392b;--well:rgba(127,127,127,.06)}
 @media (prefers-color-scheme:dark){:root{--bg:#1c1b19;--side:#161513;--fg:#ecebe8;--mut:#9b978f;--line:#34322e;--card:#252421;--acc:#e0805e;--ok:#5cb57f;--warn:#e0b04a;--bad:#e5675a;--well:rgba(255,255,255,.03)}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,sans-serif}
 .app{display:flex;min-height:100vh}
 nav{flex:0 0 210px;background:var(--side);border-right:1px solid var(--line);padding:18px 10px;position:sticky;top:0;height:100vh;display:flex;flex-direction:column;gap:2px}
-nav .brand{font-weight:700;font-size:16px;padding:0 10px 4px}nav .host{font-size:11px;color:var(--mut);padding:0 10px 14px}
+nav .brand{font-weight:700;font-size:16px;padding:0 10px 4px;display:flex;align-items:center;gap:8px}nav .brand .mark{width:20px;height:20px;flex:none}nav .host{font-size:11px;color:var(--mut);padding:0 10px 14px}
 nav a{display:flex;justify-content:space-between;align-items:center;padding:7px 10px;border-radius:6px;color:var(--fg);text-decoration:none}
 nav a:hover{background:var(--line)}nav a.on{background:var(--card);box-shadow:0 0 0 1px var(--line);font-weight:600}
 nav .count{font-size:11px;color:var(--mut);font-weight:400}nav .grp{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);padding:14px 10px 4px}
@@ -3920,7 +3931,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
  main{padding:16px}}
 </style></head><body><div class="app">
 <nav>
-<div class="brand">Peerlink</div><div class="host" id="hostline"></div>
+<div class="brand"><svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="var(--acc)"/><path d="M7 11.5h17M19.5 7l4.5 4.5-4.5 4.5M25 20.5H8M12.5 16 8 20.5l4.5 4.5" fill="none" stroke="#fff" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/></svg>Peerlink</div><div class="host" id="hostline"></div>
 <a href="#inbox" data-nav="inbox">Inbox <span class="count hot" id="n-inbox"></span></a>
 <a href="#agents" data-nav="agents">Agents <span class="count" id="n-agents"></span></a>
 <a href="#tasks" data-nav="tasks">Tasks <span class="count" id="n-tasks"></span></a>
