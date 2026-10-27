@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.38'
+const DAEMON_VERSION = '0.8.39'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -182,6 +182,9 @@ async function installedVersion($: EngineInterface) {
 // so a busy agent isn't interrupted and one that's rarely idle still gets it. Only a newer install triggers it.
 let lastInstallCheck = -Infinity
 let reloading = false
+// When the reload was queued, told to the daemon: a queued command can sit unrun (a dialog open in the terminal,
+// no turn ever ending), and the web UI then says so rather than leaving the agent quietly behind.
+let reloadQueued = 0
 async function reloadIfUpdated($: EngineInterface) {
   if (reloading || cfg?.auto_reload === false) return
   const now = await $.clock.now()
@@ -190,10 +193,12 @@ async function reloadIfUpdated($: EngineInterface) {
   const installed = await installedVersion($)
   if (!installed || !isOlder(DAEMON_VERSION, installed)) return
   reloading = true
+  reloadQueued = now
   $.ui.toast(`peerlink: updating to ${installed}`)
   $.ui.log(`peerlink: ${installed} is installed; reloading plugins to use it`)
   await $.command.run({ command: 'reload-plugins' }).catch(() => {
     reloading = false
+    reloadQueued = 0
     $.ui.log(`peerlink: ${installed} is installed; run /reload-plugins to use it`)
   })
 }
@@ -634,7 +639,7 @@ async function poll($: EngineInterface) {
   try {
     const ack = unacked
     unacked = []
-    res = await call($, 'POST', `/api/sessions/${sessionId}/heartbeat`, { busy, activity: busy ? activity : undefined, context: await contextPercent($), branch: await freshBranch($), ack })
+    res = await call($, 'POST', `/api/sessions/${sessionId}/heartbeat`, { busy, activity: busy ? activity : undefined, context: await contextPercent($), branch: await freshBranch($), reload_queued: reloadQueued, ack })
     if (!res.ok) unacked.push(...ack)
   } catch {
     await ensureDaemon($)
