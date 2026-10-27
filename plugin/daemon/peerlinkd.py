@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.40"
+VERSION = "0.8.41"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -2712,7 +2712,8 @@ def edit_schedule(cid, body):
             return 404, {"error": f"no schedule {cid}"}
         try:
             if "agent" in body and str(body["agent"]).strip().lstrip("@").lower() == (c.get("agent") or "").lower():
-                folder, name = c["folder"], c["agent"]  # unchanged, whether or not it's running now
+                own = schedule_agent(c)  # unchanged, whether or not it's running now; where it runs if it is
+                folder, name = (own.get("cwd") or c["folder"]) if own else c["folder"], c["agent"]
             elif "agent" in body:
                 folder, name = schedule_target({"agent": body["agent"], "folder": "-"})
             else:
@@ -2759,6 +2760,18 @@ name_claims = {}  # folder -> names the next agents to register there take: ones
 def schedule_agent(c):
     """The agent a schedule is for, wherever it runs; None when it isn't running."""
     return agent_named(c.get("agent")) if c.get("agent") else None
+
+
+def follow_agent(rec):
+    """A schedule for this agent starts it, when it isn't running, in the folder it's in now, not the one it was in
+    when the schedule was made. Called with the lock held."""
+    name, cwd = display_name(rec).lower(), rec.get("cwd") or ""
+    moved = [c for c in schedules.values() if cwd and (c.get("agent") or "").lower() == name and c["folder"] != cwd]
+    for c in moved:
+        log("schedule", c["id"], "follows", c["agent"], "to", tilde_path(cwd))
+        c["folder"] = cwd
+    if moved:
+        save_schedules()
 
 
 def sched_view(c):
@@ -3336,6 +3349,7 @@ class Handler(BaseHTTPRequestHandler):
                     if prev and prev.get("name"):
                         rec["name"] = prev["name"]
                 adopt(rec, old)
+                follow_agent(rec)
                 previous = dir_summaries.get(rec.get("cwd", ""))
                 if previous and previous["ts"] < time.time() - DIR_MEMORY_S:
                     previous = None
