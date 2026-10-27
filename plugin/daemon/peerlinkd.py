@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.38"
+VERSION = "0.8.39"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -727,6 +727,7 @@ def public_peer(rec):
         "plugin": rec.get("plugin", ""),
         "context": rec.get("context"),  # percent of the context window in use, when the agent reports it
         "stale": rec.get("plugin", "") != VERSION,
+        "reload_queued": rec.get("reload_queued"),
         "muted": session_cfg(rec["id"])["muted"],
         "terminating": bool(rec.get("terminate")),
         "last_seen_s": round(time.time() - rec["last_seen"], 1),
@@ -1209,6 +1210,15 @@ def on_discord(d):
         else:
             continue
         break
+    # A reply to an agent's message here goes to that agent, as the answer to it, whichever agent receives the channel,
+    # unless it names another agent first.
+    replied = None
+    if d.get("ref") and text == d["text"]:
+        with lock:
+            replied = next((m for m in reversed(messages) if m.get("to") == f"discord:{d['channel_id']}" and m.get("from_cwd")
+                            and (m.get("discord_out") or {}).get("message_id") == d["ref"]), None)
+        if replied:
+            cwd = replied["from_cwd"]
     if not cwd:
         discordlink.post(discord["token"], d["channel_id"], "No agent here receives messages yet: tick Receives for one in the peerlink web UI, under Channels.", d["message_id"])
         return
@@ -1229,7 +1239,7 @@ def on_discord(d):
             "id": f"m{next_msg[0]}", "ts": time.time(),
             "from": f"discord:{d['channel_id']}", "from_name": f"{d['author']} on Discord", "from_host": "discord",
             "from_cwd": "", "to_cwd": cwd, "from_space": "discord", "to_space": "",
-            "text": text[:20000], "expects_reply": True, "reply_to": None, "hops": 0, "status": "queued", "v": 2,
+            "text": text[:20000], "expects_reply": True, "reply_to": replied["id"] if replied else None, "hops": 0, "status": "queued", "v": 2,
             "discord": {"channel_id": d["channel_id"], "message_id": d["message_id"]},
         }
         next_msg[0] += 1
@@ -1457,6 +1467,10 @@ def user_send(sender_rec, word, text, kind, parent_task, expects_reply, hops, op
     if (word == "discord" or word.startswith("discord#")) and not chans:
         return 404, {"error": "this agent isn't mapped to that Discord channel; send it to \"user\" to put it in their Inbox, or map a channel under Channels"}
     channel = chans[0]["channel_id"] if chans else ""
+    # A question from an agent with no channel of its own goes where its approvals do, its space lead's channel, so it's
+    # answered (and leaves the Inbox) on Discord too.
+    if not channel and kind != "task" and expects_reply and word in USER_ALIASES and discord.get("token") and discord_bot[0]:
+        channel = approval_channel(sender_rec)
     if kind != "task" and channel:
         return post_to_discord(sender_rec, channel, text, None, None, hops, options, files, expects_reply)
     if options:
@@ -1504,8 +1518,9 @@ def inbox_items():
                 continue
             if not (m.get("to") == "user" or str(m.get("to", "")).startswith("discord:")):
                 continue
-            # On Discord you answer by writing in the channel, not always as a reply: anything you send that agent after it counts.
-            if any(str(n.get("from", "")).startswith("discord:") and n.get("to_cwd") == m.get("from_cwd") for n in recent[i + 1:]):
+            # On Discord you answer by writing in the channel, not always as a reply: anything you send that agent after it
+            # counts, and so does anything you write in the channel it was posted to, whichever agent there receives it.
+            if any(str(n.get("from", "")).startswith("discord:") and (n.get("to_cwd") == m.get("from_cwd") or n["from"] == m.get("to")) for n in recent[i + 1:]):
                 continue
             out.append({"kind": "question", "id": m["id"], "who": m["from_name"], "since": m["ts"], "title": task_title_of(m["text"])[:120], "text": m["text"]})
         out += [{"kind": "feedback", "id": f["id"], "who": f.get("from_name") or "an agent", "since": f["ts"], "title": task_title_of(f["text"])[:120],
@@ -2670,6 +2685,25 @@ def cancel_schedule(cid, by=None):
     return 200, {"schedule": dict(c)}
 
 
+def enable_schedule(cid):
+    """You turn a cancelled, denied or expired schedule back on; it runs at its next time, needing no approval."""
+    now = time.time()
+    with lock:
+        c = schedules.get(cid)
+        if c is None:
+            return 404, {"error": f"no schedule {cid}"}
+        if c["status"] not in ("cancelled", "denied", "expired"):
+            return 409, {"error": f"{cid} is {c['status']}"}
+        next_run = cron_next(c["cron"], now) if c["cron"] else c.get("at")
+        if not next_run or next_run <= now:
+            return 409, {"error": f"{cid} was for {when_text(c)}, which has passed: add a new one"}
+        c["status"], c["updated"], c["next_run"] = "active", now, next_run
+        schedule_told(c, f"Your user turned schedule {cid} ({when_text(c)}) back on.")
+        save_schedules()
+    log("schedule", cid, "enabled again")
+    return 200, {"schedule": dict(c)}
+
+
 starting = {}  # folder -> when the daemon last started an agent there for a schedule
 
 
@@ -3249,6 +3283,9 @@ class Handler(BaseHTTPRequestHandler):
                     rec["context"] = max(0, min(100, int(b["context"])))
                 if isinstance(b.get("branch"), str):
                     rec["branch"] = b["branch"][:200]
+                # When it queued /reload-plugins for a newer peerlink that hasn't run yet; 0 once none is waiting.
+                if isinstance(b.get("reload_queued"), (int, float)):
+                    rec["reload_queued"] = b["reload_queued"] / 1000 if b["reload_queued"] else None
                 note_lone_leads()
                 if b.get("summary") is not None:
                     rec["summary"] = b["summary"][:500]
@@ -3334,6 +3371,11 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(403, {"error": "unknown agent; register again"})
                 code, out = create_schedule(b, by)
             return self.reply(code, out)
+        # Only you turn a schedule back on: an agent asks for a new one.
+        if len(rest) == 3 and rest[0] == "schedules" and rest[2] == "enable" and method == "POST":
+            if not browser:
+                return self.reply(403, {"error": "only your user turns a schedule back on, from the web UI; ask for a new one with schedule"})
+            return self.reply(*enable_schedule(rest[1]))
         if len(rest) == 3 and rest[0] == "schedules" and rest[2] == "cancel" and method == "POST":
             if browser and not self.key_ok():
                 code, out = cancel_schedule(rest[1])
@@ -4113,7 +4155,7 @@ function agentPanel(x,others=[]){const sc=cfg.sessions?.[x.id]||{};const setSpac
     <span class="k">Role</span><span>${role}</span>
     <span class="k">Messages</span><span>${x.sent_hour||0} sent in the last hour${x.sent_hour>=20?' · <span style="color:var(--warn)">chatty: each one can cost its recipient a turn</span>':''}</span>
     ${x.context!=null?`<span class="k">Context</span><span>${x.context}% of its window in use${x.context>=80?' · <span style="color:var(--warn)">close to compacting</span>':''}</span>`:''}
-    <span class="k">Plugin</span><span>${esc(x.plugin||'older than 0.6.6')}${x.stale&&!x.remote?' · <span style="color:var(--warn)">run /reload-plugins in this agent</span>':''}</span></div>
+    <span class="k">Plugin</span><span>${esc(x.plugin||'older than 0.6.6')}${x.stale&&!x.remote?` · <span style="color:var(--warn)">${x.reload_queued?`reload queued ${ago(x.reload_queued)} ago and not run yet: `:''}run /reload-plugins in this agent</span>`:''}</span></div>
    ${others.length?`<div class="threads"><div class="k small">Other sessions in this folder</div>${others.map(o=>`<button class="ghost small" data-sel="${esc(o.id)}" style="text-align:left">${esc(o.name)} · ${o.busy?'working':'idle'}${o.summary?' · '+esc(o.summary.slice(0,60)):''}</button>`).join('')}</div>`:''}
    ${(x.threads&&(x.threads.owes.length||x.threads.waiting.length))?`<div class="threads"><div class="k small">Open requests</div>
     ${x.threads.owes.map(t=>`<div class="small">owes <b>${esc(t.with)}</b> a reply · <span class="mut">${esc(t.id)}: ${esc(t.text.slice(0,90))}</span></div>`).join('')}
@@ -4258,10 +4300,13 @@ async function refresh(force,snap){
     :hits?`<div class="lspace-h">${hits.length} match${hits.length===1?'':'es'}</div><div class="lflat">${hits.map(lrow).join('')||'<div class="empty">No agent matches.</div>'}</div>`
     :aLayout==='list'?`<div class="ltree">${all(lspace)}</div>`
     :all((n,seen)=>{const u=unit(n,seen);return u?`<div class="chart">${u}</div>`:''});
-  // Agents still on older plugin code: they keep working, but get fixes only after /reload-plugins.
+  // Agents still on older plugin code: they keep working, but get fixes only after /reload-plugins. The daemon runs
+  // the newest peerlink installed, so the fix is a reload, not an update. Each reloads itself when next idle; one
+  // whose queued reload hasn't run in 5 minutes is stuck (a dialog open in its terminal, or no turn ever ending).
   const behind=p.peers.filter(x=>x.stale&&!x.remote);
-  $('#stalebar').style.display=behind.length?'block':'none';
-  $('#stalebar').innerHTML=behind.length?`<b>${behind.length} agent${behind.length>1?'s':''} on an older peerlink plugin</b> (${behind.map(x=>esc(x.name)).join(', ')}). Run <span class="mono">/peerlink update</span> in any agent.`:'';
+  const stuck=behind.filter(x=>!x.reload_queued||Date.now()/1000-x.reload_queued>300);
+  $('#stalebar').style.display=stuck.length?'block':'none';
+  $('#stalebar').innerHTML=stuck.length?`<b>${stuck.length} agent${stuck.length>1?'s':''} on an older peerlink plugin</b> (${stuck.map(x=>esc(x.name)+(x.reload_queued?` · reload waiting ${ago(x.reload_queued)}`:'')).join(', ')}). The newer one is installed: run <span class="mono">/reload-plugins</span> in ${stuck.length>1?'each':'it'}, or terminate it.`:'';
   const picked=p.peers.find(x=>x.id===sel);
   const panel=picked?agentPanel(picked,p.peers.filter(y=>y.id!==picked.id&&y.cwd===picked.cwd&&y.space===picked.space)):'';
   // Never redraw the panel under someone editing it.
@@ -4282,9 +4327,13 @@ function renderSchedules(){
   const when=t=>t?new Date(t*1000).toLocaleString([], {weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):'';
   const rows=[...allSched.filter(live),...allSched.filter(c=>!live(c))];
   $('#schedlist').innerHTML=rows.map(c=>`<div class="card"><div class="addline"><b>${esc(c.id)}</b><span class="chip">${esc(c.status)}</span><span>${esc(c.when_text)}</span>${c.agent?`<b>${esc(c.agent)}</b>`:''}<span class="mono mut">${esc(tilde(c.folder))}</span>
-    <span style="margin-left:auto" class="small mut">${c.next_run&&live(c)?'next '+when(c.next_run):''}</span>${live(c)?`<button class="ghost small danger" data-schedcancel="${esc(c.id)}">Cancel</button>`:''}</div>
+    <span style="margin-left:auto" class="small mut">${c.next_run&&live(c)?'next '+when(c.next_run):''}</span>${c.status==='pending'?`<button class="ghost small" data-schedok="${esc(c.id)}" data-act="approve">Approve</button><button class="ghost small" data-schedok="${esc(c.id)}" data-act="deny">Deny</button>`:live(c)?`<button class="ghost small danger" data-schedcancel="${esc(c.id)}">Cancel</button>`:['cancelled','denied','expired'].includes(c.status)?`<button class="ghost small" data-schedon="${esc(c.id)}">Enable again</button>`:''}</div>
     <div style="margin-top:6px;white-space:pre-wrap">${esc(c.prompt)}</div>
-    <div class="small mut" style="margin-top:4px">by ${esc(c.requester?.name||'you')}${c.start?' · starts an agent when none is running':' · waits for an agent'}${c.runs?` · ran ${c.runs}×, last ${when(c.last_run)}${c.note?': '+esc(c.note):''}`:''}${c.status==='pending'?' · approve it in the Inbox':''}</div></div>`).join('')||'<div class="empty">No schedules yet.</div>'}
+    <div class="small mut" style="margin-top:4px">by ${esc(c.requester?.name||'you')}${c.start?' · starts an agent when none is running':' · waits for an agent'}${c.runs?` · ran ${c.runs}×, last ${when(c.last_run)}${c.note?': '+esc(c.note):''}`:''}${c.status==='pending'?' · waiting for your approval':''}</div></div>`).join('')||'<div class="empty">No schedules yet.</div>'}
+document.addEventListener('click',async e=>{const b=e.target.closest('[data-schedok]');if(!b)return;
+  const r=await post('/api/inbox',{kind:'approval',id:b.dataset.schedok,action:b.dataset.act});if(r.error)alert(r.error);refresh(true)});
+document.addEventListener('click',async e=>{const b=e.target.closest('[data-schedon]');if(!b)return;
+  const r=await post(`/api/schedules/${encodeURIComponent(b.dataset.schedon)}/enable`);if(r.error)alert(r.error);refresh(true)});
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-schedcancel]');if(!b)return;
   if(!confirm(`Cancel ${b.dataset.schedcancel}?`))return;const r=await post(`/api/schedules/${encodeURIComponent(b.dataset.schedcancel)}/cancel`);if(r.error)alert(r.error);refresh(true)});
 document.addEventListener('submit',async e=>{if(e.target.id!=='schedform')return;e.preventDefault();const f=e.target,v=n=>f.elements[n].value.trim();
@@ -4305,19 +4354,20 @@ function renderInbox(){
   seenInbox=ids;
   $('#notifybtn').textContent=notifyOn()?'Desktop alerts: on':'Desktop alerts: off';
   if(document.activeElement?.closest?.('#inboxlist'))return;
+  const sched=i=>i.kind==='approval'&&/^c\d+$/.test(i.id);
   const label={approval:'wants a new agent',task:'task for you',question:'waiting on your answer',feedback:'feedback'};
   const btn=(a,t)=>`<button class="ghost small" data-iact="${a}">${t}</button>`;
-  $('#inboxlist').innerHTML=inbox.map(i=>`<div class="task" data-ikind="${esc(i.kind)}" data-iid="${esc(i.id)}"><div class="mh"><span class="tchip ${i.kind==='task'||i.kind==='approval'?'open':i.kind==='question'?'new':esc(i.type)}">${label[i.kind]}</span><b>${esc(i.title)}</b><span class="when">${esc(i.id)} · waiting ${ago(i.since)}</span></div>
+  $('#inboxlist').innerHTML=inbox.map(i=>`<div class="task" data-ikind="${esc(i.kind)}" data-iid="${esc(i.id)}"><div class="mh"><span class="tchip ${i.kind==='task'||i.kind==='approval'?'open':i.kind==='question'?'new':esc(i.type)}">${sched(i)?'wants a schedule':label[i.kind]}</span><b>${esc(i.title)}</b><span class="when">${esc(i.id)} · waiting ${ago(i.since)}</span></div>
     <div class="small mut">from <b>${esc(i.who)}</b>${i.kind==='feedback'?' · '+esc(i.type):''}</div>
     ${(()=>{const more=i.text.trim().startsWith(i.title.trim())?i.text.trim().slice(i.title.trim().length).trim():i.text.trim();return more?`<div class="ftext">${esc(more)}</div>`:''})()}
-    <div class="tact">${i.kind==='approval'?`${btn('approve','Approve and start it')}${btn('deny','Deny')}`:i.kind==='task'?`<input class="small" data-itext placeholder="Note for ${esc(i.who)} (optional)">${btn('done','Done')}${btn('failed',"Couldn't do it")}`
+    <div class="tact">${i.kind==='approval'?`${btn('approve',sched(i)?'Approve':'Approve and start it')}${btn('deny','Deny')}`:i.kind==='task'?`<input class="small" data-itext placeholder="Note for ${esc(i.who)} (optional)">${btn('done','Done')}${btn('failed',"Couldn't do it")}`
       :i.kind==='question'?`<input class="small" data-itext placeholder="Your answer">${btn('reply','Send')}${btn('dismiss','Dismiss')}`
       :`${btn('accepted','Accept')}${btn('dismissed','Dismiss')}`}</div></div>`).join('')
     ||'<div class="empty">Nothing is waiting on you.</div>'}
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-iact]');if(!b)return;const row=b.closest('[data-iid]');
   const text=row.querySelector('[data-itext]')?.value||'';
   if(b.dataset.iact==='reply'&&!text.trim()){row.querySelector('[data-itext]').focus();return}
-  if(b.dataset.iact==='approve'&&!confirm('Start a new Claude Code session in that folder?'))return;
+  if(b.dataset.iact==='approve'&&!/^c\d+$/.test(row.dataset.iid)&&!confirm('Start a new Claude Code session in that folder?'))return;
   const r=await post('/api/inbox',{kind:row.dataset.ikind,id:row.dataset.iid,action:b.dataset.iact,text});
   if(r.error)alert(r.error);document.activeElement?.blur();refresh(true)});
 document.addEventListener('change',async e=>{const t=e.target;if(!t.dataset.splead&&!t.dataset.spparent)return;
@@ -4443,7 +4493,7 @@ function panelTasks(x){
   const sec=(title,list,none)=>`<div class="k small">${title}</div>${list.length?byLive(list).map(t=>taskRow(t,false)).join(''):`<div class="small mut">${none}</div>`}`;
   // Its schedules: named for it, or for its folder with no agent named.
   const sched=allSched.filter(c=>(c.status==='active'||c.status==='pending')&&(c.agent?c.agent===x.name:c.folder===x.cwd));
-  const srow=c=>`<div class="small" style="margin:4px 0"><b>${esc(c.id)}</b> ${esc(c.when_text)}${c.agent?'':' <span class="mut">(its folder)</span>'}: ${esc(c.prompt.length>120?c.prompt.slice(0,119)+'…':c.prompt)}</div>`;
+  const srow=c=>`<div class="small" style="margin:4px 0"><b>${esc(c.id)}</b> ${esc(c.when_text)}${c.agent?'':' <span class="mut">(its folder)</span>'}: ${esc(c.prompt.length>120?c.prompt.slice(0,119)+'…':c.prompt)}${c.status==='pending'?` <span class="mut">waiting for your approval</span> <button class="ghost small" data-schedok="${esc(c.id)}" data-act="approve">Approve</button><button class="ghost small" data-schedok="${esc(c.id)}" data-act="deny">Deny</button>`:''}</div>`;
   return `<div class="ptasks">${sec('Owns',mine,'No tasks for this agent.')}${sec('Asked for',asked,'It hasn\'t handed out any tasks.')}<div class="k small">Schedules</div>${sched.length?sched.map(srow).join(''):'<div class="small mut">None. Add one on the Schedules page.</div>'}</div>`}
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-ptab],[data-tact]');if(!b)return;
   if(b.dataset.ptab){panelTab=b.dataset.ptab;editing=false;refresh(true);return}
