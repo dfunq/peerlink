@@ -2130,7 +2130,8 @@ def take_inbox(sid, track=False):
             mine = handed.setdefault(sid, {})
             for mid in [mid for mid, (m, ts) in mine.items() if now - m["ts"] >= HANDED_MAX_AGE_S]:
                 mine.pop(mid)
-            again = [m for m, ts in mine.values() if now - ts >= REDELIVER_S]
+            # While the usage limit holds, agents keep what they were handed on purpose: handing it out again is noise.
+            again = [] if usage_limit else [m for m, ts in mine.values() if now - ts >= REDELIVER_S]
             for m in box + again:
                 mine[m["id"]] = (m, now)
             if again:
