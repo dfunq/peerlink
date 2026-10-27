@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.41"
+VERSION = "0.8.42"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -1513,15 +1513,23 @@ def inbox_items():
                for t in tasks.values() if t.get("user") and t["status"] in TASK_OPEN]
         recent = [m for m in messages if now - m["ts"] < 3 * 86400]
         replied = {m.get("reply_to") for m in recent if m.get("reply_to")}
-        for i, m in enumerate(recent):
+        # On Discord you answer by writing in the channel, not always as a reply: anything you send that agent after it
+        # counts, and so does anything you write in the channel it was posted to, whichever agent there receives it.
+        # Walked newest first, these hold the folders and channels Discord has written to since the message at hand.
+        later_cwds, later_channels, questions = set(), set(), []
+        for m in reversed(recent):
+            if str(m.get("from", "")).startswith("discord:"):
+                later_cwds.add(m.get("to_cwd"))
+                later_channels.add(m["from"])
+                continue
             if not m.get("expects_reply") or m.get("task") or m.get("inbox_done") or m["id"] in replied:
                 continue
             if not (m.get("to") == "user" or str(m.get("to", "")).startswith("discord:")):
                 continue
-            # On Discord you answer by writing in the channel, not always as a reply: anything you send that agent after it
-            # counts, and so does anything you write in the channel it was posted to, whichever agent there receives it.
-            if any(str(n.get("from", "")).startswith("discord:") and (n.get("to_cwd") == m.get("from_cwd") or n["from"] == m.get("to")) for n in recent[i + 1:]):
+            if m.get("from_cwd") in later_cwds or m.get("to") in later_channels:
                 continue
+            questions.append(m)
+        for m in reversed(questions):
             out.append({"kind": "question", "id": m["id"], "who": m["from_name"], "since": m["ts"], "title": task_title_of(m["text"])[:120], "text": m["text"]})
         out += [{"kind": "feedback", "id": f["id"], "who": f.get("from_name") or "an agent", "since": f["ts"], "title": task_title_of(f["text"])[:120],
                  "text": f["text"], "type": f.get("type", "bug")} for f in feedback.values() if f.get("status") == "new"]
@@ -2169,8 +2177,10 @@ def take_inbox(sid, track=False):
             mine = handed.setdefault(sid, {})
             for mid in [mid for mid, (m, ts) in mine.items() if now - m["ts"] >= HANDED_MAX_AGE_S]:
                 mine.pop(mid)
-            # While the usage limit holds, agents keep what they were handed on purpose: handing it out again is noise.
-            again = [] if usage_limit else [m for m, ts in mine.values() if now - ts >= REDELIVER_S]
+            # While the usage limit holds, or until its turn after it lifts, an agent keeps what it was handed on purpose:
+            # handing it out again is noise.
+            held = usage_limit or (lifting and lifting["slots"].get(sid, 0) > now)
+            again = [] if held else [m for m, ts in mine.values() if now - ts >= REDELIVER_S]
             for m in box + again:
                 mine[m["id"]] = (m, now)
             if again:
@@ -2840,6 +2850,10 @@ def start_for_schedule(c):
 # turn goes through again (a swapped account), or when you press Resume.
 usage_limit = {}
 LIMIT_FALLBACK_S = 5 * 3600  # how long a limit with no reset time holds before agents try again
+# Once it lifts, agents holding work go back to it one at a time, LIFT_STAGGER_S apart: all of them at once is what
+# drained the next window. lifting: {"at": when it lifted, "next": the next free start, "slots": agent id -> its start}.
+lifting = {}
+LIFT_STAGGER_S = 60
 
 
 def hit_limit(rec, body):
@@ -2853,6 +2867,7 @@ def hit_limit(rec, body):
         for m in back:
             mine[m["id"]] = (m, 0)  # handed out again as soon as the limit lifts
         fresh = not usage_limit
+        lifting.clear()
         usage_limit.update({"since": usage_limit.get("since", now), "resets_at": resets or usage_limit.get("resets_at"),
                             "kind": str(body.get("kind") or usage_limit.get("kind") or ""), "by": display_name(rec)})
         chans = [r for r in routes_for(rec.get("cwd", "")) if r["channel_id"] != "dm"] or discord.get("routes", [])
@@ -2878,17 +2893,34 @@ def lift_limit(why):
             return 200, {"limit": None}
         was = dict(usage_limit)
         usage_limit.clear()
+        now = time.time()
+        lifting.update({"at": now, "next": now, "slots": {}})
     log("limit", "lifted:", why)
     close_buttons(was)
     out = was.get("discord_out") or {}
     if out.get("channel_id") and discord.get("token") and discord_bot[0]:
-        threading.Thread(target=lambda: discordlink.post(discord["token"], out["channel_id"], f"▶️ Usage limit lifted ({why}): agents carry on with what was held.", out.get("message_id")),
+        threading.Thread(target=lambda: discordlink.post(discord["token"], out["channel_id"], f"▶️ Usage limit lifted ({why}): agents carry on with what was held, one a minute.", out.get("message_id")),
                          daemon=True).start()
     return 200, {"limit": None}
 
 
 def limit_view():
     return {k: v for k, v in usage_limit.items() if k != "discord_out"} or None
+
+
+def limit_for(sid):
+    """The limit as this agent's plugin holds to it: the account's while it holds, then, while agents are let go one
+    at a time, its own until its turn comes. An agent holding nothing is let go at once. Called with the lock held."""
+    if usage_limit or not lifting:
+        return limit_view()
+    now = time.time()
+    slot = lifting["slots"].get(sid)
+    if slot is None:
+        if not (handed.get(sid) or inboxes.get(sid)):
+            return None
+        slot = lifting["slots"][sid] = max(lifting["next"], now)
+        lifting["next"] = slot + LIFT_STAGGER_S
+    return None if now >= slot else {"since": lifting["at"], "resets_at": slot, "kind": "staggered", "by": "peerlink"}
 
 
 # Ending an agent: you ask (web UI, or "/kill <name>" on Discord, confirmed with a button), never an agent.
@@ -2980,6 +3012,97 @@ def lapse(item, what, told):
         told({"id": item["id"], "requester": {"cwd": lead}}, f"{req.get('name') or 'An agent'}'s request {item['id']} to {what} expired: your user didn't approve it within a day. It's off unless someone asks again.")
 
 
+# State files stay bounded: tidy() runs at startup and twice a day. What's ended and a month old goes; the newest of each
+# kind always stays, so ids keep counting up. A log that's grown too big is rewritten, its old self kept as <name>.1.
+KEEP_ENDED_S = 30 * 86400
+LOG_MAX_BYTES = 5 << 20
+TIDY_EVERY_S = 12 * 3600
+last_tidy = [0.0]
+
+
+def too_big(path, limit=LOG_MAX_BYTES):
+    try:
+        return os.path.getsize(path) > limit
+    except OSError:
+        return False
+
+
+def rewrite_log(path, entries):
+    """Keep `path` as path.1 and start it again with `entries`, one per line. Called with the lock held."""
+    with open(path + ".tmp", "w") as f:
+        f.writelines(json.dumps(e) + "\n" for e in entries)
+    os.replace(path, path + ".1")
+    os.replace(path + ".tmp", path)
+
+
+def ended_and_old(items, live, now):
+    """Ids of records whose status isn't one of `live` and that last changed a month ago, never the newest one."""
+    newest = max(items, key=lambda i: int(i[1:]) if i[1:].isdigit() else 0, default=None)
+    return [i for i, x in items.items() if i != newest and x.get("status") not in live
+            and now - (x.get("updated") or x.get("created") or x.get("ts") or now) > KEEP_ENDED_S]
+
+
+def tidy():
+    now = time.time()
+    last_tidy[0] = now
+    with lock:
+        dropped = {}
+        for name, items, live, save in (("tasks", tasks, TASK_OPEN, save_tasks), ("spawns", spawns, ("pending",), save_spawns),
+                                        ("schedules", schedules, ("active", "pending"), save_schedules)):
+            old = ended_and_old(items, live, now)
+            for i in old:
+                items.pop(i)
+            if old:
+                save()
+                dropped[name] = len(old)
+        if too_big(MESSAGES_PATH):
+            # What load_messages() would read back, one line per message with its latest state.
+            by_id = {}
+            with open(MESSAGES_PATH) as f:
+                for line in f.readlines()[-5000:]:
+                    try:
+                        entry = json.loads(line)
+                    except ValueError:
+                        continue
+                    if "text" in entry:
+                        by_id[entry["id"]] = entry
+                    elif entry.get("id") in by_id:
+                        by_id[entry["id"]].update(entry)
+            rewrite_log(MESSAGES_PATH, by_id.values())
+            dropped["messages.jsonl"] = "rewritten"
+        if too_big(ISSUES_PATH, 1 << 20):
+            rewrite_log(ISSUES_PATH, feedback.values())
+            dropped["issues.jsonl"] = "rewritten"
+        if too_big(TERMINATIONS_PATH, 1 << 20):
+            with open(TERMINATIONS_PATH) as f:
+                rewrite_log(TERMINATIONS_PATH, [json.loads(line) for line in f.readlines()[-1000:] if line.strip()])
+            dropped["terminations.jsonl"] = "rewritten"
+        shown = {m["id"] for m in messages}
+        for mid in [m for m in reactions if m not in shown]:
+            reactions.pop(mid)
+    # The daemon's own output: started in the background, its stdout is daemon.log, which moves aside for a new one.
+    try:
+        if too_big(LOG_PATH) and os.fstat(1).st_ino == os.stat(LOG_PATH).st_ino:
+            os.replace(LOG_PATH, LOG_PATH + ".1")
+            out = os.open(LOG_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            os.dup2(out, 1)
+            os.dup2(out, 2)
+            os.close(out)
+            dropped["daemon.log"] = "rotated"
+    except OSError:
+        pass
+    try:
+        for d in os.listdir(DISCORD_FILES):
+            path = os.path.join(DISCORD_FILES, d)
+            if now - os.path.getmtime(path) > KEEP_ENDED_S:
+                shutil.rmtree(path, ignore_errors=True)
+                dropped["discord files"] = dropped.get("discord files", 0) + 1
+    except OSError:
+        pass
+    if dropped:
+        log("tidy:", ", ".join(f"{k} {v}" for k, v in dropped.items()))
+
+
 def reaper():
     while True:
         time.sleep(10)
@@ -2991,6 +3114,11 @@ def reaper():
 
 def reap():
     now = time.time()
+    if now - last_tidy[0] > TIDY_EVERY_S:
+        tidy()
+    with lock:
+        if lifting and now > lifting["next"] + 10 * LIFT_STAGGER_S:
+            lifting.clear()  # everyone holding work has had its turn
     with lock:
         for sid in [s for s, r in sessions.items() if now - r["last_seen"] > config["peer_ttl_s"] * 10]:
             session_gone(sid)
@@ -3388,7 +3516,9 @@ class Handler(BaseHTTPRequestHandler):
             with lock:
                 mine = reach(rec)
             others = sum(1 for p in local_peers() if p["id"] != sid and peer_reach(p) & mine) + len(config.get("remotes", []))
-            out = {"name": display_name(rec), "config": cfg, "inbox": inbox, "peer_count": others, "limit": limit_view()}
+            with lock:
+                held = limit_for(sid)
+            out = {"name": display_name(rec), "config": cfg, "inbox": inbox, "peer_count": others, "limit": held}
             if rec.get("terminate"):
                 out["terminate"] = rec["terminate"]
             if rec.get("clear"):
