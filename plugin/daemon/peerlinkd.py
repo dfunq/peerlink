@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.33"
+VERSION = "0.8.34"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -1744,6 +1744,12 @@ def send(body):
     if parent and parent.get("from") == "user":
         to = "user"
     word = to.strip().lower()
+    # A reply to a message from Discord goes back to that message, whether the model wrote "user" or "discord":
+    # as a reply in its thread, and recorded with reply_to, so the message no longer reads as unanswered.
+    if parent and parent.get("discord") and kind == "message":
+        out = send_discord(sender_rec, to, text, parent, hops, options, files, bool(body.get("expects_reply")))
+        if out is not None:
+            return out
     # "discord" or "discord#channel", not an agent whose name starts with discord, like discord-voice.
     if sender_rec and (word in USER_ALIASES or (kind == "task" and (word == "discord" or word.startswith("discord#")) and not parent)):
         return user_send(sender_rec, word, text, kind, parent_task, bool(body.get("expects_reply")), hops, options, files)
