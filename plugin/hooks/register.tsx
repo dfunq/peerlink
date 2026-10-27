@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.28'
+const DAEMON_VERSION = '0.8.29'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -1548,6 +1548,11 @@ export const register: Register = on => {
   on('tool.call', { tool: 'mcp__peerlink__clear_context' }, async ($, e) => {
     const notes = String((e as any).notes ?? '').trim()
     if (!notes) return text('Not cleared: write notes first, so your fresh context knows what is still in flight.')
+    // A context cleared moments ago has nothing to clear; asked to again (a request that crossed the last clear),
+    // say so rather than wipe the notes it just started from.
+    const fill = await contextPercent($)
+    if ((await $.session.turns().catch(() => 2)) <= 1 && (fill === undefined || fill < 10))
+      return text('Not cleared: your context was just cleared and is already small. Carry on, and clear after your next task.')
     handoff = notes.slice(0, 4000)
     clearing = true
     clearAskedBy = 'by this agent, between tasks'
