@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.27"
+VERSION = "0.8.28"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -102,6 +102,11 @@ and to the point, and skip acknowledgements, thanks and sign-offs.
 - To hand a peer a piece of work, send_message with kind "task". A task \
 that comes to you ("task t3") is yours until you call update_task with \
 done or failed and a short note; the note goes to whoever asked.
+- Keep your context small: every turn re-reads all of it, and a large one \
+drains your user's usage limit fast. When you finish a task (or the work \
+you were asked for) and have reported the result, save what's worth \
+keeping, such as decisions, gotchas and where things are, to your memory \
+or the project's notes, then call clear_context with a short handoff.
 - To tell your whole space something everyone needs (a shared API change, \
 a freeze), send_message with kind "announcement" and to "space". Nobody \
 replies, so keep them rare.
@@ -1361,7 +1366,7 @@ def on_press(press):
         return on_spawn_press(press, decide_schedule, schedules)
     if press["custom_id"].startswith("pa:"):
         return on_clear_all_press(press)
-    if press["custom_id"] in ("pr:0", "pl:0"):  # "pl:0" from before 0.8.27; an agent's buttons are "pl:<message>:<n>"
+    if press["custom_id"] in ("pr:0", "pl:0"):  # "pl:0" from before 0.8.28; an agent's buttons are "pl:<message>:<n>"
         discordlink.answer_interaction(press["id"], press["token"], 7, {"components": []})
         return lift_limit(f"resumed on Discord by {press['author']}")
     if press["custom_id"].startswith("pk:"):

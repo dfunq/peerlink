@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.8.27', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.8.28', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (state.forget && path.endsWith('/heartbeat') && 'busy' in body) {
       state.forget = false
       return { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'unknown agent; register again' }) } }
@@ -668,6 +668,30 @@ test('a clear asked from the web UI runs /clear when the agent is idle', async (
   expect(ran).toEqual(['clear'])
 })
 
+test('an agent clears its own context between tasks, and its notes start the fresh one', async ($, on) => {
+  engine(on)
+  const ran: string[] = []
+  on('command.run', { command: 'clear' }, () => {
+    ran.push('clear')
+    return { text: '' }
+  })
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  fakeDaemon(on)
+  await $.session.start(START)
+  await settle()
+  const empty: any = await $.tool.call({ tool: 'mcp__peerlink__clear_context', notes: ' ' } as any)
+  expect(JSON.stringify(empty)).toContain('Not cleared')
+  await $.tool.call({ tool: 'mcp__peerlink__clear_context', notes: 'SKY-32 server half on feat/pg-053; PR not opened yet' } as any)
+  expect(ran).toEqual([])
+  await $.turn.complete(TURN)
+  for (let i = 0; i < 5; i++) await settle()
+  expect(ran).toEqual(['clear'])
+  const out: any = await $.prompt.context({ blocks: [] } as any)
+  expect(out.blocks.find((b: any) => b.name === 'peerlink handoff').text).toContain('SKY-32 server half on feat/pg-053')
+  const again: any = await $.prompt.context({ blocks: [] } as any)
+  expect(again.blocks.some((b: any) => b.name === 'peerlink handoff')).toBe(false)
+})
+
 test('commands asked for on Discord run one at a time, each when the agent is idle', async ($, on) => {
   const { clock } = engine(on)
   mock.session(on)
@@ -705,7 +729,7 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.8.27 · daemon 0.8.27 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.8.28 · daemon 0.8.28 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the space is listed once', async ($, on) => {
@@ -738,7 +762,7 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.8.27')
+  expect(reg.plugin).toBe('0.8.28')
 })
 
 test('an agent registers again under the folder it started in, wherever the host has moved its root since', async ($, on) => {
@@ -817,7 +841,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.8.28', true], ['0.8.27', false]] as const)
+for (const [installed, reloads] of [['0.8.29', true], ['0.8.28', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     fakeDaemon(on)

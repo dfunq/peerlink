@@ -10,6 +10,7 @@ Each agent gets these tools, among others:
 | `send_message` | Sends a message to a peer agent by name, or to a space's lead with `space:<name>`. The message is delivered into a turn that's running, or starts a turn in an idle agent |
 | `set_summary` | Sets the one-line summary that peers see for this agent |
 | `schedule` | Has the daemon send a prompt to a folder's agent later or on a cron, even with the terminal closed. See [Schedules](#schedules) |
+| `clear_context` | Clears the agent's own context once a task is done, after it saves what matters to memory; its handoff notes start the fresh context. The default guidance asks every agent to do this between tasks, since each turn re-reads the whole context and a large one drains the usage limit |
 | `report_issue` | Reports a problem with peerlink itself, such as a reply that never arrived. See [Reporting problems](#reporting-problems) |
 
 Agents treat each other as teammates. Each one knows who else is live and what they're doing, and messages a peer when that peer clearly owns what it needs. Guidance in the system prompt sets the tone and says when a message is worth sending. You can edit that guidance in the web UI.
