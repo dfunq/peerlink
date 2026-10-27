@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.36"
+VERSION = "0.8.37"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -3756,7 +3756,7 @@ def cli_help():
 
 UI_HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Peerlink</title><link rel="icon" href="data:,">
+<title>Peerlink</title><link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23c96442'/><path d='M7 11.5h17M19.5 7l4.5 4.5-4.5 4.5M25 20.5H8M12.5 16 8 20.5l4.5 4.5' fill='none' stroke='%23fff' stroke-width='2.8' stroke-linecap='round' stroke-linejoin='round'/></svg>">
 <style>
 :root{color-scheme:light dark;--bg:#faf9f7;--side:#f2f0ec;--fg:#1f1e1c;--mut:#6b6862;--line:#e4e1db;--card:#fff;--acc:#c96442;--ok:#2f7d4f;--warn:#b7791f;--bad:#c0392b;--well:rgba(127,127,127,.06)}
 @media (prefers-color-scheme:dark){:root{--bg:#1c1b19;--side:#161513;--fg:#ecebe8;--mut:#9b978f;--line:#34322e;--card:#252421;--acc:#e0805e;--ok:#5cb57f;--warn:#e0b04a;--bad:#e5675a;--well:rgba(255,255,255,.03)}}
@@ -4613,7 +4613,7 @@ show();loadCfg().then(()=>refresh(true)).then(()=>{if(location.hash==='#discord'
 
 
 PAGE_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Peerlink</title><link rel="icon" href="data:,"><style>
+<title>Peerlink</title><link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23c96442'/><path d='M7 11.5h17M19.5 7l4.5 4.5-4.5 4.5M25 20.5H8M12.5 16 8 20.5l4.5 4.5' fill='none' stroke='%23fff' stroke-width='2.8' stroke-linecap='round' stroke-linejoin='round'/></svg>"><style>
 :root{--bg:#faf9f7;--fg:#1f1e1c;--mut:#6b6862;--line:#e4e1db}
 @media (prefers-color-scheme:dark){:root{--bg:#1c1b19;--fg:#ecebe8;--mut:#9b978f;--line:#34322e}}
 body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 ui-sans-serif,system-ui,-apple-system,sans-serif}
