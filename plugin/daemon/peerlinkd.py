@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.42"
+VERSION = "0.8.43"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -2434,6 +2434,12 @@ def launch(sp):
     try:
         if tmux:
             name = "peerlink-" + re.sub(r"[^A-Za-z0-9_-]", "-", os.path.basename(sp["dir"]))[:30] + "-" + sp["id"]
+            # One started for this before is still there: its agent hasn't registered yet, so don't start a second.
+            if subprocess.run([tmux, "has-session", "-t", "=" + name], timeout=10, capture_output=True).returncode == 0:
+                pane = subprocess.run([tmux, "capture-pane", "-p", "-t", f"={name}:"], timeout=10, capture_output=True, text=True).stdout
+                if "trust this folder" in pane:
+                    return "", f"Claude Code there is waiting for you to trust the folder: run tmux attach -t {name} and choose \"Yes, I trust this folder\""
+                return f"still starting in tmux (tmux attach -t {name})", ""
             subprocess.run([tmux, "new-session", "-d", "-s", name, "-c", sp["dir"], claude], check=True, timeout=10, capture_output=True)
             return f"in tmux (tmux attach -t {name})", ""
         if sys.platform == "darwin":
@@ -2828,19 +2834,24 @@ def fire_schedule(c, now):
     if agent or not c["start"] or now - starting.get(c["folder"], 0) < 120:
         return None
     starting[c["folder"]] = now
-    if c.get("agent"):
-        name_claims.setdefault(c["folder"], []).append(c["agent"])
+    claims = name_claims.setdefault(c["folder"], [])
+    if c.get("agent") and c["agent"] not in claims:
+        claims.append(c["agent"])
     return c
 
 
 def start_for_schedule(c):
     how, err = launch({"dir": c["folder"], "id": c["id"]})
     with lock:
-        c["note"] = f"started {c.get('agent') or 'an agent'} {how}" if how else f"couldn't start {c.get('agent') or 'an agent'}: {err}"
+        who = c.get("agent") or "an agent"
+        c["note"] = f"couldn't start {who}: {err}" if err else f"{who} is {how}" if how.startswith("still") else f"started {who} {how}"
         if err:
             if c.get("agent") and c["agent"] in name_claims.get(c["folder"], []):
                 name_claims[c["folder"]].remove(c["agent"])
-            schedule_told(c, f"Schedule {c['id']} ran, but no agent was running in {tilde_path(c['folder'])} and one couldn't start: {err}. The prompt waits there for an hour.")
+            # Said once: the same failure on every run is noise until it changes or a start goes through.
+            if err != c.get("start_err"):
+                schedule_told(c, f"Schedule {c['id']} ran, but no agent was running in {tilde_path(c['folder'])} and one couldn't start: {err}. The prompt waits there for an hour.")
+        c["start_err"] = err
         save_schedules()
     log("schedule", c["id"], c["note"])
 
