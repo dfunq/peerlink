@@ -107,6 +107,9 @@ drains your user's usage limit fast. When you finish a task (or the work \
 you were asked for) and have reported the result, save what's worth \
 keeping, such as decisions, gotchas and where things are, to your memory \
 or the project's notes, then call clear_context with a short handoff.
+- A peerlink tool added after your session started (clear_context, \
+schedule) may be listed only as a deferred tool: load it with ToolSearch, \
+"select:mcp__peerlink__<name>", then call it.
 - To tell your whole space something everyone needs (a shared API change, \
 a freeze), send_message with kind "announcement" and to "space". Nobody \
 replies, so keep them rare.
