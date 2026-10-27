@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.35'
+const DAEMON_VERSION = '0.8.36'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -43,8 +43,9 @@ type ClientConfig = {
   // The agent that leads this agent's space, and the leads of spaces nested inside it.
   lead?: string
   children?: { name: string; space: string }[]
-  // The Discord channels this agent's folder is mapped into, and which ones it's the master of.
-  discord?: { channel_id: string; channel: string; master: boolean }[]
+  // The Discord channels this agent's folder is mapped into: where it receives your messages (master: the ones
+  // that name nobody too) and where it may post.
+  discord?: { channel_id: string; channel: string; master: boolean; receives?: boolean; sends?: boolean }[]
   poll_interval_ms: number
   auto_wake_idle: boolean
   // How long an idle agent waits after another agent's message, so ones close together share a turn.
@@ -946,17 +947,19 @@ function hierarchyGuidance() {
   const chans = (cfg.discord ?? []).filter(c => c.channel_id !== 'dm')
   const dm = (cfg.discord ?? []).some(c => c.channel_id === 'dm')
   if (chans.length || dm) {
+    // From a daemon before 0.8.36, every channel an agent was in both received and sent.
     const masters = chans.filter(c => c.master).map(c => c.channel)
-    const members = chans.filter(c => !c.master).map(c => c.channel)
+    const members = chans.filter(c => !c.master && c.receives !== false).map(c => c.channel)
+    const posts = chans.filter(c => c.sends !== false)
     lines.push(
       [
-        'Your user can reach you on Discord.',
-        masters.length ? `You're the channel master of ${masters.join(', ')}: their messages there come to you.` : '',
-        members.length ? `You're also in ${members.join(', ')}, where they reach you by starting a message with your name.` : '',
+        masters.length || members.length || dm ? 'Your user can reach you on Discord.' : 'You can post to your user on Discord.',
+        masters.length ? `Their messages in ${masters.join(', ')} come to you.` : '',
+        members.length ? `In ${members.join(', ')}, they reach you by starting a message with your name.` : '',
         dm ? 'Their direct messages to the bot come to you.' : '',
         'A message from Discord reads "<name> on Discord": answer it with send_message and reply_to, and the answer is posted there.',
-        chans.length
-          ? `To tell them something first, send_message to "discord"${chans.length > 1 ? ` plus the channel, like "discord${chans[0]!.channel}"` : ''}.`
+        posts.length
+          ? `To tell them something first, send_message to "discord"${posts.length > 1 ? ` plus the channel, like "discord${posts[0]!.channel}"` : ''}.`
           : '',
         'They read it on a phone: lead with the answer, keep it short, use plain markdown, no tables. Links work, as [text](url).',
         'When you need them to decide or approve something (yes or no, merge or not, pick one), pass options rather than asking them to type a reply: they become buttons, and the tap comes back as their reply. To share a file, pass its absolute path in files. Files they attach arrive as paths you can read.',
