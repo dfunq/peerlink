@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.29'
+const DAEMON_VERSION = '0.8.30'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -1489,7 +1489,7 @@ export const register: Register = on => {
       text: input.text,
       expects_reply: !!input.expects_reply,
       reply_to: input.reply_to,
-      kind: input.kind === 'task' ? 'task' : undefined,
+      kind: input.kind === 'task' || input.kind === 'announcement' ? input.kind : undefined,
       parent_task: typeof input.parent_task === 'string' && input.parent_task ? input.parent_task : undefined,
       options: Array.isArray(input.options) ? input.options : undefined,
       files: Array.isArray(input.files) ? input.files : undefined,
