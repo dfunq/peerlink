@@ -337,6 +337,8 @@ You can change these in the web UI, with `peerlink config <name> <value>`, or in
 | `auto_summary` | true | Keep summaries current with a cheap model call |
 | `summary_model` | haiku | Model used for summaries |
 | `guidance` | empty (built-in text) | Text added to every agent's system prompt |
+| `clear_between_tasks` | true | The default guidance asks each agent to save notes to memory and call `clear_context` after each task |
+| `clear_nudge_tokens` | 400000 | Once an agent's context passes this many tokens, its next prompt asks it to save and clear at a stopping point, once per conversation; 0 turns it off |
 | `auto_reload` | true | Agents reload their plugins by themselves when a newer peerlink is installed |
 | `max_message_chars` | 8000 | Longer messages are refused, with a note to send a file path instead |
 | `issue_agent` | peerlink | The agent that `report_issue` reports are also sent to, when it's live |

@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.8.31', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.8.32', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (state.forget && path.endsWith('/heartbeat') && 'busy' in body) {
       state.forget = false
       return { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'unknown agent; register again' }) } }
@@ -171,6 +171,36 @@ test("when an org plugin skips peerlink's compose and context hooks, the role, g
   for (let i = 0; i < 10; i++) await settle()
   const third: any = await $.prompt.submit({ text: 'next' })
   expect(third.context.join('\n')).toContain('Deploy freeze until 5pm')
+})
+
+test('past the context size the user set, the agent is asked once to save and clear, on its next prompt', async ($, on) => {
+  engine(on, { turns: 4, percent: 85 })
+  on('prompt.compose', () => ({ sections: [] }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  fakeDaemon(on, 1, null, [], { clear_nudge_tokens: 100000 })
+  await $.session.start(START)
+  await settle()
+  await $.turn.complete(TURN)
+  for (let i = 0; i < 5; i++) await settle()
+  const next: any = await $.prompt.submit({ text: 'carry on' })
+  expect(next.context.join('\n')).toContain('Your context is at 170k tokens, past the 100k your user set')
+  await $.turn.complete(TURN)
+  for (let i = 0; i < 5; i++) await settle()
+  const after: any = await $.prompt.submit({ text: 'and again' })
+  expect((after.context ?? []).join('\n')).not.toContain('past the 100k')
+})
+
+test('below the context size, or with it off, nobody is asked to clear', async ($, on) => {
+  engine(on, { turns: 4, percent: 85 })
+  on('prompt.compose', () => ({ sections: [] }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  fakeDaemon(on, 1, null, [], { clear_nudge_tokens: 0 })
+  await $.session.start(START)
+  await settle()
+  await $.turn.complete(TURN)
+  for (let i = 0; i < 5; i++) await settle()
+  const next: any = await $.prompt.submit({ text: 'carry on' })
+  expect((next.context ?? []).join('\n')).not.toContain('clear_context')
 })
 
 test('when prompt.compose runs, the guidance is not sent on the prompt as well', async ($, on) => {
@@ -738,7 +768,7 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.8.31 · daemon 0.8.31 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.8.32 · daemon 0.8.32 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the space is listed once', async ($, on) => {
@@ -771,7 +801,7 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.8.31')
+  expect(reg.plugin).toBe('0.8.32')
 })
 
 test('an agent registers again under the folder it started in, wherever the host has moved its root since', async ($, on) => {
@@ -850,7 +880,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.8.32', true], ['0.8.31', false]] as const)
+for (const [installed, reloads] of [['0.8.33', true], ['0.8.32', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     fakeDaemon(on)

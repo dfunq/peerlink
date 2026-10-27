@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.31"
+VERSION = "0.8.32"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -86,6 +86,15 @@ it if it is reasonable and in scope for your session, then reply once with \
 reply_to set. If it conflicts with what your user asked, say so to the peer.
 - Keep your summary current with set_summary when your focus changes."""
 
+# The default guidance's clear-between-tasks line, left out when that setting is off.
+CLEAR_RULE = """\
+- Keep your context small: every turn re-reads all of it, and a large one \
+drains your user's usage limit fast. When you finish a task (or the work \
+you were asked for) and have reported the result, save what's worth \
+keeping, such as decisions, gotchas and where things are, to your memory \
+or the project's notes, then call clear_context with a short handoff.
+"""
+
 DEFAULT_GUIDANCE = """\
 Other Claude agents working for this user are your peers: colleagues in \
 other repos and folders on the same machine. Talk to them the way you would \
@@ -102,12 +111,7 @@ and to the point, and skip acknowledgements, thanks and sign-offs.
 - To hand a peer a piece of work, send_message with kind "task". A task \
 that comes to you ("task t3") is yours until you call update_task with \
 done or failed and a short note; the note goes to whoever asked.
-- Keep your context small: every turn re-reads all of it, and a large one \
-drains your user's usage limit fast. When you finish a task (or the work \
-you were asked for) and have reported the result, save what's worth \
-keeping, such as decisions, gotchas and where things are, to your memory \
-or the project's notes, then call clear_context with a short handoff.
-- A peerlink tool added after your session started (clear_context, \
+{clear_rule}- A peerlink tool added after your session started (clear_context, \
 schedule) may be listed only as a deferred tool: load it with ToolSearch, \
 "select:mcp__peerlink__<name>", then call it.
 - To tell your whole space something everyone needs (a shared API change, \
@@ -126,7 +130,7 @@ when you have a channel there; their answer comes back to you.
 reached the wrong agent, an error from these tools), call report_issue with \
 the message ids and agent names, then carry on with your task. When \
 peerlink gets in your way or could work better, report_issue with type \
-"idea"."""
+"idea".""".replace("{clear_rule}", CLEAR_RULE)
 
 DEFAULT_CONFIG = {
     "poll_interval_ms": 3000,
@@ -144,6 +148,8 @@ DEFAULT_CONFIG = {
     "roster_in_prompt": True,
     "auto_summary": True,
     "auto_reload": True,
+    "clear_between_tasks": True,  # the default guidance asks agents to save notes and clear their context after each task
+    "clear_nudge_tokens": 400000,  # past this many tokens of context, an agent is asked to save and clear at its next stopping point; 0 is off
     "summary_model": "haiku",
     "sessions": {},
     "folder_spaces": {},  # folder -> the space you put it in from the web UI; wins over its .peerlink
@@ -386,7 +392,8 @@ def client_config(sid):
         "auto_wake_idle": config["auto_wake_idle"] if s["auto_wake"] is None else s["auto_wake"],
         "inject_while_busy": config["inject_while_busy"],
         "wake_delay_s": config.get("wake_delay_s", 15),
-        "guidance": config["guidance"] or DEFAULT_GUIDANCE,
+        "guidance": config["guidance"] or (DEFAULT_GUIDANCE if config.get("clear_between_tasks", True) else DEFAULT_GUIDANCE.replace(CLEAR_RULE, "")),
+        "clear_nudge_tokens": config.get("clear_nudge_tokens", 400000),
         "muted": s["muted"],
         "roster_in_prompt": config["roster_in_prompt"],
         "auto_summary": config["auto_summary"],
@@ -1369,7 +1376,7 @@ def on_press(press):
         return on_spawn_press(press, decide_schedule, schedules)
     if press["custom_id"].startswith("pa:"):
         return on_clear_all_press(press)
-    if press["custom_id"] in ("pr:0", "pl:0"):  # "pl:0" from before 0.8.31; an agent's buttons are "pl:<message>:<n>"
+    if press["custom_id"] in ("pr:0", "pl:0"):  # "pl:0" from before 0.8.32; an agent's buttons are "pl:<message>:<n>"
         discordlink.answer_interaction(press["id"], press["token"], 7, {"components": []})
         return lift_limit(f"resumed on Discord by {press['author']}")
     if press["custom_id"].startswith("pk:"):
@@ -3965,6 +3972,9 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <div class="check"><input type="checkbox" name="roster_in_prompt" id="rp"><label for="rp" style="margin:0">Show each agent the live agent list when it changes</label></div>
 <div class="check"><input type="checkbox" name="auto_summary" id="as"><label for="as" style="margin:0">Keep agent summaries current automatically</label></div>
 <div class="row"><div><label>Summary model</label><input type="text" name="summary_model"></div><div></div></div>
+<div class="check"><input type="checkbox" name="clear_between_tasks" id="cbt"><label for="cbt" style="margin:0">Agents clear their own context after each task, saving notes to memory first</label></div>
+<div class="row"><div><label for="cnt">Ask an agent to save and clear once its context passes (tokens, 0 for never)</label><input type="number" name="clear_nudge_tokens" id="cnt" min="0" step="50000"></div><div></div></div>
+<div class="mut small">A large context is re-read on every turn and drains the usage limit fast. The ask arrives with the agent's next prompt, so it clears at a stopping point.</div>
 <label>Guidance for every agent</label><textarea name="guidance" id="guidance"></textarea><div class="mut small">Leave empty to use the default, shown in grey.</div>
 <details class="adv"><summary>Other machines</summary>
 <label>Their daemons, one URL per line</label><textarea name="remotes" style="min-height:60px"></textarea>
@@ -4532,8 +4542,9 @@ async function loadCfg(){cfg=await api('/api/config');const f=$('#cfg');
 $('#cfg').addEventListener('submit',async e=>{e.preventDefault();const f=e.target,b={};
   for(const el of f.elements){if(!el.name)continue;
     b[el.name]=el.type==='checkbox'?el.checked:el.type==='number'?Number(el.value):el.name==='remotes'?el.value.split('\n').map(s=>s.trim()).filter(Boolean):el.value}
-  cfg=await api('/api/config',{method:'PUT',headers:J,body:JSON.stringify(b)});
-  $('#saved').textContent='Saved '+new Date().toLocaleTimeString()});
+  const r=await api('/api/config',{method:'PUT',headers:J,body:JSON.stringify(b)});
+  if(r&&r.error){$('#saved').textContent='Not saved: '+r.error;return}
+  cfg=r;$('#saved').textContent='Saved '+new Date().toLocaleTimeString()});
 // Poll every 2 s; while the daemon is unreachable say so, back off to 10 s, and pick up again once it's back.
 let misses=0;
 function connect(){if(!window.EventSource||signedOut)return;live?.close();live=new EventSource('/api/stream');
