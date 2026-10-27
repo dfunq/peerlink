@@ -294,7 +294,7 @@ peerlink rotate-key | logout
 - **One daemon per machine.** `plugin/daemon/peerlinkd.py` is Python stdlib only. Holding the TCP port is the lock, so a second copy exits. The first agent that starts launches the daemon. Every agent restarts it if it goes away, and replaces it if it's an older version. When an agent loads or reloads the plugin (`/reload-plugins`), it also replaces a daemon of the same version that's running different code, going by a fingerprint of `peerlinkd.py`. A newer daemon is never replaced.
 - **Agents** register on start and send a heartbeat every `poll_interval_ms`. The heartbeat reply carries the agent's inbox and its current config, so changes made in the UI apply within a few seconds without a restart.
 - **Delivery.** If an agent is mid-turn, the message is appended to the running turn. If the agent is idle, the message starts a new turn (set by `auto_wake_idle`). Messages are logged to `~/.peerlink/messages.jsonl`, and undelivered ones survive a daemon restart.
-- **Loop safety.** Replies carry a hop count (`max_hops`), each agent has a rate limit, and you can mute an agent.
+- **Loop safety.** Replies carry a hop count (`max_hops`; the answer to a question asked at the limit still gets through, as the last reply), each agent has a rate limit, and you can mute an agent.
 - **Several machines (optional).** List other daemons under `remotes`, set `listen_host` to `0.0.0.0`, and set a shared `token`. Agents on those machines then show up as `name@host`.
 
 ## Install

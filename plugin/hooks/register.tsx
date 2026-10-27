@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.32'
+const DAEMON_VERSION = '0.8.33'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -1519,7 +1519,7 @@ export const register: Register = on => {
     if (res.data.task)
       return text(`Sent to ${res.data.to} (${res.data.id}) as task ${res.data.task}. You'll get its note when it's done or failed; continue with other work meanwhile.`)
     return text(
-      `Sent to ${res.data.to} (${res.data.id}).${input.expects_reply ? ' Their reply will arrive as a peer message; continue with other work meanwhile.' : ''}`,
+      `Sent to ${res.data.to} (${res.data.id}).${res.data.note ? ` Note: ${res.data.note}.` : input.expects_reply ? ' Their reply will arrive as a peer message; continue with other work meanwhile.' : ''}`,
     )
   }).catch(daemonDown)
 

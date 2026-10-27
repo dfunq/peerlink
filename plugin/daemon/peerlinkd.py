@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.32"
+VERSION = "0.8.33"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -1376,7 +1376,7 @@ def on_press(press):
         return on_spawn_press(press, decide_schedule, schedules)
     if press["custom_id"].startswith("pa:"):
         return on_clear_all_press(press)
-    if press["custom_id"] in ("pr:0", "pl:0"):  # "pl:0" from before 0.8.32; an agent's buttons are "pl:<message>:<n>"
+    if press["custom_id"] in ("pr:0", "pl:0"):  # "pl:0" from before 0.8.33; an agent's buttons are "pl:<message>:<n>"
         discordlink.answer_interaction(press["id"], press["token"], 7, {"components": []})
         return lift_limit(f"resumed on Discord by {press['author']}")
     if press["custom_id"].startswith("pk:"):
@@ -1713,7 +1713,9 @@ def send(body):
             hops = (parent["hops"] + 1) if parent else int(body.get("hops", 0)) + 1
         elif body.get("hops") is not None:
             hops = int(body["hops"])
-        if hops > config["max_hops"]:
+        # The answer to a question asked at the limit still gets through, as the thread's last word: it can't be replied to.
+        last_word = hops > config["max_hops"] and kind == "message" and bool(parent and parent.get("expects_reply"))
+        if hops > config["max_hops"] and not last_word:
             return 429, {"error": f"conversation hit max_hops={config['max_hops']}; stop and tell your user"}
         if sender_rec is not None:
             recent = [t for t in sent_times.get(sender, []) if now - t < 60]
@@ -1810,12 +1812,14 @@ def send(body):
             "from_space": space_of(sender_rec)[0] if sender_rec else (clean_space(body.get("space")) or ""),
             "to_space": space_of(target)[0],
             "text": text[:20000],
-            "expects_reply": bool(body.get("expects_reply")) or kind == "task",
+            "expects_reply": (bool(body.get("expects_reply")) or kind == "task") and not last_word,
             "reply_to": body.get("reply_to") or None,
             "hops": hops,
             "status": "queued",
             "v": 2,  # logs older than this never recorded delivery, so they are not replayed
         }
+        if last_word:
+            msg["text"] += f"\n\n(peerlink: this thread reached its {config['max_hops']}-reply limit with this answer, so it can't be answered. If more is needed, tell your user.)"
         # Worth starting a turn for: a question, a task, or the answer to a question this agent asked. An FYI, or a
         # reply to a reply, waits for the agent's next turn (wake_for "all" wakes for everything, as before 0.8.11).
         msg["wake"] = config.get("wake_for", "needed") == "all" or msg["expects_reply"] or bool(parent and parent.get("expects_reply"))
@@ -1829,7 +1833,10 @@ def send(body):
             sent_times[sender].append(now)
         record(msg)
     log("msg", msg["id"], msg["from_name"], "->", msg["to_name"])
-    return 200, {"id": msg["id"], "to": msg["to_name"], "status": "queued", "task": msg.get("task")}
+    out = {"id": msg["id"], "to": msg["to_name"], "status": "queued", "task": msg.get("task")}
+    if last_word:
+        out["note"] = f"delivered as this thread's last reply: it reached max_hops={config['max_hops']}, so neither of you can reply to it"
+    return 200, out
 
 
 def web_send(body):
