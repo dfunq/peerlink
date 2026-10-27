@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.35"
+VERSION = "0.8.36"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -892,9 +892,9 @@ def expire(box):
 
 
 # -- Discord ---------------------------------------------------------------------------------------
-# The mapping: each Discord channel has one master agent (your messages go to it) and any members (they can
-# post there, and "name: ..." addresses one directly). Agents are kept by folder, so a mapping survives a
-# restart, /clear or a new session. Direct messages go to `dm`.
+# The mapping: each Discord channel has agents, each one ticked to receive (your messages reach it: the first
+# such agent gets them, "name: ..." reaches another) and to send (it may post there). Agents are kept by folder,
+# so a mapping survives a restart, /clear or a new session. Direct messages go to `dm`.
 discord = {"token": "", "app_id": "", "user": "", "enabled": True, "routes": [], "dm": "",
            # What agents may do beyond text, each a switch on the Channels page.
            "buttons": True, "files_out": True, "files_in": True, "max_file_mb": 10,
@@ -912,6 +912,27 @@ def load_discord():
             discord.update(json.load(f))
     except (OSError, ValueError):
         pass
+    discord["routes"] = [clean_route(r) for r in discord.get("routes", []) if r.get("channel_id")]
+
+
+def clean_route(r):
+    """A channel's mapping as {channel_id, agents: [{cwd, receives, sends}]}. Before 0.8.36 it was a master and
+    members, both of which got messages and posted, and kinds: those become agents that do both."""
+    agents = r.get("agents")
+    if agents is None:
+        agents = [{"cwd": c, "receives": True, "sends": True} for c in [r.get("master")] + list(r.get("members") or [])]
+    out, seen = [], set()
+    for a in agents:
+        cwd = str(a.get("cwd") or "")
+        if cwd and cwd not in seen:
+            seen.add(cwd)
+            out.append({"cwd": cwd, "receives": bool(a.get("receives")), "sends": bool(a.get("sends"))})
+    return {"channel_id": str(r["channel_id"]), "agents": out}
+
+
+def receivers(route):
+    """The folders a channel's messages can reach, in order: the first gets them unless one is named."""
+    return [a["cwd"] for a in route.get("agents", []) if a.get("receives")]
 
 
 def save_discord():
@@ -944,14 +965,16 @@ def discord_channel_label(channel_id):
 
 
 def routes_for(cwd):
-    """The channels an agent's folder is mapped into, and whether it's their master."""
+    """The channels an agent's folder is mapped into: whether it receives and sends there, and whether it's the
+    first receiver (`master`), which gets messages that name nobody."""
     out = []
     for r in discord.get("routes", []):
-        if r.get("master") == cwd or cwd in (r.get("members") or []):
+        a = next((a for a in r.get("agents", []) if a["cwd"] == cwd), None)
+        if a:
             out.append({"channel_id": r["channel_id"], "channel": discord_channel_label(r["channel_id"]),
-                        "master": r.get("master") == cwd, "kinds": r.get("kinds") or []})
+                        "master": receivers(r)[:1] == [cwd], "receives": a["receives"], "sends": a["sends"]})
     if discord.get("dm") == cwd:
-        out.append({"channel_id": "dm", "channel": "direct messages", "master": True})
+        out.append({"channel_id": "dm", "channel": "direct messages", "master": True, "receives": True, "sends": True})
     return out
 
 
@@ -960,30 +983,13 @@ def approval_channel(rec):
     the parent space lead's. '' when none of them has one, and the request waits in the Inbox only."""
     space = space_of(rec)[0]
     for cwd in (rec.get("cwd", ""), space_lead(space)[0], space_lead(space_parent(space))[0] if space_parent(space) else ""):
-        chans = [r for r in routes_for(cwd) if r["channel_id"] != "dm" and carries(r, "message")] if cwd else []
+        chans = [r for r in routes_for(cwd) if r["channel_id"] != "dm"] if cwd else []
         if chans:
             return chans[0]["channel_id"]
     return ""
 
 
 KINDS = ("message", "task", "announcement")
-
-
-def carries(route, kind):
-    """A channel with no kinds set carries everything; one set to some kinds carries only those."""
-    return not route.get("kinds") or kind in route["kinds"]
-
-
-def kind_channels(kind, cwds=(), space=""):
-    """Channels set aside for one kind (#tasks, #announcements) that follow these folders, or this space."""
-    out = []
-    for r in discord.get("routes", []):
-        if kind not in (r.get("kinds") or []):
-            continue
-        folders = {r.get("master")} | set(r.get("members") or [])
-        if folders & set(c for c in cwds if c) or (space and r.get("master") and space_of({"id": "", "cwd": r["master"]})[0] == space):
-            out.append(r["channel_id"])
-    return out
 
 
 def post_async(posts):
@@ -1019,9 +1025,6 @@ def announce(sender_rec, space, text, hops=0, from_discord=None):
             inboxes.setdefault(r["id"], []).append(msg)
         record(msg)
     log("announce", msg["id"], msg["from_name"], "->", space, len(recipients))
-    if not from_discord:
-        post_async([(c, f"📣 **{msg['from_name']}** to everyone in {space}: {text}", None)
-                    for c in kind_channels("announcement", [msg["from_cwd"]], space)])
     return msg
 
 
@@ -1077,8 +1080,8 @@ def agent_named(name):
 
 
 def channel_agent(channel_id, dm):
-    """The agent a channel's messages go to: its master's, or your DMs'."""
-    cwd = discord.get("dm") if dm else next((r.get("master") for r in discord.get("routes", []) if r["channel_id"] == channel_id), "")
+    """The agent a channel's messages go to: its first receiver, or your DMs'."""
+    cwd = discord.get("dm") if dm else next((receivers(r)[0] for r in discord.get("routes", []) if r["channel_id"] == channel_id and receivers(r)), "")
     with lock:
         return successor(cwd) if cwd else None
 
@@ -1175,7 +1178,7 @@ def on_clear_all_press(press):
 
 
 def on_discord(d):
-    """A message from you on Discord: to the channel's master, or to a member it names first."""
+    """A message from you on Discord: to the channel's first receiver, or to another one it names first."""
     bot = discord_bot[0]
     if not bot:
         return
@@ -1183,21 +1186,21 @@ def on_discord(d):
     if not d.get("bot") and (d["dm"] or d["mentioned"] or bot.reads_messages) and inbox_command(d):
         return
     if d["dm"]:
-        route = {"channel_id": d["channel_id"], "master": discord.get("dm"), "members": []}
+        route = {"channel_id": d["channel_id"], "agents": [{"cwd": discord.get("dm"), "receives": True, "sends": True}] if discord.get("dm") else []}
     else:
         route = next((r for r in discord.get("routes", []) if r["channel_id"] == d["channel_id"]), None)
         # Without the Message Content switch only @mentions carry text; with it, every message in a mapped channel.
         if route is None or not (d["mentioned"] or bot.reads_messages):
             return
-    text, cwd = d["text"], route.get("master")
-    # "storefront: ..." or "@storefront ..." addresses a member of this channel by name.
+    text, cwd = d["text"], (receivers(route) or [""])[0]
+    # "storefront: ..." or "@storefront ..." addresses another agent this channel reaches, by name.
     head, sep, rest = text.partition(":")
     first = text.split(None, 1)
     for candidate, body in ((head.strip().lstrip("@"), rest.strip()) if sep else ("", ""),
                             (first[0].lstrip("@"), first[1] if len(first) > 1 else "") if first and first[0].startswith("@") else ("", "")):
         if not candidate:
             continue
-        for member in [route.get("master")] + list(route.get("members") or []):
+        for member in receivers(route):
             agent = successor(member or "")
             names = {folder_name(member or "").lower(), (display_name(agent) if agent else "").lower()} - {""}
             if member and candidate.lower() in names:
@@ -1207,19 +1210,14 @@ def on_discord(d):
             continue
         break
     if not cwd:
-        discordlink.post(discord["token"], d["channel_id"], "No agent is mapped to this yet: pick one in the peerlink web UI, under Channels.", d["message_id"])
+        discordlink.post(discord["token"], d["channel_id"], "No agent here receives messages yet: tick Receives for one in the peerlink web UI, under Channels.", d["message_id"])
         return
     text += save_discord_files(d)
     if not text.strip():
         return
-    # A "Task:" or "Announcement:" prefix says what it is; a channel set to one kind makes everything that kind.
-    kinds = route.get("kinds") or []
+    # A "Task:" or "Announcement:" prefix says what it is; anything else is a message.
     prefix = re.match(r"\s*(task|announcement|announce)\s*:\s*", text, re.I)
-    kind = ("announcement" if prefix.group(1).lower().startswith("announce") else "task") if prefix else ""
-    if kind and not carries(route, kind):
-        kind = ""
-    if not kind:
-        kind = "message" if carries(route, "message") else "task" if "task" in kinds else "announcement"
+    kind = ("announcement" if prefix.group(1).lower().startswith("announce") else "task") if prefix else "message"
     if kind == "announcement":
         space = space_of({"id": "", "cwd": cwd})[0]
         msg = announce(None, space, text[prefix.end():] if prefix else text, from_discord=d)
@@ -1440,12 +1438,12 @@ def send_discord(sender_rec, to, text, parent, hops, options=None, files=None, e
     word = to.strip().lower()
     if not (word == "discord" or word.startswith("discord#")):
         return None
-    mine = [r for r in routes_for(sender_rec.get("cwd", "")) if r["channel_id"] != "dm" and carries(r, "message")]
+    mine = [r for r in routes_for(sender_rec.get("cwd", "")) if r["channel_id"] != "dm" and r["sends"]]
     if word.startswith("discord#"):
         want = "#" + word.split("#", 1)[1].lstrip("#")
         mine = [r for r in mine if r["channel"].lower() == want]
     if not mine:
-        return 404, {"error": "this agent isn't mapped to a Discord channel that carries messages; the mapping is in the web UI, under Channels"}
+        return 404, {"error": "this agent isn't ticked to send in any Discord channel; the mapping is in the web UI, under Channels"}
     if len(mine) > 1:
         return 409, {"error": "this agent is in several Discord channels: say which, e.g. " + ", ".join(f"discord{r['channel']}" for r in mine)}
     return post_to_discord(sender_rec, mine[0]["channel_id"], text, None, None, hops, options, files, expects_reply)
@@ -1453,7 +1451,7 @@ def send_discord(sender_rec, to, text, parent, hops, options=None, files=None, e
 
 def user_send(sender_rec, word, text, kind, parent_task, expects_reply, hops, options, files):
     """A message or task for you: it waits in your Inbox, and is posted to Discord when the agent has a channel there."""
-    chans = [r for r in routes_for(sender_rec.get("cwd", "")) if r["channel_id"] != "dm" and carries(r, kind)] if discord.get("token") and discord_bot[0] else []
+    chans = [r for r in routes_for(sender_rec.get("cwd", "")) if r["channel_id"] != "dm" and r["sends"]] if discord.get("token") and discord_bot[0] else []
     if word.startswith("discord#"):
         chans = [r for r in chans if r["channel"].lower() == "#" + word.split("#", 1)[1].lstrip("#")]
     if (word == "discord" or word.startswith("discord#")) and not chans:
@@ -1843,8 +1841,6 @@ def send(body):
         next_msg[0] += 1
         if kind == "task":
             new_task(msg, {"id": sender, "name": msg["from_name"], "cwd": msg["from_cwd"]}, parent_task)
-            post_async([(c, f"📋 **{msg['from_name']}** → **{msg['to_name']}**, task {msg['task']}: {tasks[msg['task']]['title']}", None)
-                        for c in kind_channels("task", [msg["from_cwd"], msg["to_cwd"]])])
         inboxes.setdefault(target["id"], []).append(msg)
         if sender in sent_times:
             sent_times[sender].append(now)
@@ -2309,14 +2305,9 @@ def task_closed(t, web=False):
         elif req.get("cwd"):
             task_message(t, req["cwd"], line if owner else f"{t['owner']}: {line}", sender=owner, reply_to=t["msg"])
         if t["status"] == "failed" and not d and not t.get("user"):
-            chans = [r for r in routes_for(t["owner_cwd"]) + routes_for(req.get("cwd", "")) if r["channel_id"] != "dm" and carries(r, "task")]
+            chans = [r for r in routes_for(t["owner_cwd"]) + routes_for(req.get("cwd", "")) if r["channel_id"] != "dm" and r["sends"]]
             if chans:
                 posts.append((chans[0]["channel_id"], f"**{t['owner']}**: {line} (asked by {req.get('name') or 'an agent'})", None))
-        # A #tasks channel follows every task of the folders in it, besides the posts above.
-        already = {c for c, _, _ in posts} | ({d["channel_id"]} if d else set())
-        for c in kind_channels("task", [t["owner_cwd"], req.get("cwd", "")]):
-            if c not in already:
-                posts.append((c, f"**{t['owner']}**: {line} (asked by {req.get('name') or 'an agent'})", None))
     if posts and discord.get("token") and discord_bot[0]:
         def post_all():
             for channel, text, ref in posts:
@@ -2954,11 +2945,7 @@ class Handler(BaseHTTPRequestHandler):
             if "enabled" in b:
                 discord["enabled"] = bool(b["enabled"])
             if "routes" in b:
-                discord["routes"] = [{"channel_id": str(r["channel_id"]), "master": r.get("master", ""),
-                                      "members": [m for m in r.get("members", []) if m and m != r.get("master")],
-                                      # Every kind ticked is the same as none: the channel carries everything.
-                                      "kinds": [k for k in KINDS if k in (r.get("kinds") or [])] if set(r.get("kinds") or []) < set(KINDS) else []}
-                                     for r in b["routes"] if r.get("channel_id")]
+                discord["routes"] = [clean_route(r) for r in b["routes"] if r.get("channel_id")]
             if "dm" in b:
                 discord["dm"] = b["dm"] or ""
             for k in ("buttons", "files_out", "files_in"):
@@ -2998,7 +2985,7 @@ class Handler(BaseHTTPRequestHandler):
         if rest == ["test"] and method == "POST":
             channel = str(self.body().get("channel_id") or "")
             try:
-                discordlink.post(discord["token"], channel, "👋 peerlink is connected. Messages here go to this channel's master agent; start with an agent's name and a colon to reach another one mapped here.")
+                discordlink.post(discord["token"], channel, "👋 peerlink is connected. Messages here go to this channel's first receiving agent; start with an agent's name and a colon to reach another one that receives here.")
             except discordlink.DiscordError as err:
                 return self.reply(502, {"error": str(err)})
             return self.reply(200, {"ok": True})
@@ -4007,7 +3994,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <section id="channels"><h1>Channels</h1>
 <p class="lead">Talk to your agents from outside the terminal.</p>
 <h2>Discord</h2>
-<p class="lead">Each channel you map has a <b>master</b> agent that gets your messages. Only you, the bot's owner, can talk to it.</p>
+<p class="lead">Each channel you map has agents: ones that <b>receive</b> get your messages there, ones that <b>send</b> can post there. Only you, the bot's owner, can talk to them.</p>
 <div id="dstatus"></div>
 <ol class="steps">
 <li class="step" id="dstep1"><span class="step-n">1</span><div class="step-body"><div class="step-t">Create the bot and paste its token</div><div id="dstep1b"></div></div></li>
@@ -4362,7 +4349,6 @@ document.addEventListener('change',async e=>{const t=e.target;
   if(t.dataset.fnote!==undefined){const r=await post('/api/issues/'+encodeURIComponent(t.closest('[data-fb]').dataset.fb),{note:t.value});if(r.error)alert(r.error);t.blur();refresh(true)}});
 // Tasks: one row each, its subtasks under it. The Tasks page and an agent's Tasks tab share the row.
 let allTasks=[],panelTab='about';
-const DKINDS=[['message','Messages'],['task','Tasks'],['announcement','Announcements']];
 const TSTATE={open:'open',in_progress:'in progress',done:'done',failed:'failed',cancelled:'cancelled'};
 const isLive=t=>t.status==='open'||t.status==='in_progress';
 const ago=ts=>{const d=Date.now()/1000-ts;return d<90?Math.round(d)+'s':d<5400?Math.round(d/60)+'m':d<129600?Math.round(d/3600)+'h':Math.round(d/86400)+'d'};
@@ -4518,7 +4504,7 @@ async function loadDiscord(check){
   if(dState.configured&&dGuilds===null){const r=await api('/api/discord/channels');dGuilds=r.guilds||[]}
   if(!dDraft)dDraft={routes:JSON.parse(JSON.stringify(dState.routes||[])),dm:dState.dm||''};
   renderDiscord()}
-function renderDiscord(){if(!dState)return;const d=dState,invited=(dGuilds||[]).length>0,mapped=(d.routes||[]).some(r=>r.master);
+function renderDiscord(){if(!dState)return;const d=dState,invited=(dGuilds||[]).length>0,mapped=(d.routes||[]).some(r=>(r.agents||[]).length);
   $('#n-discord').textContent=d.state==='online'?'on':'';
   const label={online:'Online',connecting:'Connecting…',error:'Error',off:'Turned off',unconfigured:'Not set up'}[d.state]||d.state;
   $('#dstatus').innerHTML=d.configured?`<div class="dstate"><span class="dot ${d.state==='online'?'':'busy'}"></span><b>${esc(label)}</b>${d.user?` as ${esc(d.user)}`:''}${d.error?` · <span class="err">${esc(d.error)}</span>`:''}</div>`:'';
@@ -4531,18 +4517,19 @@ function renderDiscord(){if(!dState)return;const d=dState,invited=(dGuilds||[]).
   if(!d.configured||!invited){$('#dstep3b').innerHTML='';$('#dmore').innerHTML='';return}
   const rows=dDraft.routes.map((r,i)=>`<tr>
     <td>${channelSelect(r.channel_id,`data-droute="${i}" data-dfield="channel_id"`)}</td>
-    <td>${agentSelect(r.master,`data-droute="${i}" data-dfield="master"`,'Pick its master…')}</td>
-    <td><div class="chips">${(r.members||[]).map((m,j)=>`<span class="chip">${esc(folderLabel(m))}<button title="Remove" data-dunmember="${i}:${j}">✕</button></span>`).join('')}
-      ${agentSelect('',`data-daddmember="${i}"`,'+ add member')}</div></td>
-    <td><div class="kinds">${DKINDS.map(([k,l])=>`<label class="small"><input type="checkbox" data-dkind="${i}:${k}" ${!(r.kinds||[]).length||r.kinds.includes(k)?'checked':''}> ${l}</label>`).join('')}</div></td>
+    <td><div class="kinds">${(r.agents||[]).map((a,j)=>`<div class="addline small"><b>${esc(folderLabel(a.cwd))}</b>
+        <label class="small"><input type="checkbox" data-dflag="${i}:${j}:receives" ${a.receives?'checked':''}> Receives</label>
+        <label class="small"><input type="checkbox" data-dflag="${i}:${j}:sends" ${a.sends?'checked':''}> Sends</label>
+        <button class="ghost small" title="Remove" data-dunagent="${i}:${j}">✕</button></div>`).join('')}
+      ${agentSelect('',`data-daddagent="${i}"`,'+ add agent')}</div></td>
     <td style="white-space:nowrap"><button class="ghost small" data-dtest="${esc(r.channel_id)}" ${r.channel_id&&d.state==='online'?'':'disabled'}>Send a test</button> <button class="ghost small" data-dremove="${i}" title="Remove this channel">✕</button></td></tr>`).join('');
-  $('#dstep3b').innerHTML=`<p class="meta">The master gets your messages. To reach a member instead, start with its name and a colon: <span class="mono">storefront: how's the build?</span></p>
-    <table class="dmap"><thead><tr><th>Channel</th><th>Master</th><th>Members</th><th>Carries</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="mut small">No channels mapped yet.</td></tr>'}</tbody></table>
-    <p class="small mut" style="margin-top:6px">Limit a channel to one kind to make it a #tasks or #announcements channel: everything you post there becomes a task or an announcement. Elsewhere, start a post with <span class="mono">Task:</span> or <span class="mono">Announcement:</span>.</p>
+  $('#dstep3b').innerHTML=`<p class="meta">Your messages go to the first agent that receives. To reach another that receives, start with its name and a colon: <span class="mono">storefront: how's the build?</span> An agent that sends posts its messages and updates there; any agent answers you where you asked.</p>
+    <table class="dmap"><thead><tr><th>Channel</th><th>Agents</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="3" class="mut small">No channels mapped yet.</td></tr>'}</tbody></table>
+    <p class="small mut" style="margin-top:6px">Start a post with <span class="mono">Task:</span> to hand it over as a task, or <span class="mono">Announcement:</span> to tell the receiving agent's whole space.</p>
     <div class="addline" style="margin-top:8px"><button class="ghost" data-dact="addroute">+ Map a channel</button><button class="ghost" data-dact="refresh" title="Look for new servers and channels">↻ Refresh channels</button></div>
     <div class="addline" style="margin-top:12px"><label class="small mut">Direct messages to the bot go to</label>${agentSelect(dDraft.dm,'data-ddm','Nobody (ignored)')}</div>
     <div class="addline" style="margin-top:12px"><button data-dact="save">Save mapping</button><span class="small" id="dsaved"></span></div>`;
-  const reading=d.reads_messages?`<p class="meta">Everything you write in a mapped channel goes to its master. No @mention needed.</p>`
+  const reading=d.reads_messages?`<p class="meta">Everything you write in a mapped channel goes to its first receiving agent. No @mention needed.</p>`
     :d.message_content_switch?`<p class="meta">The Message Content switch is on in Discord, but the bot connected before it was. <button class="ghost small" data-dact="reconnect">Reconnect now</button></p>`
     :`<p class="meta">${d.message_content_switch===false?'<b>Discord says the Message Content switch is off.</b> ':''}@mention the bot each time, or DM it. To talk without @mentioning, turn on <b>Message Content Intent</b> on the <a href="${d.app_id?`https://discord.com/developers/applications/${esc(d.app_id)}/bot`:'https://discord.com/developers/applications'}" target="_blank" rel="noreferrer">Bot page ↗</a> (under Privileged Gateway Intents) and save. <button class="ghost small" data-dact="check">I turned it on</button></p>`;
   $('#dmore').innerHTML=`<h2>Talking to your agents</h2>${reading}
@@ -4568,27 +4555,26 @@ document.addEventListener('submit',async e=>{if(e.target.id!=='dtoken')return;e.
   if(r.error){renderDiscord();$('#dtokerr').textContent=r.error;return}dGuilds=null;dDraft=null;await loadDiscord()});
 document.addEventListener('change',e=>{const t=e.target;if(!dDraft)return;
   if(t.dataset.droute!==undefined){dDraft.routes[+t.dataset.droute][t.dataset.dfield]=t.value;renderDiscord()}
-  if(t.dataset.daddmember!==undefined&&t.value){const r=dDraft.routes[+t.dataset.daddmember];r.members=r.members||[];if(t.value!==r.master&&!r.members.includes(t.value))r.members.push(t.value);renderDiscord()}
+  if(t.dataset.daddagent!==undefined&&t.value){const r=dDraft.routes[+t.dataset.daddagent];r.agents=r.agents||[];
+    // The first agent added receives and sends; after that, one that only posts here is the likelier want.
+    if(!r.agents.some(a=>a.cwd===t.value))r.agents.push({cwd:t.value,receives:!r.agents.some(a=>a.receives),sends:true});renderDiscord()}
+  if(t.dataset.dflag){const [i,j,f]=t.dataset.dflag.split(':');dDraft.routes[+i].agents[+j][f]=t.checked;renderDiscord()}
   if(t.dataset.ddm!==undefined){dDraft.dm=t.value}
-  if(t.dataset.dkind){const [i,k]=t.dataset.dkind.split(':');const r=dDraft.routes[+i];
-    let ks=(r.kinds&&r.kinds.length?r.kinds:DKINDS.map(x=>x[0])).filter(x=>x!==k);if(t.checked)ks.push(k);
-    // A channel carries something: unticking the last kind leaves it ticked.
-    r.kinds=ks.length?DKINDS.map(x=>x[0]).filter(x=>ks.includes(x)):r.kinds;renderDiscord()}
   if(t.dataset.dopt){const v=t.type==='checkbox'?t.checked:Number(t.value);api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({[t.dataset.dopt]:v})}).then(()=>loadDiscord())}
   if(t.dataset.dbots!==undefined)api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({trusted_bots:t.value})}).then(()=>loadDiscord());
   if(t.dataset.dusers!==undefined)api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({allowed_users:t.value})}).then(()=>loadDiscord());
   if(t.dataset.dact==='enabled')api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({enabled:t.checked})}).then(()=>loadDiscord())});
 document.addEventListener('click',async e=>{const t=e.target.closest('button');if(!t||!dDraft&&!t.dataset.dact)return;
   if(t.dataset.dremove!==undefined){dDraft.routes.splice(+t.dataset.dremove,1);renderDiscord()}
-  if(t.dataset.dunmember){const [i,j]=t.dataset.dunmember.split(':').map(Number);dDraft.routes[i].members.splice(j,1);renderDiscord()}
+  if(t.dataset.dunagent){const [i,j]=t.dataset.dunagent.split(':').map(Number);dDraft.routes[i].agents.splice(j,1);renderDiscord()}
   if(t.dataset.dtest){const r=await post('/api/discord/test',{channel_id:t.dataset.dtest});t.textContent=r.error?'Failed':'Sent ✓';if(r.error)alert(r.error)}
   const a=t.dataset.dact;if(!a)return;
-  if(a==='addroute'){dDraft.routes.push({channel_id:'',master:'',members:[]});renderDiscord()}
+  if(a==='addroute'){dDraft.routes.push({channel_id:'',agents:[]});renderDiscord()}
   if(a==='refresh'){const r=await api('/api/discord/channels?fresh=1');dGuilds=r.guilds||[];renderDiscord()}
   if(a==='forget'&&confirm('Disconnect the Discord bot? The channel mapping is kept.')){await api('/api/discord',{method:'DELETE'});dGuilds=null;await loadDiscord()}
   if(a==='reconnect'){await post('/api/discord/reconnect');setTimeout(()=>loadDiscord(),2000)}
   if(a==='check')await loadDiscord(true);
-  if(a==='save'){const bad=dDraft.routes.find(r=>!r.channel_id||!r.master);if(bad){$('#dsaved').className='small err';$('#dsaved').textContent='Every row needs a channel and a master.';return}
+  if(a==='save'){const bad=dDraft.routes.find(r=>!r.channel_id||!(r.agents||[]).some(a=>a.receives||a.sends));if(bad){$('#dsaved').className='small err';$('#dsaved').textContent='Every row needs a channel and an agent that receives or sends.';return}
     await api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({routes:dDraft.routes,dm:dDraft.dm})});dState=null;dDraft=null;await loadDiscord();
     $('#dsaved').className='small ok';$('#dsaved').textContent='Saved'}});
 // Invited in another tab, or back from the Developer Portal: look again when this tab gets focus.
