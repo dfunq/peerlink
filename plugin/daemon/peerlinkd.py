@@ -1445,7 +1445,7 @@ def user_send(sender_rec, word, text, kind, parent_task, expects_reply, hops, op
     chans = [r for r in routes_for(sender_rec.get("cwd", "")) if r["channel_id"] != "dm" and carries(r, kind)] if discord.get("token") and discord_bot[0] else []
     if word.startswith("discord#"):
         chans = [r for r in chans if r["channel"].lower() == "#" + word.split("#", 1)[1].lstrip("#")]
-    if word.startswith("discord") and not chans:
+    if (word == "discord" or word.startswith("discord#")) and not chans:
         return 404, {"error": "this agent isn't mapped to that Discord channel; send it to \"user\" to put it in their Inbox, or map a channel under Channels"}
     channel = chans[0]["channel_id"] if chans else ""
     if kind != "task" and channel:
@@ -1742,7 +1742,8 @@ def send(body):
     if parent and parent.get("from") == "user":
         to = "user"
     word = to.strip().lower()
-    if sender_rec and (word in USER_ALIASES or (kind == "task" and word.startswith("discord") and not parent)):
+    # "discord" or "discord#channel", not an agent whose name starts with discord, like discord-voice.
+    if sender_rec and (word in USER_ALIASES or (kind == "task" and (word == "discord" or word.startswith("discord#")) and not parent)):
         return user_send(sender_rec, word, text, kind, parent_task, bool(body.get("expects_reply")), hops, options, files)
     out = send_discord(sender_rec, to, text, parent, hops, options, files, bool(body.get("expects_reply")))
     if out is not None:

@@ -5,3 +5,4 @@ __pycache__/
 plugin/.claude-plugin/types/
 .idea/
 .playwright-mcp/
+.jira-tickets.md
