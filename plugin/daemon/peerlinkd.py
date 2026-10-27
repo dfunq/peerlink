@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.30"
+VERSION = "0.8.31"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -1034,9 +1034,9 @@ def save_discord_files(d):
     return "\n\nAttached on Discord:\n" + "\n".join(lines)
 
 
-def queue_for_folder(cwd, msg):
-    """Deliver to the folder's live agent, or hold it for the next one there (adopt() hands it over)."""
-    agent = successor(cwd)
+def queue_for_folder(cwd, msg, prefer=None):
+    """Deliver to `prefer` or the folder's live agent, or hold it for the next one there (adopt() hands it over)."""
+    agent = prefer or successor(cwd)
     msg["to"] = agent["id"] if agent else f"folder:{cwd}"
     msg["to_name"] = display_name(agent) if agent else folder_name(cwd)
     inboxes.setdefault(msg["to"], []).append(msg)
@@ -1369,7 +1369,7 @@ def on_press(press):
         return on_spawn_press(press, decide_schedule, schedules)
     if press["custom_id"].startswith("pa:"):
         return on_clear_all_press(press)
-    if press["custom_id"] in ("pr:0", "pl:0"):  # "pl:0" from before 0.8.30; an agent's buttons are "pl:<message>:<n>"
+    if press["custom_id"] in ("pr:0", "pl:0"):  # "pl:0" from before 0.8.31; an agent's buttons are "pl:<message>:<n>"
         discordlink.answer_interaction(press["id"], press["token"], 7, {"components": []})
         return lift_limit(f"resumed on Discord by {press['author']}")
     if press["custom_id"].startswith("pk:"):
@@ -1405,7 +1405,7 @@ def on_press(press):
             "discord": {"channel_id": press["channel_id"], "message_id": (asked.get("discord_out") or {}).get("message_id", "")},
         }
         next_msg[0] += 1
-        queue_for_folder(asked.get("from_cwd", ""), msg)
+        queue_for_folder(asked.get("from_cwd", ""), msg, continuation(asked.get("from", ""), asked.get("from_name", ""), asked.get("from_cwd", "")))
     log("discord press", msg["id"], press["author"], "->", msg["to_name"], choice)
 
 
@@ -1756,10 +1756,11 @@ def send(body):
         # similar names in view it may guess the wrong one, and reply_to already says who.
         mine = {sender, *([sender_rec.get("cwd")] if sender_rec and sender_rec.get("cwd") else [])}
         if parent and (parent.get("to") in mine or parent.get("to_cwd") in mine) and "@" not in str(parent.get("from", "")):
-            back = sessions.get(parent["from"])
-            if not (back and is_live(back)):
-                # The sender's conversation moved on (a /clear, a resume, a new session): its folder's live agent takes it.
-                back = successor(parent.get("from_cwd") or (back or {}).get("cwd", ""))
+            # The sender's conversation may have moved on (a /clear, a resume): the session that continued it takes the
+            # reply, else its folder's live agent. Two agents can share a folder, so the right one is found first.
+            back = continuation(parent["from"], parent.get("from_name", ""), parent.get("from_cwd", ""))
+            if not back:
+                back = successor(parent.get("from_cwd") or (sessions.get(parent["from"]) or {}).get("cwd", ""))
             if back:
                 target = back
             elif parent.get("from_cwd"):
@@ -2037,6 +2038,24 @@ def forward(body, hops, spaces):
             except Exception as err:
                 return 502, {"error": f"remote {p['remote']} refused: {err}"}
     return 404, {"error": f"no live peer '{to}'; call list_peers"}
+
+
+# A session id -> the one that continued it after a /clear or resume, so a reply to the old one finds the new.
+succeeded_by = {}
+
+
+def continuation(sid, name="", cwd=""):
+    """The live session a message for `sid` should reach now: sid itself, what it became after /clear (followed
+    through succeeded_by), or else the live agent of that name in its folder. None when none of those is live."""
+    seen = set()
+    while sid and sid not in seen:
+        seen.add(sid)
+        rec = sessions.get(sid)
+        if rec and is_live(rec):
+            return rec
+        sid = succeeded_by.get(sid)
+    named = [r for r in sessions.values() if is_live(r) and r.get("cwd") == cwd and name and display_name(r) == name]
+    return max(named, key=lambda r: r["last_seen"]) if named else None
 
 
 def successor(cwd):
@@ -3136,6 +3155,9 @@ class Handler(BaseHTTPRequestHandler):
                 if old and old != sid:
                     # The same conversation after a /clear or resume: keep its name, settings and messages.
                     prev = sessions.pop(old, None)
+                    succeeded_by[old] = sid
+                    for gone in list(succeeded_by)[:-500]:
+                        succeeded_by.pop(gone)
                     if old in config["sessions"] and sid not in config["sessions"]:
                         config["sessions"][sid] = dict(config["sessions"][old])
                         save_config()
