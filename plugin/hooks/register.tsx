@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.27'
+const DAEMON_VERSION = '0.8.28'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -102,8 +102,11 @@ let pending: PeerMessage[] = []
 let notices: PeerMessage[] = []
 // Set once the user has asked, from the web UI or Discord, for this session to end.
 let terminating = false
-// Set when the user asked, from the web UI, for this session's context to be cleared: run once the turn ends.
+// Set when this session's context is to be cleared, by the user (web UI, Discord) or the agent itself: run once the turn ends.
 let clearing = false
+let clearAskedBy = ''
+// What the agent wrote for itself before clearing its own context: the fresh context starts with it.
+let handoff = ''
 // Messages that reached the session, so one the daemon hands out again isn't shown twice; and acks it hasn't taken yet.
 const placed = new Set<string>()
 let unacked: string[] = []
@@ -603,7 +606,8 @@ async function runNext($: EngineInterface) {
 async function clearNow($: EngineInterface) {
   if (!clearing) return
   clearing = false
-  $.ui.toast('peerlink: clearing context, as asked from the web UI')
+  $.ui.toast(`peerlink: clearing context, as asked ${clearAskedBy || 'from the web UI'}`)
+  clearAskedBy = ''
   await $.command.run({ command: 'clear' }).catch(() => undefined)
 }
 
@@ -654,6 +658,7 @@ async function poll($: EngineInterface) {
   }
   if (res.data.clear) {
     clearing = true
+    clearAskedBy = `from ${res.data.clear.by ?? 'the web UI'}`
     $.ui.log(`peerlink: clearing this session's context${busy ? ' after the current turn' : ''}, as asked from ${res.data.clear.by ?? 'the user'}.`)
     if (!busy) await clearNow($)
   }
@@ -875,6 +880,12 @@ function guidanceText() {
 }
 
 // What the prompt.compose and prompt.context hooks would have sent, for a prompt, when they didn't run.
+function handoffBlock() {
+  const notes = handoff
+  handoff = ''
+  return notes ? `You cleared your context after your last task. The notes you left yourself:\n\n${notes}` : ''
+}
+
 async function skippedContext($: EngineInterface) {
   const out: string[] = []
   // A /clear or resume is a new conversation under a new id: it hasn't seen any of it.
@@ -895,6 +906,8 @@ async function skippedContext($: EngineInterface) {
       const threads = await openThreadsBlock($).catch(() => '')
       if (threads) out.push(threads)
     }
+    const notes = handoffBlock()
+    if (notes) out.push(notes)
     const heard = notices.splice(0)
     if (heard.length) {
       acked($, heard)
@@ -1310,6 +1323,22 @@ export const register: Register = on => {
       isDeferred: false,
     })
     await $.tool.register({
+      name: 'clear_context',
+      description:
+        "Clear your own context when you finish a task, so the next one starts small: every turn re-reads your whole context, and a large one drains your user's usage limit fast. First save anything worth keeping past this task to your memory (or the project's notes), then call this with a short handoff. Your context clears once this turn ends; messages waiting for you, your open tasks and your open threads all carry over.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          notes: {
+            type: 'string',
+            description: "What your fresh context should start with: work still in flight, what you promised and to whom, where things are (paths, branches, ticket ids). Brief; durable facts belong in memory",
+          },
+        },
+        required: ['notes'],
+      },
+      isDeferred: false,
+    })
+    await $.tool.register({
       name: 'set_summary',
       description:
         'Set the one-line summary peer agents see for you (what you are working on and what you can help with). Update it when your focus changes.',
@@ -1419,7 +1448,9 @@ export const register: Register = on => {
     const threads = await openThreadsBlock($).catch(() => '')
     const heard = notices.splice(0)
     if (heard.length) acked($, heard)
+    const notes = handoffBlock()
     const blocks = [
+      ...(notes ? [{ name: 'peerlink handoff', text: notes }] : []),
       ...(heard.length
         ? [{ name: 'peerlink announcements', text: `Announced to your space since your last turn (no reply expected):\n\n${heard.map(frame).join('\n\n')}` }]
         : []),
@@ -1513,6 +1544,16 @@ export const register: Register = on => {
   }).catch(daemonDown)
 
   on('tool.call', { tool: 'mcp__peerlink__report_issue' }, async ($, e) => text(await reportIssue($, String((e as any).what ?? ''), String((e as any).details ?? ''), (e as any).type === 'idea' ? 'idea' : 'bug')))
+
+  on('tool.call', { tool: 'mcp__peerlink__clear_context' }, async ($, e) => {
+    const notes = String((e as any).notes ?? '').trim()
+    if (!notes) return text('Not cleared: write notes first, so your fresh context knows what is still in flight.')
+    handoff = notes.slice(0, 4000)
+    clearing = true
+    clearAskedBy = 'by this agent, between tasks'
+    $.ui.log('peerlink: this agent asked to clear its context; it clears when this turn ends.')
+    return text('Your context clears when this turn ends, and your notes start the next one. End the turn now: one line on what you finished.')
+  })
 
   on('tool.call', { tool: 'mcp__peerlink__set_summary' }, async ($, e) => {
     manualSummaryAt = await $.clock.now()
