@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.31'
+const DAEMON_VERSION = '0.8.32'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -55,6 +55,7 @@ type ClientConfig = {
   roster_in_prompt: boolean
   auto_summary: boolean
   auto_reload?: boolean
+  clear_nudge_tokens?: number
   summary_model: string
 }
 
@@ -107,6 +108,10 @@ let clearing = false
 let clearAskedBy = ''
 // What the agent wrote for itself before clearing its own context: the fresh context starts with it.
 let handoff = ''
+// Past clear_nudge_tokens of context, the agent is asked once per conversation to save and clear: the ask rides on
+// its next prompt rather than starting a turn of its own.
+let nudge = ''
+let nudgedFor = ''
 // Messages that reached the session, so one the daemon hands out again isn't shown twice; and acks it hasn't taken yet.
 const placed = new Set<string>()
 let unacked: string[] = []
@@ -886,6 +891,21 @@ function handoffBlock() {
   return notes ? `You cleared your context after your last task. The notes you left yourself:\n\n${notes}` : ''
 }
 
+function nudgeBlock() {
+  const ask = nudge
+  nudge = ''
+  return ask
+}
+
+async function checkContextSize($: EngineInterface) {
+  const limit = cfg?.clear_nudge_tokens ?? 0
+  if (!limit || nudgedFor === sessionId) return
+  const tokens = (await $.session.usage().catch(() => undefined))?.context?.tokens
+  if (!tokens || tokens < limit) return
+  nudgedFor = sessionId
+  nudge = `Your context is at ${Math.round(tokens / 1000)}k tokens, past the ${Math.round(limit / 1000)}k your user set, and every turn re-reads all of it. At your next stopping point, which should be soon, save what's worth keeping to memory and call clear_context with a handoff.`
+}
+
 async function skippedContext($: EngineInterface) {
   const out: string[] = []
   // A /clear or resume is a new conversation under a new id: it hasn't seen any of it.
@@ -1418,6 +1438,7 @@ export const register: Register = on => {
       busy = false
       turnsSinceSummary++
       if (await limitCheck($, e.reason).catch(() => false)) return done
+      await checkContextSize($).catch(() => undefined)
       if (clearing) {
         midTurn = []
         void clearNow($)
@@ -1436,7 +1457,7 @@ export const register: Register = on => {
       void postSummary($, `${base}${base ? ' · ' : ''}now: ${task}`, 'seed').catch(() => {})
     }
     if (!sessionId || e.command) return next(e)
-    const add = [await rosterContext($), ...(await skippedContext($))].filter((t): t is string => !!t)
+    const add = [await rosterContext($), ...(await skippedContext($)), nudgeBlock()].filter((t): t is string => !!t)
     return next(add.length ? { ...e, context: [...(e.context ?? []), ...add] } : e)
   }).catch(($, e, next) => next(e))
 
