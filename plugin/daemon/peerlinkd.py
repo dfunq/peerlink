@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.39"
+VERSION = "0.8.40"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -760,7 +760,7 @@ def snapshot():
         issues = sorted(feedback.values(), key=lambda i: i["ts"])[-500:]
         sched = sorted(schedules.values(), key=lambda c: -c["created"])[:200]
         status["limit"] = limit_view()
-    return {"schedules": {"schedules": [{**c, "when_text": when_text(c)} for c in sched]},"status": status, "peers": {"host": HOSTNAME, "peers": peers, "leads": leads_view()}, "messages": {"messages": msgs},
+    return {"schedules": {"schedules": [sched_view(c) for c in sched]},"status": status, "peers": {"host": HOSTNAME, "peers": peers, "leads": leads_view()}, "messages": {"messages": msgs},
             "tasks": {"tasks": task_list}, "issues": {"issues": issues, "path": ISSUES_PATH}, "inbox": {"items": inbox_items(), "user": USER_NAME}}
 
 
@@ -2116,7 +2116,11 @@ def adopt(rec, old=None):
         other = sessions.get(sid)
         if sid != old and other and is_live(other):
             continue
-        box = [m for m in inboxes[sid] if sid == old or (m.get("to_cwd") and m.get("to_cwd") == rec.get("cwd"))]
+        if sid.startswith("agent:"):
+            # Held for an agent by name (a schedule's run): only that agent takes it, never another in its folder.
+            box = list(inboxes[sid]) if sid == f"agent:{display_name(rec).lower()}" else []
+        else:
+            box = [m for m in inboxes[sid] if sid == old or (m.get("to_cwd") and m.get("to_cwd") == rec.get("cwd"))]
         if not box:
             continue
         inboxes[sid] = [m for m in inboxes[sid] if m not in box]
@@ -2597,38 +2601,51 @@ def schedule_told(c, text):
         task_message(None, c["requester"]["cwd"], text)
 
 
-def create_schedule(body, by=None):
-    """A schedule from an agent (`by`) or from you (None). An agent's that may start one waits for your approval.
-    It goes to an agent by name (its folder's other agent, or a new one there, when it isn't running), or to a folder."""
-    now = time.time()
+def schedule_target(body, by=None):
+    """(folder, agent name) a schedule goes to, from `agent` (a running agent's name, or a folder: the web UI's one
+    field takes either) or `folder`; an agent's own schedule is its own. Raises ValueError saying what's wrong."""
     name = str(body.get("agent") or "").strip().lstrip("@")
     target = agent_named(name) if name else None
+    folder = body.get("folder")
     if name and target is None:
-        # The web UI's one field takes either: a name no agent has is a folder.
-        if body.get("folder") or not os.path.isdir(os.path.expanduser(name)):
-            return 400, {"error": f"{name} isn't a folder on this machine" if "/" in name else f"no running agent is called {name}; give its folder instead"}
-        body, name = {**body, "folder": name}, ""
-    if not name and not body.get("folder") and by:
-        target = by  # an agent's own schedule is its own
-    folder = os.path.abspath(os.path.expanduser(str((target or {}).get("cwd") if target else body.get("folder") or "")))
-    prompt = str(body.get("prompt") or "").strip()
-    cron, at = str(body.get("cron") or "").strip(), body.get("at")
-    start = body.get("start") is not False
+        if folder or not os.path.isdir(os.path.expanduser(name)):
+            raise ValueError(f"{name} isn't a folder on this machine" if "/" in name else f"no running agent is called {name}; give its folder instead")
+        folder, name = name, ""
+    if not name and not folder and by:
+        target = by
+    folder = os.path.abspath(os.path.expanduser(str(target.get("cwd") if target else folder or "")))
     if not os.path.isdir(folder):
-        return 400, {"error": f"{folder} isn't a folder on this machine"}
-    if not prompt:
-        return 400, {"error": "prompt is required: what the agent should do when it runs"}
+        raise ValueError(f"{folder} isn't a folder on this machine")
+    return folder, display_name(target) if target else ""
+
+
+def schedule_when(body, now):
+    """(cron, at, next run) from `cron` (a repeat) or `at` (once). Raises ValueError saying what's wrong."""
+    cron, at = str(body.get("cron") or "").strip(), body.get("at")
     if bool(cron) == bool(at):
-        return 400, {"error": "give either cron (a repeat, like 0 9 * * 1-5) or at (once, like 'in 2h' or 2026-10-25 09:00)"}
+        raise ValueError("give either cron (a repeat, like 0 9 * * 1-5) or at (once, like 'in 2h' or 2026-10-25 09:00)")
+    next_run = cron_next(cron, now) if cron else parse_at(at, now)
+    if not cron and next_run <= now:
+        raise ValueError("that time has passed")
+    return cron, None if cron else next_run, next_run
+
+
+def create_schedule(body, by=None):
+    """A schedule from an agent (`by`) or from you (None). An agent's that may start one waits for your approval.
+    It goes to an agent: that one wherever it runs, else a new one started in the folder it was last in."""
+    now = time.time()
+    prompt = str(body.get("prompt") or "").strip()
+    start = body.get("start") is not False
     try:
-        next_run = cron_next(cron, now) if cron else parse_at(at, now)
+        folder, name = schedule_target(body, by)
+        if not prompt:
+            raise ValueError("prompt is required: what the agent should do when it runs")
+        cron, at, next_run = schedule_when(body, now)
     except ValueError as err:
         return 400, {"error": str(err)}
-    if not cron and next_run <= now:
-        return 400, {"error": "that time has passed"}
     with lock:
         n = max([int(i[1:]) for i in schedules] or [0]) + 1
-        c = {"id": f"c{n}", "folder": folder, "agent": display_name(target) if target else "", "prompt": prompt[:8000], "cron": cron, "at": None if cron else next_run,
+        c = {"id": f"c{n}", "folder": folder, "agent": name, "prompt": prompt[:8000], "cron": cron, "at": at,
              "start": start, "next_run": next_run, "last_run": None, "runs": 0, "note": "",
              "requester": {"id": by["id"], "name": display_name(by), "cwd": by.get("cwd", "")} if by else {"name": USER_NAME, "cwd": ""},
              "status": "pending" if by and start else "active", "created": now, "updated": now}
@@ -2685,6 +2702,37 @@ def cancel_schedule(cid, by=None):
     return 200, {"schedule": dict(c)}
 
 
+def edit_schedule(cid, body):
+    """You change a schedule: who gets it, when, what it says, whether it starts an agent. Only what's given changes;
+    its state doesn't, so a pending one still waits for approval and an ended one for Enable again."""
+    now = time.time()
+    with lock:
+        c = schedules.get(cid)
+        if c is None:
+            return 404, {"error": f"no schedule {cid}"}
+        try:
+            if "agent" in body and str(body["agent"]).strip().lstrip("@").lower() == (c.get("agent") or "").lower():
+                folder, name = c["folder"], c["agent"]  # unchanged, whether or not it's running now
+            elif "agent" in body:
+                folder, name = schedule_target({"agent": body["agent"], "folder": "-"})
+            else:
+                folder, name = c["folder"], c.get("agent", "")
+            prompt = str(body["prompt"]).strip() if "prompt" in body else c["prompt"]
+            if not prompt:
+                raise ValueError("prompt is required: what the agent should do when it runs")
+            cron, at, next_run = schedule_when(body, now) if "cron" in body or "at" in body else (c["cron"], c.get("at"), c.get("next_run"))
+        except ValueError as err:
+            return 400, {"error": str(err)}
+        c.update({"folder": folder, "agent": name, "prompt": prompt[:8000], "cron": cron, "at": at,
+                  "start": body["start"] is not False if "start" in body else c["start"], "updated": now})
+        if c["status"] in ("active", "pending"):
+            c["next_run"] = next_run
+        schedule_told(c, f"Your user changed schedule {cid}: now {when_text(c)}, for {c['agent'] or tilde_path(folder)}.")
+        save_schedules()
+    log("schedule", cid, "edited:", c["agent"] or tilde_path(folder), when_text(c))
+    return 200, {"schedule": sched_view(c)}
+
+
 def enable_schedule(cid):
     """You turn a cancelled, denied or expired schedule back on; it runs at its next time, needing no approval."""
     now = time.time()
@@ -2705,6 +2753,19 @@ def enable_schedule(cid):
 
 
 starting = {}  # folder -> when the daemon last started an agent there for a schedule
+name_claims = {}  # folder -> names the next agents to register there take: ones started for a schedule
+
+
+def schedule_agent(c):
+    """The agent a schedule is for, wherever it runs; None when it isn't running."""
+    return agent_named(c.get("agent")) if c.get("agent") else None
+
+
+def sched_view(c):
+    """A schedule as the web UI shows it, with who'd get it if it ran now."""
+    with lock:
+        now = schedule_agent(c) or (None if c.get("agent") else successor(c["folder"]))
+    return {**c, "when_text": when_text(c), "goes_to": display_name(now) if now else "", "running": bool(schedule_agent(c))}
 
 
 def fire_schedule(c, now):
@@ -2715,13 +2776,21 @@ def fire_schedule(c, now):
            "text": f"Scheduled ({when_text(c)}; cancel with the schedule tool, id {c['id']}): {c['prompt']}",
            "expects_reply": False, "reply_to": None, "hops": 0, "status": "queued", "v": 2}
     next_msg[0] += 1
-    # Its agent when that one runs; else the folder's, or the next to start there.
-    own = agent_named(c.get("agent")) if c.get("agent") else None
+    own = schedule_agent(c)
+    if c.get("agent"):
+        # No folder on it: a gone session's messages go to its folder's other agents, and this one is for this agent only.
+        msg["to_cwd"] = ""
     if own:
+        c["folder"] = own.get("cwd") or c["folder"]  # where to start it next time it isn't running
         msg["to"], msg["to_name"] = own["id"], display_name(own)
         inboxes.setdefault(own["id"], []).append(msg)
         record(msg)
-    agent = own or queue_for_folder(c["folder"], msg)
+    elif c.get("agent"):
+        # Not running: it waits for that agent (an hour, as any queued message), never another in its folder.
+        msg["to"], msg["to_name"] = f"agent:{c['agent'].lower()}", c["agent"]
+        inboxes.setdefault(msg["to"], []).append(msg)
+        record(msg)
+    agent = own or (None if c.get("agent") else queue_for_folder(c["folder"], msg))
     c["last_run"], c["runs"], c["updated"] = now, c.get("runs", 0) + 1, now
     try:
         c["next_run"] = cron_next(c["cron"], now) if c["cron"] else None
@@ -2729,21 +2798,25 @@ def fire_schedule(c, now):
         c["next_run"] = None
     if not c["cron"]:
         c["status"] = "done"
-    c["note"] = (f"sent to {display_name(agent)}" + (f" ({c['agent']} wasn't running)" if c.get("agent") and agent is not own else "")) if agent else "no agent was running there"
+    c["note"] = f"sent to {display_name(agent)}" if agent else f"{c['agent']} wasn't running" if c.get("agent") else "no agent was running there"
     save_schedules()
     log("schedule", c["id"], "ran:", c["note"])
     # One start per folder at a time: a second run while the first agent is still starting waits for it.
     if agent or not c["start"] or now - starting.get(c["folder"], 0) < 120:
         return None
     starting[c["folder"]] = now
+    if c.get("agent"):
+        name_claims.setdefault(c["folder"], []).append(c["agent"])
     return c
 
 
 def start_for_schedule(c):
     how, err = launch({"dir": c["folder"], "id": c["id"]})
     with lock:
-        c["note"] = f"started an agent {how}" if how else f"couldn't start an agent: {err}"
+        c["note"] = f"started {c.get('agent') or 'an agent'} {how}" if how else f"couldn't start {c.get('agent') or 'an agent'}: {err}"
         if err:
+            if c.get("agent") and c["agent"] in name_claims.get(c["folder"], []):
+                name_claims[c["folder"]].remove(c["agent"])
             schedule_told(c, f"Schedule {c['id']} ran, but no agent was running in {tilde_path(c['folder'])} and one couldn't start: {err}. The prompt waits there for an hour.")
         save_schedules()
     log("schedule", c["id"], c["note"])
@@ -3229,6 +3302,10 @@ class Handler(BaseHTTPRequestHandler):
                 if b.get("name") and not rec.get("name"):
                     # A folder keeps the name it was given: a new session there (a restart, a resume) is still "vault".
                     given = (config.get("folder_names") or {}).get(b.get("cwd") or "")
+                    # One the daemon started for a schedule comes up as the agent the schedule is for.
+                    claims = name_claims.get(b.get("cwd") or "")
+                    if claims and not b.get("succeeds"):
+                        given = claims.pop(0)
                     rec["name"] = unique_name(given or b["name"], sid)
                 for k in ("cwd", "repo", "branch", "summary", "model", "plugin", "pid"):
                     if b.get(k) is not None:
@@ -3359,7 +3436,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(code, out)
         if rest == ["schedules"] and method == "GET":
             with lock:
-                return self.reply(200, {"schedules": [{**c, "when_text": when_text(c)} for c in sorted(schedules.values(), key=lambda c: -c["created"])]})
+                return self.reply(200, {"schedules": [sched_view(c) for c in sorted(schedules.values(), key=lambda c: -c["created"])]})
         if rest == ["schedules"] and method == "POST":
             b = self.body()
             if browser and not self.key_ok():
@@ -3371,6 +3448,11 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(403, {"error": "unknown agent; register again"})
                 code, out = create_schedule(b, by)
             return self.reply(code, out)
+        # Only you edit a schedule, from the web UI: an agent cancels its own and asks for a new one.
+        if len(rest) == 2 and rest[0] == "schedules" and method == "POST":
+            if not browser:
+                return self.reply(403, {"error": "only your user edits a schedule, from the web UI; cancel it and ask for a new one"})
+            return self.reply(*edit_schedule(rest[1], self.body()))
         # Only you turn a schedule back on: an agent asks for a new one.
         if len(rest) == 3 and rest[0] == "schedules" and rest[2] == "enable" and method == "POST":
             if not browser:
@@ -4009,11 +4091,11 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <div id="spacelist"></div>
 </section>
 
-<section id="schedules"><h1>Schedules</h1><p class="lead">Prompts the daemon sends an agent at a time or on a repeat, with no terminal open. When that agent isn't running, another in its folder gets it, or a new one starts there. Agents add them with their <span class="mono">schedule</span> tool; one that may start an agent waits for you in the Inbox.</p>
-<form class="card" id="schedform"><div class="addline"><input name="target" class="grow mono" type="text" placeholder="Agent, or a folder like ~/Repos/acme" list="schedfolders"><datalist id="schedfolders"></datalist>
+<section id="schedules"><h1>Schedules</h1><p class="lead">Prompts the daemon sends an agent at a time or on a repeat, with no terminal open. A schedule is for one agent: it goes to that agent wherever it runs, never to another in its folder. When it isn't running, the run waits for it, or the agent is started again in its folder. Agents add them with their <span class="mono">schedule</span> tool; one that may start an agent waits for your approval. Edit any of them here.</p>
+<form class="card" id="schedform"><div class="addline"><select name="target" class="grow" id="schedagents" required></select>
 <input name="when" type="text" placeholder="0 9 * * 1-5, or in 2h" title="A cron (minute hour day month weekday) repeats; 'in 30m', 'in 2h', 'in 1d' or 2026-10-25 09:00 runs once" style="width:190px"></div>
 <textarea name="prompt" rows="2" placeholder="What the agent should do when it runs" style="margin-top:8px;width:100%"></textarea>
-<div class="addline" style="margin-top:8px"><label class="check small"><input type="checkbox" name="start" checked> Start an agent when none is running</label><button type="submit">Add schedule</button><span class="small" id="schedmsg"></span></div></form>
+<div class="addline" style="margin-top:8px"><label class="check small"><input type="checkbox" name="start" checked> Start it when it isn&#39;t running</label><button type="submit">Add schedule</button><span class="small" id="schedmsg"></span></div></form>
 <div id="schedlist" style="margin-top:12px;display:flex;flex-direction:column;gap:8px"></div></section>
 
 <section id="messages"><h1>Messages</h1><p class="lead">Recent messages between agents, newest first. Click one to read it all.</p>
@@ -4318,18 +4400,45 @@ async function refresh(force,snap){
   $('#spacelist').innerHTML=all((n,seen)=>{const u=sunit(n,seen);return u?`<div class="chart"><div class="orow" style="justify-content:flex-start">${u}</div></div>`:''})+dflt;
   livePeers=p.peers;lastMsgs=m.messages;renderMessages(lastMsgs);renderTasks();renderFeedback();renderInbox();renderSchedules();
 }
-// Schedules: what's active or waiting first, then the rest, newest first.
-let allSched=[];
-function renderSchedules(){
+// Schedules: what's active or waiting first; the ones that ended fold away. Each says who'd get it now.
+let allSched=[],schedEdit='';
+function renderSchedules(force){
   const live=c=>c.status==='active'||c.status==='pending';
   $('#n-sched').textContent=allSched.filter(live).length||'';
-  $('#schedfolders').innerHTML=livePeers.filter(x=>!x.remote).map(x=>`<option value="${esc(x.name)}">${esc(tilde(x.cwd))}</option>`).join('')+[...new Set(livePeers.filter(x=>!x.remote).map(x=>x.cwd))].map(d=>`<option value="${esc(tilde(d))}">`).join('');
+  // Pick an agent, by name: several can share a folder.
+  const agents=livePeers.filter(x=>!x.remote).sort((a,b)=>a.name.localeCompare(b.name));
+  const opts=(cur,extra='')=>extra+agents.map(x=>`<option value="${esc(x.name)}" ${x.name===cur?'selected':''}>${esc(x.name)} · ${esc(tilde(x.cwd))}</option>`).join('');
+  const pick=$('#schedagents');if(document.activeElement!==pick){const was=pick.value;pick.innerHTML=opts(was,'<option value="">Pick an agent</option>')}
+  // Never redraw a schedule under someone editing it.
+  if(schedEdit&&!force)return;
   const when=t=>t?new Date(t*1000).toLocaleString([], {weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):'';
-  const rows=[...allSched.filter(live),...allSched.filter(c=>!live(c))];
-  $('#schedlist').innerHTML=rows.map(c=>`<div class="card"><div class="addline"><b>${esc(c.id)}</b><span class="chip">${esc(c.status)}</span><span>${esc(c.when_text)}</span>${c.agent?`<b>${esc(c.agent)}</b>`:''}<span class="mono mut">${esc(tilde(c.folder))}</span>
-    <span style="margin-left:auto" class="small mut">${c.next_run&&live(c)?'next '+when(c.next_run):''}</span>${c.status==='pending'?`<button class="ghost small" data-schedok="${esc(c.id)}" data-act="approve">Approve</button><button class="ghost small" data-schedok="${esc(c.id)}" data-act="deny">Deny</button>`:live(c)?`<button class="ghost small danger" data-schedcancel="${esc(c.id)}">Cancel</button>`:['cancelled','denied','expired'].includes(c.status)?`<button class="ghost small" data-schedon="${esc(c.id)}">Enable again</button>`:''}</div>
+  const local=t=>{const d=new Date(t*1000),z=n=>String(n).padStart(2,'0');return `${d.getFullYear()}-${z(d.getMonth()+1)}-${z(d.getDate())} ${z(d.getHours())}:${z(d.getMinutes())}`};
+  const btn=(attr,id,label,cls='')=>`<button class="ghost small ${cls}" ${attr}="${esc(id)}">${label}</button>`;
+  const actions=c=>btn('data-schededit',c.id,'Edit')+(c.status==='pending'?`<button class="ghost small" data-schedok="${esc(c.id)}" data-act="approve">Approve</button><button class="ghost small" data-schedok="${esc(c.id)}" data-act="deny">Deny</button>`
+    :c.status==='active'?btn('data-schedcancel',c.id,'Cancel','danger'):['cancelled','denied','expired'].includes(c.status)?btn('data-schedon',c.id,'Enable again'):'');
+  // Who gets it: the agent named while it runs in the folder, else the folder's agent, else a new one or none.
+  const route=c=>c.goes_to?`goes to <b>${esc(c.goes_to)}</b>`
+    :c.agent?`<span style="color:var(--warn)">${esc(c.agent)} isn't running</span>: ${c.start?`starts it again in ${esc(tilde(c.folder))}`:'the run waits an hour for it'}`
+    :c.start?`no agent running there: starts one`:`no agent running there: waits for one`;
+  const card=c=>schedEdit===c.id?`<form class="card" data-schedform="${esc(c.id)}"><div class="addline"><b>${esc(c.id)}</b><span class="chip">${esc(c.status)}</span>
+      <select name="target" class="grow">${opts(c.agent,c.agent&&!agents.some(x=>x.name===c.agent)?`<option value="${esc(c.agent)}" selected>${esc(c.agent)} (not running)</option>`:!c.agent?`<option value="" selected>Any agent in ${esc(tilde(c.folder))}</option>`:'')}</select>
+      <input name="when" type="text" value="${esc(c.cron||local(c.at))}" placeholder="0 9 * * 1-5, or in 2h" style="width:190px"></div>
+    <textarea name="prompt" rows="4" style="margin-top:8px;width:100%">${esc(c.prompt)}</textarea>
+    <div class="addline" style="margin-top:8px"><label class="check small"><input type="checkbox" name="start" ${c.start?'checked':''}> Start it when it isn&#39;t running</label>
+      <button type="submit">Save</button><button type="button" class="ghost" data-schededit="">Cancel</button><span class="small err" data-schedmsg></span></div></form>`
+    :`<div class="card"><div class="addline"><b>${esc(c.id)}</b><span class="chip">${esc(c.status)}</span><span>${esc(c.when_text)}</span><b>${esc(c.agent||tilde(c.folder))}</b>${c.agent?`<span class="mono mut">${esc(tilde(c.folder))}</span>`:''}
+      <span style="margin-left:auto" class="small mut">${c.next_run&&live(c)?'next '+when(c.next_run):''}</span>${actions(c)}</div>
     <div style="margin-top:6px;white-space:pre-wrap">${esc(c.prompt)}</div>
-    <div class="small mut" style="margin-top:4px">by ${esc(c.requester?.name||'you')}${c.start?' · starts an agent when none is running':' · waits for an agent'}${c.runs?` · ran ${c.runs}×, last ${when(c.last_run)}${c.note?': '+esc(c.note):''}`:''}${c.status==='pending'?' · waiting for your approval':''}</div></div>`).join('')||'<div class="empty">No schedules yet.</div>'}
+    <div class="small mut" style="margin-top:4px">${live(c)?route(c)+' · ':''}by ${esc(c.requester?.name||'you')}${c.runs?` · ran ${c.runs}×, last ${when(c.last_run)}${c.note?': '+esc(c.note):''}`:''}${c.status==='pending'?' · waiting for your approval':''}</div></div>`;
+  const on=allSched.filter(live),ended=allSched.filter(c=>!live(c));
+  $('#schedlist').innerHTML=(on.map(card).join('')||'<div class="empty">No schedules running.</div>')
+    +(ended.length?`<details ${ended.some(c=>c.id===schedEdit)?'open':''}><summary class="small mut" style="cursor:pointer;margin-top:4px">Ended (${ended.length})</summary><div style="display:flex;flex-direction:column;gap:8px;margin-top:8px">${ended.map(card).join('')}</div></details>`:'')}
+document.addEventListener('click',e=>{const b=e.target.closest('[data-schededit]');if(!b)return;schedEdit=b.dataset.schededit;renderSchedules(true)});
+document.addEventListener('submit',async e=>{const f=e.target.closest('[data-schedform]');if(!f)return;e.preventDefault();const v=n=>f.elements[n].value.trim();
+  const w=v('when'),cron=/^\S+\s+\S+\s+\S+\s+\S+\s+\S+$/.test(w)&&!/^in\s/i.test(w)&&!/^\d{4}-/.test(w);
+  const r=await post(`/api/schedules/${encodeURIComponent(f.dataset.schedform)}`,{...(v('target')?{agent:v('target')}:{}),prompt:v('prompt'),...(cron?{cron:w}:{at:w}),start:f.elements.start.checked});
+  if(r.error){f.querySelector('[data-schedmsg]').textContent=r.error;return}
+  schedEdit='';refresh(true)});
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-schedok]');if(!b)return;
   const r=await post('/api/inbox',{kind:'approval',id:b.dataset.schedok,action:b.dataset.act});if(r.error)alert(r.error);refresh(true)});
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-schedon]');if(!b)return;
@@ -4492,7 +4601,7 @@ function panelTasks(x){
   const mine=allTasks.filter(t=>t.owner_cwd&&t.owner_cwd===x.cwd),asked=allTasks.filter(t=>t.requester?.id===x.id||(x.cwd&&t.requester?.cwd===x.cwd));
   const sec=(title,list,none)=>`<div class="k small">${title}</div>${list.length?byLive(list).map(t=>taskRow(t,false)).join(''):`<div class="small mut">${none}</div>`}`;
   // Its schedules: named for it, or for its folder with no agent named.
-  const sched=allSched.filter(c=>(c.status==='active'||c.status==='pending')&&(c.agent?c.agent===x.name:c.folder===x.cwd));
+  const sched=allSched.filter(c=>(c.status==='active'||c.status==='pending')&&(c.goes_to?c.goes_to===x.name:c.folder===x.cwd));
   const srow=c=>`<div class="small" style="margin:4px 0"><b>${esc(c.id)}</b> ${esc(c.when_text)}${c.agent?'':' <span class="mut">(its folder)</span>'}: ${esc(c.prompt.length>120?c.prompt.slice(0,119)+'…':c.prompt)}${c.status==='pending'?` <span class="mut">waiting for your approval</span> <button class="ghost small" data-schedok="${esc(c.id)}" data-act="approve">Approve</button><button class="ghost small" data-schedok="${esc(c.id)}" data-act="deny">Deny</button>`:''}</div>`;
   return `<div class="ptasks">${sec('Owns',mine,'No tasks for this agent.')}${sec('Asked for',asked,'It hasn\'t handed out any tasks.')}<div class="k small">Schedules</div>${sched.length?sched.map(srow).join(''):'<div class="small mut">None. Add one on the Schedules page.</div>'}</div>`}
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-ptab],[data-tact]');if(!b)return;
