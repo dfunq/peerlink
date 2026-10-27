@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.8.28', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.8.29', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (state.forget && path.endsWith('/heartbeat') && 'busy' in body) {
       state.forget = false
       return { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'unknown agent; register again' }) } }
@@ -45,7 +45,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
   return { posted, peers, summaries, state }
 }
 
-function engine(on: any, { turns = 0, readme = '', claudeMd = '', installed = '', commits = '', fingerprint = '', transcripts = [] as { name: string; title: string; ageMs: number }[] } = {}) {
+function engine(on: any, { turns = 0, percent = 85, readme = '', claudeMd = '', installed = '', commits = '', fingerprint = '', transcripts = [] as { name: string; title: string; ageMs: number }[] } = {}) {
   const clock = mock.clock(on, { now: 1_000_000 })
   const calls = { model: 0 }
   const ids = { current: 'me-session' }
@@ -70,7 +70,7 @@ function engine(on: any, { turns = 0, readme = '', claudeMd = '', installed = ''
   on('session.model', () => ({ value: 'opus' }))
   // The account's rate-limit windows, as the last API response reported them.
   const limits: { kind: string; percentUsed: number; resetsAt?: string }[] = []
-  on('session.usage', () => ({ value: { context: { window: 200000, tokens: 170000, percent: 85 }, rateLimits: limits } }))
+  on('session.usage', () => ({ value: { context: { window: 200000, tokens: percent * 2000, percent }, rateLimits: limits } }))
   on('session.turns', () => ({ value: turns }))
   on('session.messages', () => ({ value: [{ role: 'user', text: 'build the invoice page', toolUses: [] }] }))
   // What git says about the agent's folder: dirs are git-dir, common dir and top level; null outside a repo.
@@ -669,7 +669,7 @@ test('a clear asked from the web UI runs /clear when the agent is idle', async (
 })
 
 test('an agent clears its own context between tasks, and its notes start the fresh one', async ($, on) => {
-  engine(on)
+  engine(on, { turns: 4 })
   const ran: string[] = []
   on('command.run', { command: 'clear' }, () => {
     ran.push('clear')
@@ -690,6 +690,15 @@ test('an agent clears its own context between tasks, and its notes start the fre
   expect(out.blocks.find((b: any) => b.name === 'peerlink handoff').text).toContain('SKY-32 server half on feat/pg-053')
   const again: any = await $.prompt.context({ blocks: [] } as any)
   expect(again.blocks.some((b: any) => b.name === 'peerlink handoff')).toBe(false)
+})
+
+test('a context cleared moments ago is not cleared again', async ($, on) => {
+  engine(on, { turns: 1, percent: 4 })
+  fakeDaemon(on)
+  await $.session.start(START)
+  await settle()
+  const res: any = await $.tool.call({ tool: 'mcp__peerlink__clear_context', notes: 'nothing in flight' } as any)
+  expect(JSON.stringify(res)).toContain('just cleared')
 })
 
 test('commands asked for on Discord run one at a time, each when the agent is idle', async ($, on) => {
@@ -729,7 +738,7 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.8.28 · daemon 0.8.28 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.8.29 · daemon 0.8.29 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the space is listed once', async ($, on) => {
@@ -762,7 +771,7 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.8.28')
+  expect(reg.plugin).toBe('0.8.29')
 })
 
 test('an agent registers again under the folder it started in, wherever the host has moved its root since', async ($, on) => {
@@ -841,7 +850,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.8.29', true], ['0.8.28', false]] as const)
+for (const [installed, reloads] of [['0.8.30', true], ['0.8.29', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     fakeDaemon(on)
