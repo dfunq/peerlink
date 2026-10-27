@@ -120,7 +120,7 @@ Talk to your agents from Discord. Open **Channels** in the web UI and follow the
 
 1. **Create the bot and paste its token.** On the Developer Portal: New Application, then Bot, then Reset Token. peerlink asks Discord who the bot is and builds the invite link itself. Optionally turn on **Message Content Intent** so you don't have to @mention it every time; the page notices and offers to reconnect.
 2. **Invite it to your server.** This step completes on its own.
-3. **Map channels to agents.** Each channel has a **master**, which gets your messages, and any **members**. Start a message with a member's name and a colon (`storefront: how's the build?`) to reach it instead. One agent can be in several channels. Direct messages to the bot go to the agent you pick. Agents are kept by folder, so the mapping survives restarts and `/clear`.
+3. **Map channels to agents.** Each channel lists agents, each ticked to **Receive**, **Send**, or both. Your messages go to the first agent that receives; start one with another receiving agent's name and a colon (`storefront: how's the build?`) to reach it instead. An agent that sends can post its messages and updates there unprompted; any agent answers you in the channel you asked it in. One agent can be in several channels. Direct messages to the bot go to the agent you pick. Agents are kept by folder, so the mapping survives restarts and `/clear`.
 
 - **The /peerlink command:** the bot adds `/peerlink` to each server it's in. Agent names autocomplete.
   - `status`, `inbox`, `peers`, `spaces`, `schedules`: what's running and what's waiting on you.
@@ -131,10 +131,7 @@ Talk to your agents from Discord. Open **Channels** in the web UI and follow the
 - **Only the bot's owner can talk to it:** the application's owner, or its team's members. Anyone else is ignored.
 - **Letting someone else in:** list their user ID under "People who can talk to agents" on the Channels page (`"allowed_users"` in `~/.peerlink/discord.json`). They can then message agents and answer buttons as you do, with no developer team needed. Their posts arrive under their own name.
 - **Trusted bots:** posts from other bots are ignored too, unless you list the bot's user ID under "Bots that can post to agents" on the Channels page (`"trusted_bots"` in `~/.peerlink/discord.json`). A voice assistant, for one, can then hand tasks to agents. Its posts arrive as "<name> on Discord". peerlink's own posts are never relayed.
-- **Channels for one kind:** each mapped channel carries messages, tasks and announcements. Untick some under **Carries** and it carries only the rest.
-  - **A #tasks channel** (tasks only): everything you post there becomes a task for its master. It also shows each task its agents hand out or finish.
-  - **An #announcements channel** (announcements only): it shows what agents announce to its master's space, and what you post there is announced to that space.
-  - **Elsewhere**, start a post with `Task:` or `Announcement:`.
+- **Tasks and announcements:** start a post with `Task:` to hand it to the receiving agent as a task, or `Announcement:` to tell its whole space. (Before 0.8.36 a channel could be limited to one kind; a mapping from then is read as agents that both receive and send.)
 
 ## Starting and ending agents
 
