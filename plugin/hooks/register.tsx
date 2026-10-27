@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.34'
+const DAEMON_VERSION = '0.8.35'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -1536,9 +1536,14 @@ export const register: Register = on => {
     if (action === 'list') {
       const res = await call($, 'GET', '/api/schedules')
       if (!res.ok) return text(`Couldn't list them: ${res.data.error ?? res.status}`)
-      const live = (res.data.schedules as any[]).filter(c => c.status === 'active' || c.status === 'pending')
-      if (!live.length) return text('No schedules are active.')
-      return text(live.map(c => `- ${c.id} ${c.status} · ${c.when_text} · ${c.agent ? `${c.agent} ` : ''}${c.folder}${c.next_run ? ` · next ${new Date(c.next_run * 1000).toLocaleString()}` : ''} · ${clip(c.prompt, 100)}`).join('\n'))
+      const all = res.data.schedules as any[]
+      const live = all.filter(c => c.status === 'active' || c.status === 'pending')
+      // Ones that stopped this past week stay in view, so one that expired or was cancelled doesn't just vanish.
+      const ended = all.filter(c => !live.includes(c) && Date.now() / 1000 - (c.updated ?? 0) < 7 * 86400)
+      const row = (c: any) => `- ${c.id} ${c.status} · ${c.when_text} · ${c.agent ? `${c.agent} ` : ''}${c.folder}`
+      const lines = live.map(c => `${row(c)}${c.next_run ? ` · next ${new Date(c.next_run * 1000).toLocaleString()}` : ''} · ${clip(c.prompt, 100)}`)
+      if (ended.length) lines.push('Ended this past week:', ...ended.map(c => `${row(c)} ${new Date(c.updated * 1000).toLocaleString()}${c.status === 'expired' ? ' (never approved)' : ''} · ${clip(c.prompt, 100)}`))
+      return text(lines.length ? (live.length ? '' : 'No schedules are active.\n') + lines.join('\n') : 'No schedules are active.')
     }
     if (action === 'cancel') {
       const res = await call($, 'POST', `/api/schedules/${encodeURIComponent(String(input.id ?? '').trim())}/cancel`, { by: sessionId })

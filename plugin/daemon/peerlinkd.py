@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.34"
+VERSION = "0.8.35"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -953,6 +953,17 @@ def routes_for(cwd):
     if discord.get("dm") == cwd:
         out.append({"channel_id": "dm", "channel": "direct messages", "master": True})
     return out
+
+
+def approval_channel(rec):
+    """The Discord channel to ask your approval in for an agent: one its folder is in, else its space lead's, else
+    the parent space lead's. '' when none of them has one, and the request waits in the Inbox only."""
+    space = space_of(rec)[0]
+    for cwd in (rec.get("cwd", ""), space_lead(space)[0], space_lead(space_parent(space))[0] if space_parent(space) else ""):
+        chans = [r for r in routes_for(cwd) if r["channel_id"] != "dm" and carries(r, "message")] if cwd else []
+        if chans:
+            return chans[0]["channel_id"]
+    return ""
 
 
 KINDS = ("message", "task", "announcement")
@@ -2364,15 +2375,15 @@ def request_spawn(body):
               "status": "pending", "created": time.time(), "updated": time.time(), "note": ""}
         spawns[sp["id"]] = sp
         save_spawns()
-        chans = [r for r in routes_for(by.get("cwd", "")) if r["channel_id"] != "dm" and carries(r, "message")]
+        channel = approval_channel(by)
     log("spawn asked", sp["id"], sp["requester"]["name"], folder)
-    if chans and discord.get("token") and discord_bot[0]:
+    if channel and discord.get("token") and discord_bot[0]:
         try:
-            sent = discordlink.post(discord["token"], chans[0]["channel_id"],
+            sent = discordlink.post(discord["token"], channel,
                                     f"**{sp['requester']['name']}** asks to start an agent in `{tilde_path(folder)}` (space {sp['space']}): {purpose}\nIts first prompt: {prompt[:600]}",
                                     None, discordlink.buttons(["Approve", "Deny"], f"ps:{sp['id']}"))
             with lock:
-                sp["discord_out"] = {"channel_id": chans[0]["channel_id"], "message_id": str((sent[-1] or {}).get("id", "")) if sent else ""}
+                sp["discord_out"] = {"channel_id": channel, "message_id": str((sent[-1] or {}).get("id", "")) if sent else ""}
                 save_spawns()
         except discordlink.DiscordError as err:
             log("discord", "spawn post failed:", err)
@@ -2617,15 +2628,15 @@ def create_schedule(body, by=None):
              "status": "pending" if by and start else "active", "created": now, "updated": now}
         schedules[c["id"]] = c
         save_schedules()
-        chans = [r for r in routes_for(by.get("cwd", "")) if r["channel_id"] != "dm" and carries(r, "message")] if by else []
+        channel = approval_channel(by) if by else ""
     log("schedule", c["id"], c["status"], c["agent"] or tilde_path(folder), when_text(c))
-    if c["status"] == "pending" and chans and discord.get("token") and discord_bot[0]:
+    if c["status"] == "pending" and channel and discord.get("token") and discord_bot[0]:
         try:
-            sent = discordlink.post(discord["token"], chans[0]["channel_id"],
+            sent = discordlink.post(discord["token"], channel,
                                     f"**{c['requester']['name']}** asks to schedule `{tilde_path(folder)}` ({when_text(c)}), starting an agent there when none is running: {prompt[:600]}",
                                     None, discordlink.buttons(["Approve", "Deny"], f"pc:{c['id']}"))
             with lock:
-                c["discord_out"] = {"channel_id": chans[0]["channel_id"], "message_id": str((sent[-1] or {}).get("id", "")) if sent else ""}
+                c["discord_out"] = {"channel_id": channel, "message_id": str((sent[-1] or {}).get("id", "")) if sent else ""}
                 save_schedules()
         except discordlink.DiscordError as err:
             log("discord", "schedule post failed:", err)
@@ -2835,6 +2846,29 @@ def hard_stop(sid, grace=60):
     log("terminate", sid, "process", pid, "ended")
 
 
+def remind(item):
+    """Halfway to expiring, an approval nobody has answered is raised again under its Discord post. Returns when."""
+    out = item.get("discord_out") or {}
+    if out.get("message_id"):
+        post_async([(out["channel_id"], f"Still waiting for your approval: {item['id']} expires in {SPAWN_TTL_S // 7200} hours.", out["message_id"])])
+    log("approval", item["id"], "reminded")
+    return time.time()
+
+
+def lapse(item, what, told):
+    """An approval that expired unanswered: logged, its Discord buttons closed with a note under them, and its
+    space lead told as well as the agent that asked, which may be gone by now. Called with the lock held."""
+    req = item["requester"]
+    log("approval", item["id"], "expired", req.get("name", ""), what)
+    out = item.get("discord_out") or {}
+    if out.get("message_id"):
+        close_buttons(item)
+        post_async([(out["channel_id"], f"Expired: nobody approved {item['id']} within a day. {req.get('name') or 'The agent'} can ask again.", out["message_id"])])
+    lead = space_lead(space_of({"id": req.get("id", ""), "cwd": req.get("cwd", "")})[0])[0] if req.get("cwd") else ""
+    if lead and lead != req.get("cwd"):
+        told({"id": item["id"], "requester": {"cwd": lead}}, f"{req.get('name') or 'An agent'}'s request {item['id']} to {what} expired: your user didn't approve it within a day. It's off unless someone asks again.")
+
+
 def reaper():
     while True:
         time.sleep(10)
@@ -2849,13 +2883,25 @@ def reap():
     with lock:
         for sid in [s for s, r in sessions.items() if now - r["last_seen"] > config["peer_ttl_s"] * 10]:
             session_gone(sid)
-        for sp in [x for x in spawns.values() if x["status"] == "pending" and now - x["created"] > SPAWN_TTL_S]:
-            sp["status"], sp["updated"] = "expired", now
-            spawn_told(sp, f"Your request {sp['id']} to start an agent in {sp['dir']} expired: your user didn't answer within a day.")
+        for sp in [x for x in spawns.values() if x["status"] == "pending"]:
+            if now - sp["created"] > SPAWN_TTL_S:
+                sp["status"], sp["updated"] = "expired", now
+                spawn_told(sp, f"Your request {sp['id']} to start an agent in {sp['dir']} expired: your user didn't answer within a day.")
+                lapse(sp, f"start an agent in {tilde_path(sp['dir'])}", spawn_told)
+            elif now - sp["created"] > SPAWN_TTL_S / 2 and not sp.get("reminded"):
+                sp["reminded"] = remind(sp)
+            else:
+                continue
             save_spawns()
-        for c in [x for x in schedules.values() if x["status"] == "pending" and now - x["created"] > SPAWN_TTL_S]:
-            c["status"], c["updated"] = "expired", now
-            schedule_told(c, f"Your schedule {c['id']} expired: your user didn't approve it within a day.")
+        for c in [x for x in schedules.values() if x["status"] == "pending"]:
+            if now - c["created"] > SPAWN_TTL_S:
+                c["status"], c["updated"], c["next_run"] = "expired", now, None
+                schedule_told(c, f"Your schedule {c['id']} expired: your user didn't approve it within a day.")
+                lapse(c, f"schedule {tilde_path(c['folder'])} ({when_text(c)})", schedule_told)
+            elif now - c["created"] > SPAWN_TTL_S / 2 and not c.get("reminded"):
+                c["reminded"] = remind(c)
+            else:
+                continue
             save_schedules()
         lapsed = usage_limit and now >= (usage_limit.get("resets_at") or usage_limit["since"] + LIMIT_FALLBACK_S)
         # While the limit holds, a due schedule waits: it runs once the limit lifts.
