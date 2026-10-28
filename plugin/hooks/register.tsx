@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.44'
+const DAEMON_VERSION = '0.8.45'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -705,13 +705,24 @@ function oneLine(text: string, max: number) {
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat
 }
 
+// How old a peer's summary is, and the tasks it owns now: a summary set hours ago may not be what it's doing.
+function summaryAge(p: any) {
+  const age = typeof p.summary_ts === 'number' ? Math.max(0, Math.round(Date.now() / 1000 - p.summary_ts)) : null
+  return age === null || age < 600 ? '' : ` (set ${ago(age)} ago)`
+}
+
+function taskNote(p: any) {
+  const ids: string[] = Array.isArray(p.task_ids) ? p.task_ids : []
+  return ids.length ? ` · open tasks: ${ids.slice(0, 5).join(', ')}${ids.length > 5 ? ` +${ids.length - 5}` : ''}` : ''
+}
+
 function peerLine(p: any) {
   const where = p.cwd.replace(/^\/Users\/[^/]+/, '~') + (p.branch ? ` [${p.branch}]` : '')
   // Only worth a mention when it's high: a nearly full agent may compact before it answers.
   const full = typeof p.context === 'number' && p.context >= 80 ? ` (context ${p.context}% full)` : ''
   // A role says what the agent is for; the summary, what it's doing now.
   const about = p.role ? `${oneLine(p.role, 120)}${p.summary ? ` · now: ${p.summary.slice(0, 100)}` : ''}` : (p.summary || 'no summary yet').slice(0, 140)
-  return `- ${p.name}${p.remote ? '@' + p.host : ''}${spaceTag(p)}${full}: ${where} — ${about}`
+  return `- ${p.name}${p.remote ? '@' + p.host : ''}${spaceTag(p)}${full}: ${where} — ${about}${p.summary ? summaryAge(p) : ''}${taskNote(p)}`
 }
 
 // The live agents, for the model to read beside the prompt; only when the list changed since it last saw it.
@@ -861,7 +872,7 @@ async function listPeers($: EngineInterface, withIds: boolean) {
   return peers
     .map(
       p =>
-        `- ${p.name}${p.remote ? '@' + p.host : ''}${withIds ? ` (id ${p.id})` : ''}${spaceTag(p)} — ${p.busy ? 'busy' : 'idle'}${p.muted ? ', muted' : ''}\n  dir: ${p.cwd}${p.branch ? ` [${p.branch}]` : ''}${p.role ? `\n  role: ${oneLine(p.role, 400)}` : ''}\n  summary: ${p.summary || '(none)'}`,
+        `- ${p.name}${p.remote ? '@' + p.host : ''}${withIds ? ` (id ${p.id})` : ''}${spaceTag(p)} — ${p.busy ? 'busy' : 'idle'}${p.muted ? ', muted' : ''}\n  dir: ${p.cwd}${p.branch ? ` [${p.branch}]` : ''}${p.role ? `\n  role: ${oneLine(p.role, 400)}` : ''}\n  summary: ${p.summary ? p.summary + summaryAge(p) : '(none)'}${taskNote(p)}`,
     )
     .join('\n')
 }
@@ -1129,7 +1140,7 @@ async function openThreadsBlock($: EngineInterface) {
     ...(waiting.length ? ["You're waiting on:", ...waiting.map(line)] : []),
     ...(tasks.length ? ['Finish a task with update_task, done or failed and a short note: whoever asked gets the note.'] : []),
     ...(owes.length || waiting.length
-      ? ["Answer with send_message and reply_to the id. If you already did the work, say so briefly; a waiting reply arrives as a message."]
+      ? ["Answer with send_message and reply_to the id. If you already did the work, say so briefly; a waiting reply arrives as a message. One that's already handled: close_thread with its id."]
       : []),
   ].join('\n')
 }
@@ -1367,6 +1378,17 @@ export const register: Register = on => {
       isDeferred: false,
     })
     await $.tool.register({
+      name: 'close_thread',
+      description:
+        'Drop requests from your open threads ("You owe a reply to", "You\'re waiting on") that are already handled, such as one answered without reply_to or one settled another way. A later message between you and that peer clears one by itself. Closing a question you asked on Discord also takes its buttons away, so when your user answers it in the terminal, close it.',
+      inputSchema: {
+        type: 'object',
+        properties: { ids: { type: 'array', items: { type: 'string' }, description: 'The message ids, e.g. ["m123"]' } },
+        required: ['ids'],
+      },
+      isDeferred: false,
+    })
+    await $.tool.register({
       name: 'set_summary',
       description:
         'Set the one-line summary peer agents see for you (what you are working on and what you can help with). Update it when your focus changes.',
@@ -1593,6 +1615,16 @@ export const register: Register = on => {
     $.ui.log('peerlink: this agent asked to clear its context; it clears when this turn ends.')
     return text('Your context clears when this turn ends, and your notes start the next one. End the turn now: one line on what you finished.')
   })
+
+  on('tool.call', { tool: 'mcp__peerlink__close_thread' }, async ($, e) => {
+    const raw = (e as any).ids
+    const ids = (Array.isArray(raw) ? raw : String(raw ?? '').split(/[\s,]+/)).map(String).filter(Boolean)
+    const res = await call($, 'POST', `/api/sessions/${sessionId}/threads/close`, { ids })
+    if (!res.ok) return text(`Not closed: ${res.data.error ?? res.status}`)
+    const closed = res.data.closed as string[]
+    const other = (res.data.not_yours ?? []) as string[]
+    return text(`${closed.length ? `Closed ${closed.join(', ')}.` : 'Nothing closed.'}${other.length ? ` Not one of your threads: ${other.join(', ')}.` : ''}`)
+  }).catch(daemonDown)
 
   on('tool.call', { tool: 'mcp__peerlink__set_summary' }, async ($, e) => {
     manualSummaryAt = await $.clock.now()

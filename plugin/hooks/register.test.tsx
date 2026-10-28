@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.8.44', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.8.45', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (state.forget && path.endsWith('/heartbeat') && 'busy' in body) {
       state.forget = false
       return { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'unknown agent; register again' }) } }
@@ -768,7 +768,7 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.8.44 · daemon 0.8.44 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.8.45 · daemon 0.8.45 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the space is listed once', async ($, on) => {
@@ -801,7 +801,7 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.8.44')
+  expect(reg.plugin).toBe('0.8.45')
 })
 
 test('an agent registers again under the folder it started in, wherever the host has moved its root since', async ($, on) => {
@@ -880,7 +880,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.8.45', true], ['0.8.44', false]] as const)
+for (const [installed, reloads] of [['0.8.46', true], ['0.8.45', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     const daemon = fakeDaemon(on)
