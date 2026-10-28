@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.44"
+VERSION = "0.8.45"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -697,6 +697,12 @@ def is_live(rec, now=None):
     return (now or time.time()) - rec["last_seen"] < config["peer_ttl_s"]
 
 
+def owned_task_ids(rec):
+    """The open tasks this agent's folder owns, oldest first: what it's on, whatever its summary says."""
+    cwd = rec.get("cwd")
+    return [t["id"] for t in tasks.values() if t["status"] in TASK_OPEN and cwd and t["owner_cwd"] == cwd]
+
+
 def public_peer(rec):
     space, source, where = space_of(rec)
     return {
@@ -707,6 +713,7 @@ def public_peer(rec):
         "repo": rec.get("repo", ""),
         "branch": rec.get("branch", ""),
         "summary": rec.get("summary", ""),
+        "summary_ts": rec.get("summary_ts"),  # when it last changed: peers see how old it is
         "role": role_of(rec),
         "folder_role": folder_role(rec),
         "space": space,
@@ -717,7 +724,8 @@ def public_peer(rec):
         "space_parent": space_parent(space),
         # Without ages, which change every second and would redraw the page each poll.
         "threads": {k: [{f: t[f] for f in ("id", "with", "text")} for t in v] for k, v in open_threads(rec, limit=5).items()},
-        "open_tasks": sum(1 for t in tasks.values() if t["status"] in TASK_OPEN and t["owner_cwd"] and t["owner_cwd"] == rec.get("cwd")),
+        "open_tasks": len(owned_task_ids(rec)),
+        "task_ids": owned_task_ids(rec),
         "reach": sorted(reach(rec)),
         "also": also_in(rec),
         "busy": rec.get("busy", False),
@@ -795,9 +803,10 @@ def remote_peers():
                 if not isinstance(p, dict):
                     continue
                 # The web UI puts these in its markup unescaped, as the numbers they should be.
-                for k in ("context", "sent_hour", "open_tasks"):
+                for k in ("context", "sent_hour", "open_tasks", "summary_ts"):
                     if p.get(k) is not None and not isinstance(p[k], (int, float)) or isinstance(p.get(k), bool):
-                        p[k] = None if k == "context" else 0
+                        p[k] = None if k in ("context", "summary_ts") else 0
+                p["task_ids"] = [str(i)[:12] for i in p.get("task_ids") or [] if isinstance(i, str)][:20] if isinstance(p.get("task_ids"), list) else []
                 p["remote"] = base
                 found.append(p)
         except Exception as err:  # a remote being down is normal
@@ -1415,6 +1424,13 @@ def on_press(press):
     if not asked or not idx.isdigit() or int(idx) >= len(options):
         discordlink.answer_interaction(press["id"], press["token"], 4, {"content": "That question isn't open anymore.", "flags": 64})
         return
+    with lock:
+        settled = asked.get("handled") or asked.get("inbox_done") or any(m.get("reply_to") == mid for m in messages)
+    if settled:
+        # Answered already, in the web UI, the terminal or another press: its buttons go, and this one does nothing.
+        discordlink.answer_interaction(press["id"], press["token"], 7, {"components": []})
+        discordlink.post(discord["token"], press["channel_id"], "That question was already answered, so this choice wasn't sent.", (asked.get("discord_out") or {}).get("message_id"))
+        return
     choice = options[int(idx)]
     rows = (press["message"] or {}).get("components") or []
     for row in rows:
@@ -1574,6 +1590,7 @@ def inbox_act(body, discord_from=None):
             if action == "dismiss":
                 m["inbox_done"] = True
                 append_log({"id": iid, "inbox_done": True})
+                close_buttons(m)  # settled here, so its Discord post can't be answered as well
                 return 200, {"ok": True}
             if action != "reply" or not text:
                 return 400, {"error": "reply with text, or dismiss"}
@@ -1588,6 +1605,7 @@ def inbox_act(body, discord_from=None):
                         "reply_to": iid, "hops": 0, "status": "queued", "v": 2})
             next_msg[0] += 1
             agent = queue_for_folder(m.get("from_cwd", ""), msg)
+        close_buttons(m)
         return 200, {"id": msg["id"], "to": msg["to_name"], "waiting": not agent}
     return 400, {"error": "kind is approval, task, question or feedback"}
 
@@ -2154,16 +2172,48 @@ def open_threads(rec, max_age=8 * 3600, limit=8):
     answered = {m["reply_to"] for m in messages if m.get("reply_to")}
     def gist(m, who):
         return {"id": m["id"], "with": m.get(who), "ago_s": round(now - m["ts"]), "text": m["text"][:160]}
-    # A task is tracked by its own status below, not by whether its message was answered.
-    recent = [m for m in messages if m.get("expects_reply") and not m.get("task") and now - m["ts"] < max_age and m["id"] not in answered]
-    owes = [gist(m, "from_name") for m in recent if (m.get("to") in me or m.get("to_cwd") in me) and m.get("status") != "expired"]
-    waiting = [gist(m, "to_name") for m in recent if m.get("from") in me or m.get("from_cwd") in me]
+    ends = lambda m, a, b: {m.get(a), m.get(b)} - {None, ""}
+    # Handled without a reply_to too: once the two have written to each other since, the right way round, it's done.
+    # Walked newest first, `later` holds (sender, recipient) pairs of what came after the message at hand.
+    later, owes, waiting = set(), [], []
+    for m in reversed(messages):
+        # A task is tracked by its own status below, not by whether its message was answered.
+        if (m.get("expects_reply") and not m.get("task") and not m.get("handled") and now - m["ts"] < max_age
+                and m["id"] not in answered):
+            frm, to = ends(m, "from", "from_cwd"), ends(m, "to", "to_cwd")
+            if to & me and m.get("status") != "expired" and not any((a, b) in later for a in me for b in frm):
+                owes.append(gist(m, "from_name"))
+            if frm & me and not any((a, b) in later for a in to for b in me):
+                waiting.append(gist(m, "to_name"))
+        later.update((a, b) for a in ends(m, "from", "from_cwd") for b in ends(m, "to", "to_cwd"))
+    owes.reverse()
+    waiting.reverse()
     def tgist(t, who):
         return {"id": t["id"], "with": who, "ago_s": round(now - t["created"]), "text": t["title"], "status": t["status"]}
     live = [t for t in tasks.values() if t["status"] in TASK_OPEN]
     mine = [tgist(t, t["requester"].get("name", "")) for t in live if t["owner_cwd"] and t["owner_cwd"] == rec.get("cwd")]
     asked = [tgist(t, t["owner"]) for t in live if t["requester"].get("id") == rec["id"] or (rec.get("cwd") and t["requester"].get("cwd") == rec.get("cwd"))]
     return {"owes": owes[-limit:], "waiting": waiting[-limit:], "tasks": mine[-limit:], "asked": asked[-limit:]}
+
+
+def close_threads(sid, ids):
+    """An agent says requests it owes or waits on are handled: they leave its open threads for good."""
+    with lock:
+        rec = sessions.get(sid)
+        if rec is None:
+            return 403, {"error": "unknown agent; register again"}
+        me = {sid, rec.get("cwd") or sid}
+        want = {str(i).strip() for i in ids if str(i).strip()}
+        if not want:
+            return 400, {"error": "give the ids to close, like m123"}
+        mine = [m for m in messages if m["id"] in want and ({m.get("from"), m.get("from_cwd"), m.get("to"), m.get("to_cwd")} & me)]
+        for m in mine:
+            m["handled"] = m["inbox_done"] = True
+            append_log({"id": m["id"], "handled": True, "inbox_done": True})
+    for m in mine:
+        close_buttons(m)  # an ask on Discord settled another way can't be answered there twice
+    missing = sorted(want - {m["id"] for m in mine})
+    return 200, {"closed": [m["id"] for m in mine], **({"not_yours": missing} if missing else {})}
 
 
 def take_inbox(sid, track=False):
@@ -3463,6 +3513,8 @@ class Handler(BaseHTTPRequestHandler):
                     if claims and not b.get("succeeds"):
                         given = claims.pop(0)
                     rec["name"] = unique_name(given or b["name"], sid)
+                if b.get("summary") is not None and b["summary"] != rec.get("summary"):
+                    rec["summary_ts"] = time.time()
                 for k in ("cwd", "repo", "branch", "summary", "model", "plugin", "pid"):
                     if b.get(k) is not None:
                         rec[k] = b[k]
@@ -3522,6 +3574,8 @@ class Handler(BaseHTTPRequestHandler):
                     rec["reload_queued"] = b["reload_queued"] / 1000 if b["reload_queued"] else None
                 note_lone_leads()
                 if b.get("summary") is not None:
+                    if b["summary"][:500] != rec.get("summary"):
+                        rec["summary_ts"] = time.time()
                     rec["summary"] = b["summary"][:500]
                     if b.get("summary_kind") in ("model", "manual"):
                         remember_dir(rec)
@@ -3582,6 +3636,9 @@ class Handler(BaseHTTPRequestHandler):
             with lock:
                 session_gone(rest[1])
             return self.reply(200, {"ok": True})
+
+        if len(rest) == 4 and rest[0] == "sessions" and rest[2] == "threads" and rest[3] == "close" and method == "POST":
+            return self.reply(*close_threads(rest[1], self.body().get("ids") or []))
 
         if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "threads" and method == "GET":
             with lock:
