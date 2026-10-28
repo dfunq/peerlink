@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.43'
+const DAEMON_VERSION = '0.8.44'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -1294,7 +1294,7 @@ export const register: Register = on => {
         properties: {
           id: { type: 'string', description: 'The task id, e.g. t3' },
           status: { type: 'string', enum: ['in_progress', 'done', 'failed', 'cancelled'] },
-          note: { type: 'string', description: 'The result, or why it failed: briefly, with paths rather than pasted content' },
+          note: { type: 'string', description: 'The result, or why it failed: briefly, with paths rather than pasted content. It arrives whole; one over the message limit (8000 characters by default) is refused' },
         },
         required: ['id', 'status'],
       },

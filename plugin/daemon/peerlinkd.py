@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.43"
+VERSION = "0.8.44"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -2006,7 +2006,7 @@ def update_feedback(iid, body):
             return 404, {"error": f"no feedback {iid}"}
         change = {"id": iid, "updated": time.time()}
         if "note" in body:
-            change["note"] = str(body.get("note") or "").strip()[:2000]
+            change["note"] = str(body.get("note") or "").strip()[:int(config.get("max_message_chars") or 8000)]
         if status:
             change["status"] = status
         if status == "accepted" and not item.get("task"):
@@ -2256,8 +2256,12 @@ def update_task(tid, body, web=False):
     """An owner marks its task in progress, done or failed; its requester can cancel it; the web UI can do any of
     that, reopen it, or give it to another folder."""
     status = body.get("status") or ""
-    note = (body.get("note") or "").strip()[:2000]
+    note = (body.get("note") or "").strip()
     owner = (body.get("owner") or "").strip()
+    # Whoever asked reads the note whole, so it's never cut: one over the message limit is refused, saying so.
+    limit = int(config.get("max_message_chars") or 0)
+    if limit and len(note) > limit:
+        return 413, {"error": f"note is {len(note)} characters, over the {limit} limit: write the details to a file and give its path with a short summary"}
     with lock:
         t = tasks.get(tid)
         if t is None:
