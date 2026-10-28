@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.47'
+const DAEMON_VERSION = '0.8.48'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -1314,7 +1314,7 @@ export const register: Register = on => {
     await $.tool.register({
       name: 'request_spawn',
       description:
-        "Ask your user to start a new agent (a Claude Code session) in another folder, for work that belongs there. Nothing starts until they approve it in the web UI or on Discord. If they do, the agent starts in your space, or the one you name, and gets first_prompt from you as its first message, so its replies come back to you. You're told if they deny it, or don't answer within a day.",
+        "Ask your user to start a new agent (a Claude Code session) in another folder, for work that belongs there. Nothing starts until they approve it in the web UI or on Discord, unless they let you go ahead without asking. If they do, the agent starts in your space, or the one you name, and gets first_prompt from you as its first message, so its replies come back to you. You're told if they deny it, or don't answer within a day.",
       inputSchema: {
         type: 'object',
         properties: {
@@ -1330,7 +1330,7 @@ export const register: Register = on => {
     await $.tool.register({
       name: 'schedule',
       description:
-        "Do something later, or on a repeat: the peerlink daemon sends your prompt to an agent (you by default) at that time, even after this session or its terminal has closed, and starts Claude Code there if no agent is running. Use it instead of CronCreate or /loop for anything that must outlive this session. One that may start an agent waits for your user's approval first. Times are this machine's local time.",
+        "Do something later, or on a repeat: the peerlink daemon sends your prompt to an agent (you by default) at that time, even after this session or its terminal has closed, and starts Claude Code there if no agent is running. Use it instead of CronCreate or /loop for anything that must outlive this session. One that may start an agent waits for your user's approval first, unless they let you go ahead without asking. Times are this machine's local time.",
       inputSchema: {
         type: 'object',
         properties: {
@@ -1557,6 +1557,7 @@ export const register: Register = on => {
     const input = e as any
     const res = await call($, 'POST', '/api/spawns', { by: sessionId, dir: input.dir, purpose: input.purpose, first_prompt: input.first_prompt, space: input.space })
     if (!res.ok) return text(`Not asked: ${res.data.error ?? res.status}`)
+    if (res.data.status !== 'pending') return text(`${res.data.id} ${res.data.status === 'started' ? 'started' : `didn't start (${res.data.status})`} without asking: your user lets you start agents.${res.data.note ?? ''}`)
     return text(`Asked your user to approve ${res.data.id}.${res.data.note ?? ''} You'll get a message when they decide; carry on meanwhile.`)
   }).catch(daemonDown)
 

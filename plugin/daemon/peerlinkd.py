@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.47"
+VERSION = "0.8.48"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -151,6 +151,8 @@ DEFAULT_CONFIG = {
     "clear_between_tasks": True,  # the default guidance asks agents to save notes and clear their context after each task
     "clear_nudge_tokens": 400000,  # past this many tokens of context, an agent is asked to save and clear at its next stopping point; 0 is off
     "summary_model": "haiku",
+    "auto_approve_all": False,  # every agent's requests to start an agent, or a schedule that may, go ahead without asking you
+    "auto_approve_folders": [],  # the folders whose agents' requests do; set only from the web UI
     "sessions": {},
     "folder_spaces": {},  # folder -> the space you put it in from the web UI; wins over its .peerlink
     "space_parents": {},  # space -> the space it sits inside, set on the Spaces page; wins over parent: lines
@@ -737,6 +739,7 @@ def public_peer(rec):
         "stale": rec.get("plugin", "") != VERSION,
         "reload_queued": rec.get("reload_queued"),
         "muted": session_cfg(rec["id"])["muted"],
+        "auto_approve": rec.get("cwd", "") in (config.get("auto_approve_folders") or []),
         "terminating": bool(rec.get("terminate")),
         "last_seen_s": round(time.time() - rec["last_seen"], 1),
     }
@@ -986,6 +989,11 @@ def routes_for(cwd):
     if discord.get("dm") == cwd:
         out.append({"channel_id": "dm", "channel": "direct messages", "master": True, "receives": True, "sends": True})
     return out
+
+
+def auto_approved(rec):
+    """Whether this agent's requests to start an agent, or a schedule that may, skip your approval."""
+    return bool(config.get("auto_approve_all")) or (rec or {}).get("cwd", "") in (config.get("auto_approve_folders") or [])
 
 
 def approval_channel(rec):
@@ -2451,7 +2459,13 @@ def request_spawn(body):
         spawns[sp["id"]] = sp
         save_spawns()
         channel = approval_channel(by)
+        auto = auto_approved(by)
     log("spawn asked", sp["id"], sp["requester"]["name"], folder)
+    if auto:
+        decide_spawn(sp["id"], True, "auto-approve")
+        if channel and discord.get("token") and discord_bot[0]:
+            post_async([(channel, f"**{sp['requester']['name']}** started an agent in `{tilde_path(folder)}` without asking (auto-approve is on): {purpose[:600]}", None)])
+        return 200, {"id": sp["id"], "status": sp["status"], "note": f" Auto-approved: {sp['note']}"}
     if channel and discord.get("token") and discord_bot[0]:
         try:
             sent = discordlink.post(discord["token"], channel,
@@ -2740,11 +2754,13 @@ def create_schedule(body, by=None):
         c = {"id": f"c{n}", "folder": folder, "agent": name, "prompt": prompt[:8000], "cron": cron, "at": at,
              "start": start, "next_run": next_run, "last_run": None, "runs": 0, "note": "",
              "requester": {"id": by["id"], "name": display_name(by), "cwd": by.get("cwd", "")} if by else {"name": USER_NAME, "cwd": ""},
-             "status": "pending" if by and start else "active", "created": now, "updated": now}
+             "status": "pending" if by and start and not auto_approved(by) else "active", "created": now, "updated": now}
         schedules[c["id"]] = c
         save_schedules()
         channel = approval_channel(by) if by else ""
     log("schedule", c["id"], c["status"], c["agent"] or tilde_path(folder), when_text(c))
+    if by and start and c["status"] == "active" and channel and discord.get("token") and discord_bot[0]:
+        post_async([(channel, f"**{c['requester']['name']}** scheduled `{tilde_path(folder)}` ({when_text(c)}) without asking, starting an agent there when none is running (auto-approve is on): {prompt[:600]}", None)])
     if c["status"] == "pending" and channel and discord.get("token") and discord_bot[0]:
         try:
             sent = discordlink.post(discord["token"], channel,
@@ -3498,6 +3514,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, {**config, "default_guidance": DEFAULT_GUIDANCE})
             if method in ("PUT", "POST"):
                 checked = {k: config_value(k, v) for k, v in self.body().items() if k in DEFAULT_CONFIG}
+                # Only you, in the browser: no agent lets itself start agents without asking.
+                if (not browser or self.key_ok()) and any(k.startswith("auto_approve") and checked[k][0] != config.get(k) for k in checked):
+                    return self.reply(403, {"error": "auto-approve is set only from the web UI"})
                 bad = [why for _, why in checked.values() if why]
                 if bad:
                     return self.reply(400, {"error": "; ".join(bad)})
@@ -3630,6 +3649,12 @@ class Handler(BaseHTTPRequestHandler):
                 for k in ("nickname", "muted", "auto_wake"):
                     if k in b:
                         cur[k] = b[k]
+                rec = sessions.get(sid)
+                if "auto_approve" in b and rec and rec.get("cwd"):
+                    if not browser or self.key_ok():
+                        return self.reply(403, {"error": "auto-approve is set only from the web UI"})
+                    folders = [f for f in config.get("auto_approve_folders") or [] if f != rec["cwd"]]
+                    config["auto_approve_folders"] = folders + [rec["cwd"]] if b["auto_approve"] else folders
                 # A role set here is this agent's alone, kept across /clear and resume; empty falls back to the folder's.
                 if "role" in b:
                     cur["role"] = str(b["role"] or "").strip()[:ROLE_MAX]
@@ -4395,6 +4420,8 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <div class="check"><input type="checkbox" name="roster_in_prompt" id="rp"><label for="rp" style="margin:0">Show each agent the live agent list when it changes</label></div>
 <div class="check"><input type="checkbox" name="auto_summary" id="as"><label for="as" style="margin:0">Keep agent summaries current automatically</label></div>
 <div class="row"><div><label>Summary model</label><input type="text" name="summary_model"></div><div></div></div>
+<div class="check"><input type="checkbox" name="auto_approve_all" id="aaa"><label for="aaa" style="margin:0">Let every agent start agents and schedules without asking me</label></div>
+<div class="mut small">You're still told on Discord when one does. To allow only some agents, leave this off and turn it on in an agent's Controls tab.</div>
 <div class="check"><input type="checkbox" name="clear_between_tasks" id="cbt"><label for="cbt" style="margin:0">Agents clear their own context after each task, saving notes to memory first</label></div>
 <div class="row"><div><label for="cnt">Ask an agent to save and clear once its context passes (tokens, 0 for never)</label><input type="number" name="clear_nudge_tokens" id="cnt" min="0" step="50000"></div><div></div></div>
 <div class="mut small">A large context is re-read on every turn and drains the usage limit fast. The ask arrives with the agent's next prompt, so it clears at a stopping point.</div>
@@ -4464,9 +4491,10 @@ function agentPanel(x,others=[]){const sc=cfg.sessions?.[x.id]||{};const setSpac
     <details class="adv"${(x.also||[]).length?' open':''}><summary>Also in other spaces</summary>
     <label>Also a member of<input name="also" type="text" value="${esc((x.also||[]).join(', '))}" placeholder="none"><span class="hint">Rarely needed: more spaces it sees and messages, on top of its own. Separate with commas.</span></label></details>
     <datalist id="spacenames">${Object.keys(leadOf).concat(livePeers.map(p=>p.space)).filter((n,i,a)=>n&&n!=='default'&&a.indexOf(n)===i).sort().map(n=>`<option value="${esc(n)}">`).join('')}</datalist>
-    <div><button type="submit">Save</button> <span id="agentmsg" class="small"></span></div></form>`:tab==='controls'?`<form id="agentform" data-id="${esc(x.id)}" data-wake="${wake}" data-muted="${x.muted?'1':''}">
+    <div><button type="submit">Save</button> <span id="agentmsg" class="small"></span></div></form>`:tab==='controls'?`<form id="agentform" data-id="${esc(x.id)}" data-wake="${wake}" data-muted="${x.muted?'1':''}" data-auto="${x.auto_approve?'1':''}">
     <label>When a message arrives<select name="wake">${opt('default','Use the default')}${opt('on','Start a turn')}${opt('off','Wait for the next prompt')}</select></label>
     <label class="check"><input name="muted" type="checkbox" ${x.muted?'checked':''}> Mute: hold every message for this agent</label>
+    <label class="check"><input name="auto_approve" type="checkbox" ${x.auto_approve||cfg.auto_approve_all?'checked':''} ${cfg.auto_approve_all?'disabled title="On for every agent in Settings"':''}> Let it start agents and schedules without asking me (its folder keeps this)</label>
     <div><button type="submit">Save</button> <span id="agentmsg" class="small"></span></div></form>
     ${leadBtn?`<div class="threads"><div class="k small">Lead</div><div class="small mut">${role}</div><div>${leadBtn}</div></div>`:''}
     <div class="threads"><div class="k small">Clear its context</div><div class="small mut">Runs /clear once its current turn ends: a fresh conversation in the same folder, keeping its name, space and role. What it still owes peers is given back to it.</div>
@@ -4884,6 +4912,7 @@ document.addEventListener('submit',async e=>{if(e.target.id!=='agentform')return
   if(has('nickname')&&v('nickname')!==d.nick)patch.nickname=v('nickname');
   if(has('wake')&&f.elements.wake.value!==d.wake)patch.auto_wake=f.elements.wake.value==='default'?null:f.elements.wake.value==='on';
   if(has('muted')&&f.elements.muted.checked!==!!d.muted)patch.muted=f.elements.muted.checked;
+  if(has('auto_approve')&&!f.elements.auto_approve.disabled&&f.elements.auto_approve.checked!==!!d.auto)patch.auto_approve=f.elements.auto_approve.checked;
   if(has('role')&&v('role')!==d.role)patch.role=v('role');
   msg.className='small';msg.textContent='Saving…';
   if(Object.keys(patch).length){const r=await post(`/api/sessions/${encodeURIComponent(id)}/config`,patch);if(r.error)errs.push(r.error);else cfg.sessions=r.sessions}
