@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.46'
+const DAEMON_VERSION = '0.8.47'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -1284,7 +1284,7 @@ export const register: Register = on => {
           options: {
             type: 'array',
             items: { type: 'string' },
-            description: 'Choices to offer, short labels, such as ["Merge both", "Hold"]. Use them whenever you ask your user to decide or approve, instead of asking them to type a reply. On Discord they are buttons and the tap comes back as a reply; to a peer, a numbered list',
+            description: 'Choices to offer, short labels, such as ["Merge both", "Hold"]. Use them whenever you ask your user to decide or approve, instead of asking them to type a reply. On Discord they are buttons and the tap comes back as a reply; to a peer, a numbered list. A button labelled "Approve c10" or "Deny s3" (naming a pending schedule or start request) decides it when tapped',
           },
           files: {
             type: 'array',

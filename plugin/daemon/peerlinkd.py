@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.46"
+VERSION = "0.8.47"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -1432,6 +1432,7 @@ def on_press(press):
         discordlink.post(discord["token"], press["channel_id"], "That question was already answered, so this choice wasn't sent.", (asked.get("discord_out") or {}).get("message_id"))
         return
     choice = options[int(idx)]
+    done = decide_relayed(choice, asked.get("text", ""), f"Discord ({press['author']}), on {asked.get('from_name', 'an agent')}'s question")
     rows = (press["message"] or {}).get("components") or []
     for row in rows:
         for b in row.get("components", []):
@@ -1443,7 +1444,7 @@ def on_press(press):
             "id": f"m{next_msg[0]}", "ts": time.time(),
             "from": f"discord:{press['channel_id']}", "from_name": f"{press['author']} on Discord", "from_host": "discord",
             "from_cwd": "", "to_cwd": asked.get("from_cwd", ""), "from_space": "discord", "to_space": asked.get("from_space", ""),
-            "text": f"Chose: {choice}", "expects_reply": False, "reply_to": mid, "hops": 0, "status": "queued", "v": 2,
+            "text": f"Chose: {choice}" + (f" (peerlink {', '.join(done)})" if done else ""), "expects_reply": False, "reply_to": mid, "hops": 0, "status": "queued", "v": 2,
             "discord": {"channel_id": press["channel_id"], "message_id": (asked.get("discord_out") or {}).get("message_id", "")},
         }
         next_msg[0] += 1
@@ -2554,6 +2555,27 @@ def close_buttons(item):
         except discordlink.DiscordError as err:
             log("discord", "could not clear buttons:", err)
     threading.Thread(target=edit, daemon=True).start()
+
+
+def decide_relayed(choice, asked_text, via):
+    """You chose "Approve c10" (or "Deny s3", "Approve all 4") on an agent's question about a pending schedule or
+    start: the press is yours, so it decides them as peerlink's own prompt would. The ids come from the choice, or
+    from the question when the choice names none and either says "all" or the question names just one pending."""
+    verb = re.match(r"\s*(approve|deny)\b", choice, re.I)
+    if not verb:
+        return []
+    with lock:
+        pending = lambda ids: [i for i in dict.fromkeys(ids) if (schedules if i[0] == "c" else spawns).get(i, {}).get("status") == "pending"]
+        ids = pending(re.findall(r"\b([cs]\d+)\b", choice.lower()))
+        if not ids:
+            named = pending(re.findall(r"\b([cs]\d+)\b", asked_text.lower()))
+            ids = named if re.search(r"\ball\b", choice, re.I) or len(named) == 1 else []
+    approve, done = verb.group(1).lower() == "approve", []
+    for i in ids:
+        code, _ = (decide_schedule if i[0] == "c" else decide_spawn)(i, approve, via)
+        if code == 200:
+            done.append(f"{'approved' if approve else 'denied'} {i}")
+    return done
 
 
 def on_spawn_press(press, decide=None, items=None):
