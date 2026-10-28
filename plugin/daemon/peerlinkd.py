@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.45"
+VERSION = "0.8.46"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -3514,7 +3514,9 @@ class Handler(BaseHTTPRequestHandler):
                         given = claims.pop(0)
                     rec["name"] = unique_name(given or b["name"], sid)
                 if b.get("summary") is not None and b["summary"] != rec.get("summary"):
-                    rec["summary_ts"] = time.time()
+                    # The same summary its folder had before (a daemon restart, a resume) keeps its age.
+                    known = dir_summaries.get(b.get("cwd") or rec.get("cwd") or "") or {}
+                    rec["summary_ts"] = known["ts"] if known.get("summary") == b["summary"] and known.get("ts") else time.time()
                 for k in ("cwd", "repo", "branch", "summary", "model", "plugin", "pid"):
                     if b.get(k) is not None:
                         rec[k] = b[k]
