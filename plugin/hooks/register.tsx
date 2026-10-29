@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.49'
+const DAEMON_VERSION = '0.8.50'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -348,6 +348,7 @@ async function announce($: EngineInterface, succeeds?: string) {
     succeeds,
     id: sessionId,
     name: cwd.split('/').filter(Boolean).at(-1) ?? 'agent',
+    had_name: myName || undefined,
     cwd,
     repo: repo?.remote ?? repo?.root ?? '',
     branch,
@@ -1321,6 +1322,8 @@ export const register: Register = on => {
           dir: { type: 'string', description: 'The folder to start it in; it must exist already' },
           purpose: { type: 'string', description: 'Why it is needed, in a sentence your user decides on' },
           first_prompt: { type: 'string', description: 'What the new agent should do first' },
+          name: { type: 'string', description: 'Its name, like "pixelgrid-server"; needed when the folder already has an agent, which keeps the folder\'s name' },
+          role: { type: 'string', description: 'What it is there for, shown to peers; defaults to the purpose when the folder already has an agent, so it doesn\'t take that one\'s role' },
           space: { type: 'string', description: 'The space it joins; yours if left out' },
         },
         required: ['dir', 'purpose', 'first_prompt'],
@@ -1387,6 +1390,17 @@ export const register: Register = on => {
         required: ['ids'],
       },
       isDeferred: false,
+    })
+    await $.tool.register({
+      name: 'rename',
+      description:
+        "Change your own name, the one peers address you by, such as when you share a folder with another agent and need a distinct one (\"pixelgrid-client\"). It's yours alone and kept across /clear; the folder's name stays as it is.",
+      inputSchema: {
+        type: 'object',
+        properties: { name: { type: 'string', description: 'Letters, digits, dots, dashes or underscores' } },
+        required: ['name'],
+      },
+      isDeferred: true,
     })
     await $.tool.register({
       name: 'set_summary',
@@ -1555,7 +1569,7 @@ export const register: Register = on => {
 
   on('tool.call', { tool: 'mcp__peerlink__request_spawn' }, async ($, e) => {
     const input = e as any
-    const res = await call($, 'POST', '/api/spawns', { by: sessionId, dir: input.dir, purpose: input.purpose, first_prompt: input.first_prompt, space: input.space })
+    const res = await call($, 'POST', '/api/spawns', { by: sessionId, dir: input.dir, purpose: input.purpose, first_prompt: input.first_prompt, space: input.space, name: input.name, role: input.role })
     if (!res.ok) return text(`Not asked: ${res.data.error ?? res.status}`)
     if (res.data.status !== 'pending') return text(`${res.data.id} ${res.data.status === 'started' ? 'started' : `didn't start (${res.data.status})`} without asking: your user lets you start agents.${res.data.note ?? ''}`)
     return text(`Asked your user to approve ${res.data.id}.${res.data.note ?? ''} You'll get a message when they decide; carry on meanwhile.`)
@@ -1616,6 +1630,13 @@ export const register: Register = on => {
     $.ui.log('peerlink: this agent asked to clear its context; it clears when this turn ends.')
     return text('Your context clears when this turn ends, and your notes start the next one. End the turn now: one line on what you finished.')
   })
+
+  on('tool.call', { tool: 'mcp__peerlink__rename' }, async ($, e) => {
+    const res = await call($, 'POST', `/api/sessions/${sessionId}/rename`, { name: (e as any).name })
+    if (!res.ok) return text(`Not renamed: ${res.data.error ?? res.status}`)
+    myName = res.data.name
+    return text(`You're ${res.data.name} now (were ${res.data.was}).`)
+  }).catch(daemonDown)
 
   on('tool.call', { tool: 'mcp__peerlink__close_thread' }, async ($, e) => {
     const raw = (e as any).ids

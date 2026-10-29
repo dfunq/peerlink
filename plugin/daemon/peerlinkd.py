@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.49"
+VERSION = "0.8.50"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -2167,9 +2167,21 @@ def descends_from(pid, ancestor):
     return False
 
 
-def adopt(rec, old=None, fresh=False):
+def spawn_of(rec, fresh):
+    """The started spawn this newly registering agent is the one for: the spawn whose tmux pane it runs under, else
+    (no pane to go by) the oldest unclaimed one in its folder when rec is a new conversation. None for any other."""
+    cands = [sp for sp in spawns.values() if sp["status"] == "started" and not sp.get("agent_id") and sp["dir"] == rec.get("cwd")
+             and time.time() - sp["updated"] < 86400]
+    for sp in sorted(cands, key=lambda x: x["updated"]):
+        pane = tmux_pane_pid(sp["tmux"]) if sp.get("tmux") else 0
+        if (descends_from(rec.get("pid"), pane) if pane else fresh):
+            return sp
+    return None
+
+
+def adopt(rec, old=None, spawn=None):
     """Give rec the messages still queued for sessions that are gone: `old` (one it replaces), or any in its folder.
-    `fresh`: rec is a new conversation, not a resume or one registering again, so it may be one a spawn started."""
+    `spawn`: the spawn rec is the agent for, whose first prompt waits for it alone."""
     moved = 0
     for sid in list(inboxes):
         if sid == rec["id"]:
@@ -2183,11 +2195,7 @@ def adopt(rec, old=None, fresh=False):
         elif sid.startswith("spawn:"):
             # A first prompt for the agent a spawn started: that one takes it, found by its tmux pane, else the first
             # new one in that folder.
-            box = [m for m in inboxes[sid] if m.get("to_cwd") == rec.get("cwd")]
-            if box:
-                sp = spawns.get(sid[6:]) or {}
-                pane = tmux_pane_pid(sp["tmux"]) if sp.get("tmux") else 0
-                box = box if (descends_from(rec.get("pid"), pane) if pane else fresh) else []
+            box = list(inboxes[sid]) if spawn and sid == f"spawn:{spawn['id']}" else []
         else:
             box = [m for m in inboxes[sid] if sid == old or (m.get("to_cwd") and m.get("to_cwd") == rec.get("cwd"))]
         if not box:
@@ -2237,6 +2245,27 @@ def open_threads(rec, max_age=8 * 3600, limit=8):
     mine = [tgist(t, t["requester"].get("name", "")) for t in live if t["owner_cwd"] and t["owner_cwd"] == rec.get("cwd")]
     asked = [tgist(t, t["owner"]) for t in live if t["requester"].get("id") == rec["id"] or (rec.get("cwd") and t["requester"].get("cwd") == rec.get("cwd"))]
     return {"owes": owes[-limit:], "waiting": waiting[-limit:], "tasks": mine[-limit:], "asked": asked[-limit:]}
+
+
+def rename_self(sid, name):
+    """An agent names itself: this agent only, kept across /clear and resume. Its folder's name, which the next
+    agent there takes, stays as it is; you change that in the web UI."""
+    name = re.sub(r"[^A-Za-z0-9_.-]", "-", str(name or "").strip())[:40].strip("-")
+    if not name:
+        return 400, {"error": "name is letters, digits, dots, dashes or underscores"}
+    with lock:
+        rec = sessions.get(sid)
+        if rec is None:
+            return 404, {"error": "unknown agent; register again"}
+        if any(r["id"] != sid and is_live(r) and display_name(r).lower() == name.lower() for r in sessions.values()):
+            return 409, {"error": f"another running agent is called {name}"}
+        was = display_name(rec)
+        rec["name"] = name
+        config["sessions"].setdefault(sid, {})["nickname"] = name
+        save_config()
+    forget_spaces()
+    log("agent", sid, "renamed", was, "->", name)
+    return 200, {"name": name, "was": was}
 
 
 def close_threads(sid, ids):
@@ -2486,7 +2515,11 @@ def request_spawn(body):
             return 409, {"error": f"a request to start an agent in {folder} is already waiting for your user"}
         running = successor(folder)
         n = max([int(i[1:]) for i in spawns] or [0]) + 1
-        sp = {"id": f"s{n}", "dir": folder, "purpose": purpose[:1000], "prompt": prompt[:8000],
+        name = re.sub(r"[^A-Za-z0-9_.-]", "-", str(body.get("name") or "").strip())[:40].strip("-")
+        role = str(body.get("role") or "").strip()[:ROLE_MAX]
+        if running and not role:
+            role = purpose[:ROLE_MAX]  # not the folder's role: that one is the running agent's
+        sp = {"id": f"s{n}", "dir": folder, "purpose": purpose[:1000], "prompt": prompt[:8000], "name": name, "role": role,
               "space": clean_space(body.get("space") or "") or space_of(by)[0],
               "requester": {"id": by["id"], "name": display_name(by), "cwd": by.get("cwd", "")},
               "status": "pending", "created": time.time(), "updated": time.time(), "note": ""}
@@ -3585,9 +3618,21 @@ class Handler(BaseHTTPRequestHandler):
             with lock:
                 fresh = sid not in sessions and not b.get("succeeds")
                 rec = sessions.get(sid, {"id": sid, "started": time.time()})
+                # One a spawn started, in a folder that may already have its agent: it takes the name and role it
+                # was asked for, never the folder's, which belong to the agent already there.
+                spawn = spawn_of({"cwd": b.get("cwd") or "", "pid": b.get("pid")}, fresh) if sid not in sessions else None
+                if spawn:
+                    spawn["agent_id"] = sid
+                    save_spawns()
+                    if spawn.get("role") and not config["sessions"].get(sid, {}).get("role"):
+                        config["sessions"].setdefault(sid, {})["role"] = spawn["role"]
+                        save_config()
+                if spawn and spawn.get("name") and not rec.get("name"):
+                    rec["name"] = unique_name(spawn["name"], sid)
                 if b.get("name") and not rec.get("name"):
                     # A folder keeps the name it was given: a new session there (a restart, a resume) is still "vault".
-                    given = (config.get("folder_names") or {}).get(b.get("cwd") or "")
+                    # One registering again after a daemon restart keeps the name it had, not whichever is free first.
+                    given = b.get("had_name") or (config.get("folder_names") or {}).get(b.get("cwd") or "")
                     # One the daemon started for a schedule comes up as the agent the schedule is for.
                     claims = name_claims.get(b.get("cwd") or "")
                     if claims and not b.get("succeeds"):
@@ -3625,7 +3670,14 @@ class Handler(BaseHTTPRequestHandler):
                         save_config()
                     if prev and prev.get("name"):
                         rec["name"] = prev["name"]
-                adopt(rec, old, fresh)
+                # A nickname you gave this agent is its name: another live one that took it first (registering
+                # sooner after a daemon restart) moves aside.
+                nick = session_cfg(sid)["nickname"]
+                for other in [r for r in sessions.values() if nick and r["id"] != sid and is_live(r)
+                              and not session_cfg(r["id"])["nickname"] and display_name(r).lower() == nick.lower()]:
+                    other["name"] = unique_name(other["name"], other["id"])
+                    log("agent", other["id"], "renamed", other["name"], "for", sid)
+                adopt(rec, old, spawn)
                 follow_agent(rec)
                 previous = dir_summaries.get(rec.get("cwd", ""))
                 if previous and previous["ts"] < time.time() - DIR_MEMORY_S:
@@ -3724,6 +3776,9 @@ class Handler(BaseHTTPRequestHandler):
             with lock:
                 session_gone(rest[1])
             return self.reply(200, {"ok": True})
+
+        if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "rename" and method == "POST":
+            return self.reply(*rename_self(rest[1], self.body().get("name")))
 
         if len(rest) == 4 and rest[0] == "sessions" and rest[2] == "threads" and rest[3] == "close" and method == "POST":
             return self.reply(*close_threads(rest[1], self.body().get("ids") or []))
