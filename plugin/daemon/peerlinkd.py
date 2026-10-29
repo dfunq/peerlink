@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.57"
+VERSION = "0.8.58"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -184,7 +184,6 @@ schedules = {}       # id -> a prompt the daemon sends a folder's agent later or
 folder_seen = {}
 LEAD_GRACE_S = 600
 DAEMON_START = time.time()
-spawn_spaces = {}    # folder -> the space an approved agent joins when it registers there
 config = {}
 key = [""]
 dir_summaries = {}  # cwd -> {summary, name, ts}: what the last agent there was doing
@@ -459,17 +458,21 @@ def read_space_file(path, key="space"):
 
 
 def space_of(rec):
-    """(space, source, where): the space you put this agent's folder in ('set'), else the nearest .peerlink ('file'),
-    else default. A .peerlink only places folders you haven't."""
+    """(space, source, where): the space an agent was started for ('started': a folder can hold agents started for
+    other spaces), else the space you put its folder in ('set'), else the nearest .peerlink ('file'), else default.
+    A .peerlink only places folders you haven't."""
     now = time.time()
     cached = rec.get("_space")
     if cached and now - cached[0] < SPACE_CACHE_S:
         return cached[1]
     cwd = rec.get("cwd", "")
     found = (DEFAULT_SPACE, "default", "")
+    started = clean_space(config["sessions"].get(rec.get("id") or "", {}).get("started_in"))
     chosen = clean_space((config.get("folder_spaces") or {}).get(cwd))
     path = find_space_file(cwd)
-    if chosen:
+    if started:
+        found = (started, "started", cwd)
+    elif chosen:
         found = (chosen, "set", cwd)
     elif path and read_space_file(path):
         found = (read_space_file(path), "file", path)
@@ -623,6 +626,10 @@ def set_folder_space(cwd, space):
             chosen[cwd] = space
         else:
             chosen.pop(cwd, None)
+        # Agents started there for another space move with the folder too.
+        for r in sessions.values():
+            if r.get("cwd") == cwd:
+                config["sessions"].get(r["id"], {}).pop("started_in", None)
         save_config()
     forget_spaces()
     with lock:
@@ -2256,6 +2263,19 @@ def open_threads(rec, max_age=8 * 3600, limit=8):
     def gist(m, who):
         return {"id": m["id"], "with": m.get(who), "ago_s": round(now - m["ts"]), "text": m["text"][:160]}
     ends = lambda m, a, b: {m.get(a), m.get(b)} - {None, ""}
+    # Agents sharing a folder don't share each other's threads: one to an agent is that agent's (or what it became
+    # after /clear), and only one whose agent is gone falls to the folder's agent.
+    whose = {}
+    def mine(m, side):
+        sid, cwd = m.get(side) or "", m.get(side + "_cwd") or ""
+        if sid == rec["id"]:
+            return True
+        if not cwd or cwd != rec.get("cwd"):
+            return False
+        if sid not in whose:
+            who = continuation(sid, m.get(side + "_name") or "", cwd) or successor(cwd)
+            whose[sid] = who["id"] if who else None
+        return whose[sid] in (None, rec["id"])
     # Handled without a reply_to too: once the two have written to each other since, the right way round, it's done.
     # Walked newest first, `later` holds (sender, recipient) pairs of what came after the message at hand.
     later, owes, waiting = set(), [], []
@@ -2264,9 +2284,9 @@ def open_threads(rec, max_age=8 * 3600, limit=8):
         if (m.get("expects_reply") and not m.get("task") and not m.get("handled") and now - m["ts"] < max_age
                 and m["id"] not in answered):
             frm, to = ends(m, "from", "from_cwd"), ends(m, "to", "to_cwd")
-            if to & me and m.get("status") != "expired" and not any((a, b) in later for a in me for b in frm):
+            if mine(m, "to") and m.get("status") != "expired" and not any((a, b) in later for a in me for b in frm):
                 owes.append(gist(m, "from_name"))
-            if frm & me and not any((a, b) in later for a in to for b in me):
+            if mine(m, "from") and not any((a, b) in later for a in to for b in me):
                 waiting.append(gist(m, "to_name"))
         later.update((a, b) for a in ends(m, "from", "from_cwd") for b in ends(m, "to", "to_cwd"))
     owes.reverse()
@@ -2509,7 +2529,9 @@ def task_closed(t, web=False):
     d = req.get("discord")
     posts = []
     with lock:
-        owner = successor(t["owner_cwd"])
+        # From the agent that owns it, and to the agent that asked: not whichever goes by either folder's name.
+        owner = task_owner(t)
+        asker = continuation(req.get("id") or "", req.get("name") or "", req.get("cwd") or "")
         if t["status"] == "cancelled" and t["owner_cwd"]:
             # The owner stops; whoever cancelled it already knows.
             task_message(t, t["owner_cwd"], f"Task {t['id']} was cancelled{' in the web UI' if web else ' by ' + req.get('name', 'whoever asked')}: stop work on it. {t['title']}")
@@ -2519,7 +2541,7 @@ def task_closed(t, web=False):
             if orig:
                 set_reaction(orig, "✅" if t["status"] == "done" else "❌")
         elif req.get("cwd"):
-            task_message(t, req["cwd"], line if owner else f"{t['owner']}: {line}", sender=owner, reply_to=t["msg"])
+            task_message(t, req["cwd"], line if owner else f"{t['owner']}: {line}", sender=owner, reply_to=t["msg"], prefer=asker)
         if t["status"] == "failed" and not d and not t.get("user"):
             chans = [r for r in routes_for(t["owner_cwd"]) + routes_for(req.get("cwd", "")) if r["channel_id"] != "dm" and r["sends"]]
             if chans:
@@ -2668,7 +2690,6 @@ def decide_spawn(sid, approve, via):
                 spawn_told(sp, f"Your user approved {sid}, but the agent in {sp['dir']} didn't start: {err}")
             else:
                 sp["status"], sp["note"] = "started", how
-                spawn_spaces[sp["dir"]] = sp["space"]
                 # The first prompt waits for the new agent's folder, as a message from whoever asked, so replies go back.
                 req = sessions.get(sp["requester"]["id"]) or successor(sp["requester"]["cwd"])
                 msg = {"id": f"m{next_msg[0]}", "ts": time.time(), "from": req["id"] if req else "peerlink",
@@ -3696,7 +3717,10 @@ class Handler(BaseHTTPRequestHandler):
                     save_spawns()
                     if spawn.get("role") and not config["sessions"].get(sid, {}).get("role"):
                         config["sessions"].setdefault(sid, {})["role"] = spawn["role"]
-                        save_config()
+                    # It joins the space it was asked for, even in a folder that's in another one.
+                    if spawn.get("space"):
+                        config["sessions"].setdefault(sid, {})["started_in"] = spawn["space"]
+                    save_config()
                 if spawn and spawn.get("name") and not rec.get("name"):
                     rec["name"] = unique_name(spawn["name"], sid)
                 if b.get("name") and not rec.get("name"):
@@ -3715,11 +3739,11 @@ class Handler(BaseHTTPRequestHandler):
                 for k in ("cwd", "repo", "branch", "summary", "model", "plugin", "pid"):
                     if b.get(k) is not None:
                         rec[k] = b[k]
-                # An agent you approved starting joins the space it was asked for. A space set for one agent, as older
-                # versions allowed, becomes its folder's.
+                # A folder in no space yet (none set, no .peerlink) takes the one its first started agent was asked for.
+                # A space set for one agent, as older versions allowed, becomes its folder's.
                 old_override = clean_space(config["sessions"].get(sid, {}).pop("space", ""))
-                want = spawn_spaces.pop(rec.get("cwd", ""), "") or old_override
-                if want and rec.get("cwd") and want != space_of(rec)[0] and not (config.get("folder_spaces") or {}).get(rec["cwd"]):
+                want = (spawn or {}).get("space") or old_override
+                if want and rec.get("cwd") and space_of({"cwd": rec["cwd"]})[1] == "default":
                     config.setdefault("folder_spaces", {})[rec["cwd"]] = want
                     rec.pop("_space", None)
                 if want or old_override:
@@ -4638,7 +4662,7 @@ window.addEventListener('hashchange',()=>{show();closePanel();scrollTo(0,0)});
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closePanel()});
 function agentPanel(x,others=[]){const sc=cfg.sessions?.[x.id]||{};const setSpace=x.space_source==='set'?x.space:'';
   const wake=sc.auto_wake===true?'on':sc.auto_wake===false?'off':'default';
-  const why=x.space_source==='set'?'you put its folder here':x.space_source==='file'?'from '+tilde(x.space_from):'no space set';
+  const why=x.space_source==='started'?'the agent that started it asked for it':x.space_source==='set'?'you put its folder here':x.space_source==='file'?'from '+tilde(x.space_from):'no space set';
   const how={set:'you picked it',only:'it was the only agent in the space'}[x.leads]||'';
   const led=leadOf[x.space];
   const role=x.leads?`Leads the <b>${esc(x.space)}</b> space${x.parent?` inside <b>${esc(x.parent)}</b>`:''} <span class="mut">· ${how}</span>`:`Member${led?` · led by ${esc(led.name)}${led.live?'':' (offline)'}`:''}`;
@@ -4655,7 +4679,7 @@ function agentPanel(x,others=[]){const sc=cfg.sessions?.[x.id]||{};const setSpac
    ${tab==='tasks'?panelTasks(x):tab==='details'?`<form id="agentform" data-id="${esc(x.id)}" data-nick="${esc(sc.nickname||'')}" data-space="${esc(setSpace)}" data-role="${esc(sc.role||'')}" data-cwd="${esc(x.cwd)}" data-also="${esc((x.also||[]).join(', '))}">
     <label>Name<input name="nickname" type="text" value="${esc(sc.nickname||'')}" placeholder="${esc(x.name)}"><span class="hint">What other agents call it. Kept for this folder.</span></label>
     <label>Role<textarea name="role" rows="3" placeholder="${x.folder_role?'From the folder: '+esc(x.folder_role):'What this agent is here for, e.g. Owns the billing API: invoices, payments, the Stripe webhook.'}">${esc(sc.role||'')}</textarea><span class="hint">For this agent only, kept across /clear and resume. The agent gets it as its brief, and other agents see it.${x.folder_role?' Leave it empty to use the role: in its folder\'s .peerlink.':' A role: line in a folder\'s .peerlink is the role of every agent there without one of its own.'}</span></label>
-    <label>Space<input name="space" type="text" list="spacenames" value="${esc(setSpace)}" placeholder="${x.space_source==='file'?esc(x.space)+' (from its .peerlink)':'unassigned'}"><span class="hint">Kept for its folder: every agent opened there joins it.${x.space_source==='file'||!setSpace?'':' Leave it empty to go back to the folder\'s .peerlink.'}</span></label>
+    <label>Space<input name="space" type="text" list="spacenames" value="${esc(setSpace)}" placeholder="${x.space_source==='file'?esc(x.space)+' (from its .peerlink)':x.space_source==='started'?esc(x.space)+' (started for it)':'unassigned'}"><span class="hint">Kept for its folder: every agent opened there joins it.${x.space_source==='file'||!setSpace?'':' Leave it empty to go back to the folder\'s .peerlink.'}</span></label>
     <details class="adv"${(x.also||[]).length?' open':''}><summary>Also in other spaces</summary>
     <label>Also a member of<input name="also" type="text" value="${esc((x.also||[]).join(', '))}" placeholder="none"><span class="hint">Rarely needed: more spaces it sees and messages, on top of its own. Separate with commas.</span></label></details>
     <datalist id="spacenames">${Object.keys(leadOf).concat(livePeers.map(p=>p.space)).filter((n,i,a)=>n&&n!=='default'&&a.indexOf(n)===i).sort().map(n=>`<option value="${esc(n)}">`).join('')}</datalist>
