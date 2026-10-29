@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.48"
+VERSION = "0.8.49"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -2142,8 +2142,34 @@ def successor(cwd):
     return max(live, key=lambda r: r["last_seen"]) if live else None
 
 
-def adopt(rec, old=None):
-    """Give rec the messages still queued for sessions that are gone: `old` (one it replaces), or any in its folder."""
+def tmux_pane_pid(name):
+    """The process a tmux session the daemon started runs, 0 when it's gone."""
+    tmux = shutil.which("tmux") or next((p for p in ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux") if os.access(p, os.X_OK)), "")
+    try:
+        out = subprocess.run([tmux, "list-panes", "-t", f"={name}:", "-F", "#{pane_pid}"], timeout=5, capture_output=True, text=True).stdout
+        return int(out.split()[0]) if out.split() else 0
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return 0
+
+
+def descends_from(pid, ancestor):
+    """Whether process `pid` is `ancestor` or runs under it."""
+    try:
+        pid = int(pid or 0)
+        for _ in range(12):
+            if pid == ancestor:
+                return True
+            if pid <= 1:
+                return False
+            pid = int(subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)], timeout=5, capture_output=True, text=True).stdout.strip() or 0)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    return False
+
+
+def adopt(rec, old=None, fresh=False):
+    """Give rec the messages still queued for sessions that are gone: `old` (one it replaces), or any in its folder.
+    `fresh`: rec is a new conversation, not a resume or one registering again, so it may be one a spawn started."""
     moved = 0
     for sid in list(inboxes):
         if sid == rec["id"]:
@@ -2154,6 +2180,14 @@ def adopt(rec, old=None):
         if sid.startswith("agent:"):
             # Held for an agent by name (a schedule's run): only that agent takes it, never another in its folder.
             box = list(inboxes[sid]) if sid == f"agent:{display_name(rec).lower()}" else []
+        elif sid.startswith("spawn:"):
+            # A first prompt for the agent a spawn started: that one takes it, found by its tmux pane, else the first
+            # new one in that folder.
+            box = [m for m in inboxes[sid] if m.get("to_cwd") == rec.get("cwd")]
+            if box:
+                sp = spawns.get(sid[6:]) or {}
+                pane = tmux_pane_pid(sp["tmux"]) if sp.get("tmux") else 0
+                box = box if (descends_from(rec.get("pid"), pane) if pane else fresh) else []
         else:
             box = [m for m in inboxes[sid] if sid == old or (m.get("to_cwd") and m.get("to_cwd") == rec.get("cwd"))]
         if not box:
@@ -2510,6 +2544,7 @@ def launch(sp):
                     return "", f"Claude Code there is waiting for you to trust the folder: run tmux attach -t {name} and choose \"Yes, I trust this folder\""
                 return f"still starting in tmux (tmux attach -t {name})", ""
             subprocess.run([tmux, "new-session", "-d", "-s", name, "-c", sp["dir"], claude], check=True, timeout=10, capture_output=True)
+            sp["tmux"] = name
             return f"in tmux (tmux attach -t {name})", ""
         if sys.platform == "darwin":
             quote = lambda v: '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
@@ -2547,7 +2582,10 @@ def decide_spawn(sid, approve, via):
                        "from_cwd": sp["requester"]["cwd"], "to_cwd": sp["dir"], "from_space": sp["space"], "to_space": sp["space"],
                        "text": sp["prompt"], "expects_reply": True, "reply_to": None, "hops": 0, "status": "queued", "v": 2}
                 next_msg[0] += 1
-                queue_for_folder(sp["dir"], msg)
+                # Held for the agent this starts, never one already running there: that may be the one that asked.
+                msg["to"], msg["to_name"] = f"spawn:{sid}", f"the agent starting for {sid}"
+                inboxes.setdefault(msg["to"], []).append(msg)
+                record(msg)
                 spawn_told(sp, f"Your user approved {sid}: an agent is starting in {sp['dir']} {how}, and your first prompt is waiting for it ({msg['id']}).")
             save_spawns()
     else:
@@ -3545,6 +3583,7 @@ class Handler(BaseHTTPRequestHandler):
             if not sid:
                 return self.reply(400, {"error": "id required"})
             with lock:
+                fresh = sid not in sessions and not b.get("succeeds")
                 rec = sessions.get(sid, {"id": sid, "started": time.time()})
                 if b.get("name") and not rec.get("name"):
                     # A folder keeps the name it was given: a new session there (a restart, a resume) is still "vault".
@@ -3586,7 +3625,7 @@ class Handler(BaseHTTPRequestHandler):
                         save_config()
                     if prev and prev.get("name"):
                         rec["name"] = prev["name"]
-                adopt(rec, old)
+                adopt(rec, old, fresh)
                 follow_agent(rec)
                 previous = dir_summaries.get(rec.get("cwd", ""))
                 if previous and previous["ts"] < time.time() - DIR_MEMORY_S:
