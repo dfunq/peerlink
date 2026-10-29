@@ -40,6 +40,8 @@ class FakeDaemon:
             def do_GET(self):
                 if self.path.startswith("/api/peers"):
                     return self.reply({"space": outer.space, "peers": [{"id": "p1", "name": "billing", "cwd": "/r/b", "busy": False, "token": "x"}]})
+                if self.path == "/api/inbox":
+                    return self.reply({"items": [], "user": "Dillon"})
                 if self.path == "/api/config":
                     return self.reply({"max_message_chars": 50, "token": "secret"})
                 if self.path.startswith("/api/messages"):
@@ -140,6 +142,12 @@ class EndpointTest(unittest.TestCase):
 
     def test_blocks_spaces_leads_and_discord(self):
         for to in ("space", "space:services", "Space:x", "lead", "lead:services", "discord", "discord#general"):
+            err, msg = self.c.tool("send_message", to=to, text="x")
+            self.assertTrue(err, to)
+        self.assertFalse([1 for p, _ in self.d.posted if p == "/api/messages"])
+
+    def test_blocks_the_user(self):
+        for to in ("user", "User", "you", "dillon", " Dillon "):
             err, msg = self.c.tool("send_message", to=to, text="x")
             self.assertTrue(err, to)
         self.assertFalse([1 for p, _ in self.d.posted if p == "/api/messages"])

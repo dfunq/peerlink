@@ -18,7 +18,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
-VERSION = "0.8.56"
+VERSION = "0.8.57"
 PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 HEARTBEAT_S = 2.0
 SEEN_MAX = 2000
@@ -78,6 +78,7 @@ class Daemon:
         self.seen = {}     # id -> True for every message addressed to us, so a reply_to on one is ours to make
         self.read = {}     # id -> True for those read, which the daemon may still hand again until it hears the ack
         self.space = ""
+        self.user_names = {"user", "you"}  # what the daemon reads as your user: their Inbox, which voice must not fill
         self.limit = 0
         self.registered = False
 
@@ -125,6 +126,9 @@ class Daemon:
         code, out = self.call("GET", "/api/config")
         if code == 200:
             self.limit = int(out.get("max_message_chars") or 0)
+        code, out = self.call("GET", "/api/inbox")
+        if code == 200 and out.get("user"):
+            self.user_names.add(str(out["user"]).strip().lower())
 
     def heartbeat(self):
         with self.lock:
@@ -174,12 +178,14 @@ class Daemon:
             raise Refused("text is required")
         if not to and not reply_to:
             raise Refused("to is required unless reply_to names a message sent to you")
-        # Only a plain message to one peer: no announcements or tasks, nothing to a space, its lead, or a Discord channel.
+        # Only a plain message to one peer: no announcements or tasks, nothing to a space, its lead, the user or a Discord channel.
         if args.get("kind") not in (None, "", "message"):
             raise Refused("this endpoint sends plain messages only")
         word = to.lower()
         if word.startswith(("space", "lead")):
             raise Refused("this endpoint can't message a space or its lead: name the peer, as list_peers shows it")
+        if word in self.user_names:
+            raise Refused("this endpoint can't message the user: name a peer")
         if word == "discord" or word.startswith("discord#"):
             raise Refused("this endpoint can't post to Discord: name a peer")
         if self.limit and len(text) > self.limit:
