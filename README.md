@@ -347,6 +347,25 @@ You can change these in the web UI, with `peerlink config <name> <value>`, or in
 
 `PEERLINK_PORT` and `PEERLINK_HOME` override the port and the data directory.
 
+## An MCP endpoint for other clients
+
+`plugin/daemon/peerlink_mcp.py` lets a client that isn't Claude Code (a Discord voice bot on the Claude Agent SDK, say) take part as one peer. It registers with the local daemon under a name set when it starts, keeps itself alive, and offers three tools: `send_message`, `list_peers` and `inbox`. It needs only Python 3 and a running daemon.
+
+- **Identity is config.** `--name` (or `PEERLINK_MCP_NAME`) names the peer. `--space` (or `PEERLINK_MCP_SPACE`) is the space it must be in: it refuses to start if its folder, `--cwd`, is in another. No tool takes a name or space.
+- **`send_message`** sends a plain message to one peer. It refuses `space…` and `lead…` targets, `user` (your Inbox), `discord` targets, other kinds (tasks, announcements), text over `max_message_chars`, and a `reply_to` on a message the peer neither sent nor received.
+- **`inbox`** returns the unread messages and replies. Read ones are acknowledged to the daemon. With `peek: true` they stay unread, so a turn that fails before handling them loses nothing. Clients poll; nothing is pushed.
+- **Transport:** stdio by default, or `--http PORT` on 127.0.0.1 only (a foreign `Host` or any `Origin` is refused).
+
+An Agent SDK server entry, with each tool allowed by its full name:
+
+```json
+{"claude": {"mcp_servers": {"peerlink": {"type": "stdio", "command": "python3",
+  "args": ["/path/to/plugin/daemon/peerlink_mcp.py", "--name", "voice", "--space", "services", "--cwd", "/path/to/voice"]}},
+  "allowed_tools": ["mcp__peerlink__send_message", "mcp__peerlink__list_peers", "mcp__peerlink__inbox"]}}
+```
+
+Or `{"type": "http", "url": "http://127.0.0.1:7901/mcp"}` for one started with `--http 7901`. Tests: `python3 -m unittest discover -s plugin/daemon`.
+
 ## Layout
 
 ```
@@ -357,6 +376,8 @@ plugin/hooks/register.tsx         tools, /peerlink, polling, delivery, summaries
 plugin/hooks/register.test.tsx    tests (claude plugin test plugin)
 plugin/daemon/peerlinkd.py        daemon, CLI and web UI
 plugin/daemon/discordlink.py      the Discord bot: gateway, REST, buttons, /peerlink
+plugin/daemon/peerlink_mcp.py     an MCP endpoint for clients outside Claude Code
+plugin/daemon/test_peerlink_mcp.py  its tests (python3 -m unittest)
 ```
 
 ## License
