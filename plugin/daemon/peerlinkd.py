@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.52"
+VERSION = "0.8.53"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -1582,7 +1582,7 @@ def inbox_items():
                 for x in spawns.values() if x["status"] == "pending"]
         out += [{"kind": "approval", "id": c["id"], "who": c["requester"].get("name", ""), "since": c["created"],
                  "title": f"Schedule for {tilde_path(c['folder'])}: {when_text(c)}",
-                 "text": f"{c['prompt']}\n\nIt starts an agent there when none is running."}
+                 "text": f"{c['prompt']}\n\nApproving it: {start_note(c)}."}
                 for c in schedules.values() if c["status"] == "pending"]
     order = {"approval": 0, "task": 1, "question": 2, "feedback": 3}
     return sorted(out, key=lambda x: (order[x["kind"]], x["since"]))
@@ -2266,6 +2266,35 @@ def open_threads(rec, max_age=8 * 3600, limit=8):
     return {"owes": owes[-limit:], "waiting": waiting[-limit:], "tasks": mine[-limit:], "asked": asked[-limit:]}
 
 
+def set_member_role(sid, to, role):
+    """A space lead sets the role of an agent in its space, or in a space inside it (or its own). It's that agent's,
+    kept across /clear, and wins over its folder's .peerlink role: lines; empty goes back to those."""
+    with lock:
+        by = sessions.get(sid)
+        if by is None:
+            return 404, {"error": "unknown agent; register again"}
+    target, err = resolve(str(to or ""))
+    if not target:
+        return 404, {"error": err or f"no running agent is called {to}"}
+    with lock:
+        mine, space, seen = space_of(by)[0] if leads(by) else "", space_of(target)[0], set()
+        allowed = target["id"] == sid
+        while mine and space and space not in seen and not allowed:
+            seen.add(space)
+            allowed = space == mine
+            space = space_parent(space)
+        if not allowed:
+            return 403, {"error": f"only the lead of {display_name(target)}'s space, or of a space it sits inside, sets its role"}
+        role = str(role or "").strip()[:ROLE_MAX]
+        config["sessions"].setdefault(target["id"], {})["role"] = role
+        save_config()
+        if target["id"] != sid:
+            task_message(None, target.get("cwd", ""), f"{display_name(by)}, your space lead, set your role:\n{role}" if role
+                         else f"{display_name(by)}, your space lead, cleared the role it set for you; your folder's applies again.", prefer=target)
+    log("role", display_name(target), "set by", display_name(by))
+    return 200, {"agent": display_name(target), "role": role or folder_role(target)}
+
+
 def rename_self(sid, name):
     """An agent names itself: this agent only, kept across /clear and resume. Its folder's name, which the next
     agent there takes, stays as it is; you change that in the web UI."""
@@ -2377,7 +2406,7 @@ def new_task(msg, requester, parent_task=""):
     return t
 
 
-def task_message(t, to_cwd, text, sender=None, reply_to=None, kind="message"):
+def task_message(t, to_cwd, text, sender=None, reply_to=None, kind="message", prefer=None):
     """A note about a task from its owner (or peerlink), or from peerlink about a change of role (t None),
     queued for an agent's folder. Called with the lock held."""
     msg = {"id": f"m{next_msg[0]}", "ts": time.time(), "from": sender["id"] if sender else "peerlink",
@@ -2388,7 +2417,7 @@ def task_message(t, to_cwd, text, sender=None, reply_to=None, kind="message"):
     if kind == "task":
         msg["kind"], msg["task"] = "task", t["id"]
     next_msg[0] += 1
-    agent = queue_for_folder(to_cwd, msg)
+    agent = queue_for_folder(to_cwd, msg, prefer)
     msg["to_space"] = space_of(agent)[0] if agent else ""
     return msg
 
@@ -2826,6 +2855,15 @@ def schedule_when(body, now):
     return cron, None if cron else next_run, next_run
 
 
+def start_note(c):
+    """What approving a schedule that may start an agent means, said plainly: most often the agent is already
+    running and just gets the prompt."""
+    who = c.get("agent") or folder_name(c["folder"])
+    with lock:
+        running = any(is_live(r) and display_name(r).lower() == who.lower() for r in sessions.values()) or bool(successor(c["folder"]))
+    return f"it goes to {who}, and starts a new agent only if {who} isn't running ({'it is now' if running else 'it isn’t now'})"
+
+
 def create_schedule(body, by=None):
     """A schedule from an agent (`by`) or from you (None). An agent's that may start one waits for your approval.
     It goes to an agent: that one wherever it runs, else a new one started in the folder it was last in."""
@@ -2850,11 +2888,11 @@ def create_schedule(body, by=None):
         channel = approval_channel(by) if by else ""
     log("schedule", c["id"], c["status"], c["agent"] or tilde_path(folder), when_text(c))
     if by and start and c["status"] == "active" and channel and discord.get("token") and discord_bot[0]:
-        post_async([(channel, f"**{c['requester']['name']}** scheduled `{tilde_path(folder)}` ({when_text(c)}) without asking, starting an agent there when none is running (auto-approve is on): {prompt[:600]}", None)])
+        post_async([(channel, f"**{c['requester']['name']}** scheduled `{tilde_path(folder)}` ({when_text(c)}) without asking (auto-approve is on): {start_note(c)}.\n{prompt[:600]}", None)])
     if c["status"] == "pending" and channel and discord.get("token") and discord_bot[0]:
         try:
             sent = discordlink.post(discord["token"], channel,
-                                    f"**{c['requester']['name']}** asks to schedule `{tilde_path(folder)}` ({when_text(c)}), starting an agent there when none is running: {prompt[:600]}",
+                                    f"**{c['requester']['name']}** asks to schedule `{tilde_path(folder)}` ({when_text(c)}): {start_note(c)}.\n{prompt[:600]}",
                                     None, discordlink.buttons(["Approve", "Deny"], f"pc:{c['id']}"))
             with lock:
                 c["discord_out"] = {"channel_id": channel, "message_id": str((sent[-1] or {}).get("id", "")) if sent else ""}
@@ -3795,6 +3833,10 @@ class Handler(BaseHTTPRequestHandler):
             with lock:
                 session_gone(rest[1])
             return self.reply(200, {"ok": True})
+
+        if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "role" and method == "POST":
+            b = self.body()
+            return self.reply(*set_member_role(rest[1], b.get("agent"), b.get("role")))
 
         if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "rename" and method == "POST":
             return self.reply(*rename_self(rest[1], self.body().get("name")))
