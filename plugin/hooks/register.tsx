@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.52'
+const DAEMON_VERSION = '0.8.53'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -1392,6 +1392,20 @@ export const register: Register = on => {
       isDeferred: false,
     })
     await $.tool.register({
+      name: 'set_role',
+      description:
+        "As a space lead, set the role of an agent in your space or a space inside it: what it is there for and the rules it works by, shown to it and its peers. It's that agent's, kept across /clear, and replaces its folder's .peerlink role: lines; an empty role goes back to those. The agent is told.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          agent: { type: 'string', description: 'Its name or id' },
+          role: { type: 'string', description: 'The whole role text; empty to clear it' },
+        },
+        required: ['agent', 'role'],
+      },
+      isDeferred: true,
+    })
+    await $.tool.register({
       name: 'rename',
       description:
         "Change your own name, the one peers address you by, such as when you share a folder with another agent and need a distinct one (\"pixelgrid-client\"). It's yours alone and kept across /clear; the folder's name stays as it is.",
@@ -1630,6 +1644,13 @@ export const register: Register = on => {
     $.ui.log('peerlink: this agent asked to clear its context; it clears when this turn ends.')
     return text('Your context clears when this turn ends, and your notes start the next one. End the turn now: one line on what you finished.')
   })
+
+  on('tool.call', { tool: 'mcp__peerlink__set_role' }, async ($, e) => {
+    const input = e as any
+    const res = await call($, 'POST', `/api/sessions/${sessionId}/role`, { agent: input.agent, role: input.role ?? '' })
+    if (!res.ok) return text(`Role not set: ${res.data.error ?? res.status}`)
+    return text(`${res.data.agent}'s role is now:\n${res.data.role || '(none)'}`)
+  }).catch(daemonDown)
 
   on('tool.call', { tool: 'mcp__peerlink__rename' }, async ($, e) => {
     const res = await call($, 'POST', `/api/sessions/${sessionId}/rename`, { name: (e as any).name })
