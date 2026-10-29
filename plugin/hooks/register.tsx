@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.57'
+const DAEMON_VERSION = '0.8.58'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -29,7 +29,7 @@ type PeerMessage = {
 
 type ClientConfig = {
   space: string
-  space_source: 'set' | 'file' | 'default'
+  space_source: 'started' | 'set' | 'file' | 'default'
   space_from: string
   // Set when this agent leads a space nested in another: the space it also sits in and speaks for its own.
   parent?: string
@@ -116,6 +116,10 @@ let nudgedFor = ''
 // Messages that reached the session, so one the daemon hands out again isn't shown twice; and acks it hasn't taken yet.
 const placed = new Set<string>()
 let unacked: string[] = []
+// A prompt submitted to start a turn, acked only once the turn starts: one Claude Code takes before it's ready (an
+// agent seconds old) is lost without a word, so with no turn after STARTED_WITHIN_MS it's put to the agent again.
+let submitted: { batch: PeerMessage[]; at: number } | undefined
+const STARTED_WITHIN_MS = 30_000
 // Messages wanting a reply that arrived during the current turn. One the agent ends the turn without answering is
 // put to it again, once, as a turn of its own: a message that lands mid-task is easy to read past.
 let midTurn: PeerMessage[] = []
@@ -542,11 +546,13 @@ async function deliver($: EngineInterface) {
   pending = []
   busy = true
   $.ui.toast(`Message from ${batch.map(m => m.from_name).join(', ')}`)
+  submitted = { batch, at: await $.clock.now() }
   const res: any = await $.prompt.submit({ text: framed(batch) }).catch(err => ({ drop: String(err) }))
   if (res && 'drop' in res) {
     // No turn started (a hook dropped it, or the session wasn't taking prompts): don't sit "busy" with the messages
     // gone. Put them in the transcript instead, so they're read with the next turn, and say so.
     busy = false
+    submitted = undefined
     const put = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: framed(batch) }] } }).catch(() => ({ deny: true }))
     if ('deny' in put && put.deny) {
       pending = [...batch, ...pending]
@@ -557,8 +563,31 @@ async function deliver($: EngineInterface) {
     $.ui.toast(`Message from ${batch.map(m => m.from_name).join(', ')}, waiting for your next prompt`)
     return
   }
-  acked($, batch)
   turnGiven.push(...batch.map(m => m.id))
+}
+
+// The submitted prompt's turn started: its messages reached the session. None after STARTED_WITHIN_MS: put them again.
+function turnStarted($: EngineInterface, text: unknown) {
+  // A turn you started by typing isn't the one the prompt asked for.
+  if (!submitted || (typeof text === 'string' && text && !submitted.batch.some(m => text.includes(m.id)))) return
+  acked($, submitted.batch)
+  submitted = undefined
+}
+
+async function resubmitLost($: EngineInterface) {
+  if (!submitted || (await $.clock.now()) - submitted.at < STARTED_WITHIN_MS) return
+  const lost = submitted.batch
+  // No turn.start seen: the transcript says whether the prompt landed anyway. When it can't be read, trust the submit.
+  const said = await $.session.messages().catch(() => undefined)
+  if (!said || said.some((m: any) => m.role === 'user' && typeof m.text === 'string' && lost.some(x => m.text.includes(x.id)))) {
+    turnStarted($, undefined)
+    return
+  }
+  submitted = undefined
+  busy = false
+  $.ui.log(`peerlink: ${lost.map(m => m.id).join(', ')} didn't start a turn (the session wasn't ready): putting it to the agent again.`)
+  turnGiven = turnGiven.filter(id => !lost.some(m => m.id === id))
+  pending = [...lost, ...pending.filter(p => !lost.some(m => m.id === p.id))]
 }
 
 // Whether a turn that died on an API error hit the account's usage limit: a window the API reports full, or
@@ -679,13 +708,14 @@ async function poll($: EngineInterface) {
     await runNext($)
   }
   // The daemon hands a message out again until it's acked: skip one already here or already in the session.
-  const held = new Set([...pending, ...notices].map(m => m.id))
+  const held = new Set([...pending, ...notices, ...(submitted?.batch ?? [])].map(m => m.id))
   const inbox = (res.data.inbox as PeerMessage[]).filter(m => !held.has(m.id) && !placed.has(m.id))
   for (const m of inbox.filter(m => m.kind === 'announcement')) {
     notices.push(m)
     $.ui.log(`${frame(m).replace('\n', ': ')}  (read at the next turn)`)
   }
   pending.push(...inbox.filter(m => m.kind !== 'announcement'))
+  await resubmitLost($)
   if (cfg && before !== cfg.poll_interval_ms) startPolling($)
   void reloadIfUpdated($)
   showStatus($)
@@ -881,7 +911,8 @@ async function listPeers($: EngineInterface, withIds: boolean) {
 function spaceLine() {
   if (!cfg?.space) return 'space: default'
   const from =
-    cfg.space_source === 'set' ? 'set for this folder'
+    cfg.space_source === 'started' ? 'asked for by the agent that started it'
+    : cfg.space_source === 'set' ? 'set for this folder'
     : cfg.space_source === 'file' ? `from ${cfg.space_from}`
     : 'no space set'
   const nest = cfg.parent ? `, leads it inside "${cfg.parent}"` : cfg.leads ? ', leads it' : cfg.lead ? `, led by ${cfg.lead}` : ''
@@ -1474,6 +1505,7 @@ export const register: Register = on => {
     if (e.agentId === undefined) {
       busy = true
       activity = 'thinking'
+      turnStarted($, (e as any).text)
     }
     return next(e)
   })
@@ -1494,6 +1526,7 @@ export const register: Register = on => {
     const done = await next(e)
     if (e.agentId === undefined) {
       busy = false
+      turnStarted($, undefined)
       turnsSinceSummary++
       if (await limitCheck($, e.reason).catch(() => false)) return done
       await checkContextSize($).catch(() => undefined)
