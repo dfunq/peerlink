@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.55'
+const DAEMON_VERSION = '0.8.56'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -1625,7 +1625,8 @@ export const register: Register = on => {
     const res = await call($, 'POST', `/api/tasks/${encodeURIComponent(id)}`, { by: sessionId, status: input.status, note: input.note })
     if (!res.ok) return text(`Not updated: ${res.data.error ?? res.status}`)
     const t = res.data.task
-    return text(`Task ${t.id} is ${t.status.replace('_', ' ')}.${t.status === 'done' || t.status === 'failed' ? ` ${t.requester?.name || 'Whoever asked'} gets your note.` : ''}`)
+    // The task's own title, so an agent that mixed up two task ids sees it closed the wrong one.
+    return text(`Task ${t.id} from ${t.requester?.name || 'your user'} ("${t.title}") is ${t.status.replace('_', ' ')}.${t.status === 'done' || t.status === 'failed' ? ` ${t.requester?.name || 'Whoever asked'} gets your note. If that isn't the task you meant, tell them at once.` : ''}`)
   }).catch(daemonDown)
 
   on('tool.call', { tool: 'mcp__peerlink__report_issue' }, async ($, e) => text(await reportIssue($, String((e as any).what ?? ''), String((e as any).details ?? ''), (e as any).type === 'idea' ? 'idea' : 'bug')))
