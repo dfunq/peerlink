@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.53"
+VERSION = "0.8.54"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -1255,6 +1255,7 @@ def on_discord(d):
                             and (m.get("discord_out") or {}).get("message_id") == d["ref"]), None)
         if replied:
             cwd = replied["from_cwd"]
+    asker = continuation(replied["from"], replied.get("from_name", ""), cwd) if replied else None
     if not cwd:
         discordlink.post(discord["token"], d["channel_id"], "No agent here receives messages yet: tick Receives for one in the peerlink web UI, under Channels.", d["message_id"])
         return
@@ -1280,7 +1281,7 @@ def on_discord(d):
         }
         next_msg[0] += 1
         task = new_task(msg, {"id": "", "name": msg["from_name"], "cwd": "", "discord": msg["discord"]}) if kind == "task" else None
-        agent = queue_for_folder(cwd, msg)
+        agent = queue_for_folder(cwd, msg, asker)
         msg["to_space"] = space_of(agent)[0] if agent else ""
         if task:
             task["owner"], task["space"] = msg["to_name"], msg["to_space"]
@@ -1632,7 +1633,7 @@ def inbox_act(body, discord_from=None):
                         "from_space": "", "to_space": m.get("from_space", ""), "text": text[:20000], "expects_reply": False,
                         "reply_to": iid, "hops": 0, "status": "queued", "v": 2})
             next_msg[0] += 1
-            agent = queue_for_folder(m.get("from_cwd", ""), msg)
+            agent = queue_for_folder(m.get("from_cwd", ""), msg, continuation(m.get("from", ""), m.get("from_name", ""), m.get("from_cwd", "")))
         close_buttons(m)
         return 200, {"id": msg["id"], "to": msg["to_name"], "waiting": not agent}
     return 400, {"error": "kind is approval, task, question or feedback"}
@@ -2156,9 +2157,11 @@ def continuation(sid, name="", cwd=""):
 
 
 def successor(cwd):
-    """The live agent in a folder, the most recently seen one first: who takes over a gone session's messages."""
+    """The live agent in a folder: who gets what's sent to the folder rather than to one agent. Where agents share it,
+    the one going by the folder's name (its lead, say, not the agents it started), else the most recently seen."""
     live = [r for r in sessions.values() if cwd and r.get("cwd") == cwd and is_live(r)]
-    return max(live, key=lambda r: r["last_seen"]) if live else None
+    named = [r for r in live if display_name(r).lower() == folder_name(cwd).lower()]
+    return max(named or live, key=lambda r: r["last_seen"]) if live else None
 
 
 def tmux_pane_pid(name):
