@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.51"
+VERSION = "0.8.52"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -710,7 +710,10 @@ def owns_task(rec, t):
     while oid in succeeded_by and oid not in seen:
         seen.add(oid)
         oid = succeeded_by[oid]
-    if not oid or oid == rec["id"]:
+    if not oid:  # its message is too old to say: the agent going by the owner's name, if one is running
+        named = next((r for r in sessions.values() if is_live(r) and r.get("cwd") == t["owner_cwd"] and display_name(r) == t.get("owner")), None)
+        return not named or named["id"] == rec["id"]
+    if oid == rec["id"]:
         return True
     other = sessions.get(oid)
     return not (other and is_live(other))
