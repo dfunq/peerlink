@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.8.57', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.8.58', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (state.forget && path.endsWith('/heartbeat') && 'busy' in body) {
       state.forget = false
       return { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'unknown agent; register again' }) } }
@@ -72,7 +72,9 @@ function engine(on: any, { turns = 0, percent = 85, readme = '', claudeMd = '', 
   const limits: { kind: string; percentUsed: number; resetsAt?: string }[] = []
   on('session.usage', () => ({ value: { context: { window: 200000, tokens: percent * 2000, percent }, rateLimits: limits } }))
   on('session.turns', () => ({ value: turns }))
-  on('session.messages', () => ({ value: [{ role: 'user', text: 'build the invoice page', toolUses: [] }] }))
+  // The transcript: what the plugin's own prompts put there follows the first prompt.
+  const said: { role: string; text: string; toolUses: unknown[] }[] = [{ role: 'user', text: 'build the invoice page', toolUses: [] }]
+  on('session.messages', () => ({ value: said }))
   // What git says about the agent's folder: dirs are git-dir, common dir and top level; null outside a repo.
   const git = { dirs: ['/Users/x/r/web/.git', '/Users/x/r/web/.git', '/Users/x/r/web'] as string[] | null, head: 'main', sha: '1a2b3c4' }
   const pinned: unknown[] = []
@@ -114,10 +116,12 @@ function engine(on: any, { turns = 0, percent = 85, readme = '', claudeMd = '', 
   // What the plugin submitted as a prompt of its own: a peer message waking this agent.
   const woke: string[] = []
   // Set drop to have the session refuse the plugin's prompts, as a hook that drops them does.
-  const submits = { drop: '' }
+  // Set lose to have the session take the plugin's prompts and run no turn, as one still starting up can.
+  const submits = { drop: '', lose: false }
   on('prompt.submit', (_: any, e: any) => {
     if (submits.drop) return { drop: submits.drop }
     if (e.text.includes('(Reply with send_message')) woke.push(e.text)
+    if (!submits.lose) said.push({ role: 'user', text: e.text, toolUses: [] })
     return { text: e.text, context: e.context }
   })
   on('turn.complete', (_: any, e: any) => ({ text: e.text }))
@@ -678,8 +682,37 @@ test('a message that wakes the agent is acked, and every heartbeat carries acks'
   await clock.advance(600000)
   for (let i = 0; i < 10; i++) await settle()
   expect(woke.length).toBe(1)
+  // Acked once its turn shows up: here no turn.start comes, so the next heartbeat finds it in the transcript.
+  await clock.advance(600000)
+  for (let i = 0; i < 10; i++) await settle()
+  expect(woke.length).toBe(1)
   expect(daemon.posted.some(p => p.path.endsWith('/ack') && p.body.ids.includes('m7'))).toBe(true)
   expect(daemon.posted.filter(p => p.path.endsWith('/heartbeat') && 'busy' in p.body).every(p => Array.isArray(p.body.ack))).toBe(true)
+})
+
+test('a prompt the session takes but never runs is put to the agent again, and acked only once it lands', async ($, on) => {
+  const { clock, woke, submits } = engine(on)
+  const inbox: any[] = []
+  const daemon = fakeDaemon(on, 1, null, inbox, { wake_delay_s: 0 })
+  await $.session.start(START)
+  await settle()
+  submits.lose = true
+  inbox.push({ id: 'm8', from: 'sky-id', from_name: 'skyforge', from_host: 'Mac', text: 'Your brief', expects_reply: true, reply_to: null, hops: 0 })
+  await clock.advance(600000)
+  for (let i = 0; i < 10; i++) await settle()
+  expect(woke.length).toBe(1)
+  submits.lose = false
+  await clock.advance(600000)
+  for (let i = 0; i < 10; i++) await settle()
+  expect(daemon.posted.some(p => p.path.endsWith('/ack') && p.body.ids.includes('m8'))).toBe(false)
+  await clock.advance(600000)
+  for (let i = 0; i < 10; i++) await settle()
+  expect(woke.length).toBe(2)
+  expect(woke[1]).toContain('m8 · reply expected')
+  await clock.advance(600000)
+  for (let i = 0; i < 10; i++) await settle()
+  expect(woke.length).toBe(2)
+  expect(daemon.posted.some(p => p.path.endsWith('/ack') && p.body.ids.includes('m8'))).toBe(true)
 })
 
 test('a clear asked from the web UI runs /clear when the agent is idle', async ($, on) => {
@@ -768,7 +801,7 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.8.57 · daemon 0.8.57 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.8.58 · daemon 0.8.58 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the space is listed once', async ($, on) => {
@@ -801,7 +834,7 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.8.57')
+  expect(reg.plugin).toBe('0.8.58')
 })
 
 test('an agent registers again under the folder it started in, wherever the host has moved its root since', async ($, on) => {
@@ -880,7 +913,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.8.58', true], ['0.8.57', false]] as const)
+for (const [installed, reloads] of [['0.8.59', true], ['0.8.58', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     const daemon = fakeDaemon(on)
