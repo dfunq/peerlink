@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.50"
+VERSION = "0.8.51"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -699,10 +699,26 @@ def is_live(rec, now=None):
     return (now or time.time()) - rec["last_seen"] < config["peer_ttl_s"]
 
 
+def owns_task(rec, t):
+    """Whether this agent owns the task: the agent it was sent to (or the one that agent became after /clear), or,
+    once that one is gone, whichever agent its folder has. Agents sharing a folder don't share each other's tasks."""
+    if not (t["owner_cwd"] and rec.get("cwd") == t["owner_cwd"]):
+        return False
+    if "owner_id" not in t:  # from before 0.8.51: the agent its message went to
+        t["owner_id"] = next((m.get("to", "") for m in messages if m["id"] == t.get("msg")), "")
+    oid, seen = t["owner_id"], set()
+    while oid in succeeded_by and oid not in seen:
+        seen.add(oid)
+        oid = succeeded_by[oid]
+    if not oid or oid == rec["id"]:
+        return True
+    other = sessions.get(oid)
+    return not (other and is_live(other))
+
+
 def owned_task_ids(rec):
-    """The open tasks this agent's folder owns, oldest first: what it's on, whatever its summary says."""
-    cwd = rec.get("cwd")
-    return [t["id"] for t in tasks.values() if t["status"] in TASK_OPEN and cwd and t["owner_cwd"] == cwd]
+    """The open tasks this agent owns, oldest first: what it's on, whatever its summary says."""
+    return [t["id"] for t in tasks.values() if t["status"] in TASK_OPEN and owns_task(rec, t)]
 
 
 def public_peer(rec):
@@ -2242,7 +2258,7 @@ def open_threads(rec, max_age=8 * 3600, limit=8):
     def tgist(t, who):
         return {"id": t["id"], "with": who, "ago_s": round(now - t["created"]), "text": t["title"], "status": t["status"]}
     live = [t for t in tasks.values() if t["status"] in TASK_OPEN]
-    mine = [tgist(t, t["requester"].get("name", "")) for t in live if t["owner_cwd"] and t["owner_cwd"] == rec.get("cwd")]
+    mine = [tgist(t, t["requester"].get("name", "")) for t in live if owns_task(rec, t)]
     asked = [tgist(t, t["owner"]) for t in live if t["requester"].get("id") == rec["id"] or (rec.get("cwd") and t["requester"].get("cwd") == rec.get("cwd"))]
     return {"owes": owes[-limit:], "waiting": waiting[-limit:], "tasks": mine[-limit:], "asked": asked[-limit:]}
 
@@ -2350,7 +2366,7 @@ def new_task(msg, requester, parent_task=""):
     t = {"id": f"t{next_task[0]}", "title": re.sub(r"(?i)^task\s*:\s*", "", title)[:120], "text": msg["text"][:4000],
          "requester": requester, "owner_cwd": msg.get("to_cwd", ""), "owner": msg.get("to_name") or folder_name(msg.get("to_cwd", "")),
          "space": msg.get("to_space", ""), "status": "open", "created": now, "updated": now, "note": "",
-         "msg": msg["id"], "parent": parent_task}
+         "msg": msg["id"], "parent": parent_task, "owner_id": msg.get("to", "") if msg.get("to", "") in sessions else ""}
     next_task[0] += 1
     tasks[t["id"]] = t
     msg["kind"], msg["task"] = "task", t["id"]
@@ -2398,7 +2414,7 @@ def update_task(tid, body, web=False):
             by = sessions.get(body.get("by") or "")
             if by is None:
                 return 403, {"error": "unknown agent; register again"}
-            owns = bool(t["owner_cwd"]) and by.get("cwd") == t["owner_cwd"]
+            owns = owns_task(by, t)
             asked = by["id"] == t["requester"].get("id") or (by.get("cwd") and by.get("cwd") == t["requester"].get("cwd"))
             allowed = ({"in_progress", "done", "failed"} if owns else set()) | ({"cancelled"} if asked else set())
             if status not in allowed:
@@ -2412,7 +2428,7 @@ def update_task(tid, body, web=False):
         if web and owner and owner != t["owner_cwd"]:
             if t["owner_cwd"] and was in TASK_OPEN:
                 task_message(t, t["owner_cwd"], f"Task {tid} was handed to {folder_name(owner)} in the web UI: stop work on it. {t['title']}")
-            t["owner_cwd"], t["owner"] = owner, folder_name(owner)
+            t["owner_cwd"], t["owner"], t["owner_id"] = owner, folder_name(owner), ""
             t.pop("user", None)
             status = status if status in TASK_OPEN else "open"
             handed = f"Task {tid} was handed to you"
