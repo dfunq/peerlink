@@ -18,7 +18,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
-VERSION = "0.8.57"
+VERSION = "0.8.59"
 PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 HEARTBEAT_S = 2.0
 SEEN_MAX = 2000

@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.58"
+VERSION = "0.8.59"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -1407,6 +1407,14 @@ def read_files(paths):
     return out, None
 
 
+def labelled(label, text):
+    """label then text, for Discord. Text that opens with a block (a "## " header, a list, a quote, a code fence)
+    starts on the next line: Discord renders those only at the start of a line."""
+    if re.match(r"\s*(#{1,3} |[-*] |> |```|\d+\. )", text or ""):
+        return f"{label}\n{text.lstrip()}"
+    return f"{label} {text}"
+
+
 def post_to_discord(sender_rec, channel_id, text, reply_ref=None, reply_to=None, hops=0, options=None, files=None, expects_reply=False):
     """An agent's message out to Discord, labelled with who said it, and recorded like any other."""
     name = display_name(sender_rec)
@@ -1417,7 +1425,7 @@ def post_to_discord(sender_rec, channel_id, text, reply_ref=None, reply_to=None,
         mid = f"m{next_msg[0]}"
         next_msg[0] += 1
     use_buttons = bool(options) and discord.get("buttons", True)
-    body = f"**{name}**: {text}" if not reply_ref else text
+    body = text if reply_ref else labelled(f"**{name}**:", text)
     if options and not use_buttons:
         body += "\n" + "\n".join(f"{i + 1}. {o}" for i, o in enumerate(options))
     try:
@@ -1553,7 +1561,7 @@ def user_send(sender_rec, word, text, kind, parent_task, expects_reply, hops, op
         record(msg)
     if task and channel:
         try:
-            sent = discordlink.post(discord["token"], channel, f"**{msg['from_name']}** has a task for you ({task['id']}): {text}",
+            sent = discordlink.post(discord["token"], channel, labelled(f"**{msg['from_name']}** has a task for you ({task['id']}):", text),
                                     None, discordlink.buttons(["Done", "Couldn't do it"], f"pt:{task['id']}"))
             with lock:
                 task["discord_out"] = {"channel_id": channel, "message_id": str((sent[-1] or {}).get("id", "")) if sent else ""}
