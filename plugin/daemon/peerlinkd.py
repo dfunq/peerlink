@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.59"
+VERSION = "0.8.60"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -1426,8 +1426,11 @@ def post_to_discord(sender_rec, channel_id, text, reply_ref=None, reply_to=None,
         next_msg[0] += 1
     use_buttons = bool(options) and discord.get("buttons", True)
     body = text if reply_ref else labelled(f"**{name}**:", text)
-    if options and not use_buttons:
-        body += "\n" + "\n".join(f"{i + 1}. {o}" for i, o in enumerate(options))
+    # A question in a "> " quote keeps its options in the quote too, listed even under buttons; otherwise they're
+    # listed only when there are no buttons.
+    quoted = text.rstrip().rsplit("\n", 1)[-1].lstrip().startswith(">")
+    if options and (quoted or not use_buttons):
+        body = body.rstrip() + "\n" + "\n".join(f"{'> ' if quoted else ''}{i + 1}. {o}" for i, o in enumerate(options))
     try:
         sent = discordlink.post(discord["token"], channel_id, body, reply_ref,
                                 discordlink.buttons(options, f"pl:{mid}") if use_buttons else None, uploads)
