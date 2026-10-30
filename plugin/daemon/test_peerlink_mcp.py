@@ -121,7 +121,7 @@ class EndpointTest(unittest.TestCase):
     def test_registers_under_the_launch_name_and_lists_exactly_three_tools(self):
         init = self.c.rpc("initialize", {"protocolVersion": "2025-03-26"})["result"]  # registration precedes serving
         reg = next(b for p, b in self.d.posted if p == "/api/sessions")
-        self.assertEqual((reg["name"], reg["id"]), ("voice", "mcp-voice"))
+        self.assertEqual((reg["name"], reg["had_name"], reg["id"]), ("voice", "voice", "mcp-voice"))
         self.assertEqual(init["serverInfo"]["name"], "peerlink")
         tools = self.c.rpc("tools/list")["result"]["tools"]
         self.assertEqual(sorted(t["name"] for t in tools), ["inbox", "list_peers", "send_message"])
