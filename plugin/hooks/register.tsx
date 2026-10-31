@@ -924,7 +924,9 @@ function spaceLine() {
 function spaceTag(p: any) {
   // `parent` alone: a peer on another machine whose daemon predates `leads`.
   if (p.leads || p.parent) return ` [leads ${p.space}]`
-  return cfg && p.space && p.space !== cfg.space ? ` [${p.space}]` : ''
+  // One from another space that's also a member of yours says so: it's in your space as much as its own.
+  if (!cfg || !p.space || p.space === cfg.space) return ''
+  return Array.isArray(p.also) && p.also.includes(cfg.space) ? ` [${p.space}, also in ${cfg.space}]` : ` [${p.space}]`
 }
 
 // The system prompt's peerlink section: who this agent is to its peers, its role, and how to work with them.
