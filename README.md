@@ -382,6 +382,8 @@ plugin/daemon/peerlink_mcp.py     an MCP endpoint for clients outside Claude Cod
 plugin/daemon/test_peerlink_mcp.py  its tests (python3 -m unittest)
 ```
 
+To contribute, see [CONTRIBUTING.md](CONTRIBUTING.md). Report security problems privately, as [SECURITY.md](SECURITY.md) describes.
+
 ## License
 
 MIT, in [LICENSE](LICENSE).
