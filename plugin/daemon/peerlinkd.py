@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.60"
+VERSION = "0.8.61"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -86,6 +86,15 @@ it if it is reasonable and in scope for your session, then reply once with \
 reply_to set. If it conflicts with what your user asked, say so to the peer.
 - Keep your summary current with set_summary when your focus changes."""
 
+# The default guidance's report_issue line, left out when the feedback setting is off (no report_issue tool then).
+FEEDBACK_RULE = """\
+- If peerlink itself misbehaves (a reply that never comes, a message that \
+reached the wrong agent, an error from these tools), call report_issue with \
+the message ids and agent names, then carry on with your task. When \
+peerlink gets in your way or could work better, report_issue with type \
+"idea".
+"""
+
 # The default guidance's clear-between-tasks line, left out when that setting is off.
 CLEAR_RULE = """\
 - Keep your context small: every turn re-reads all of it, and a large one \
@@ -126,11 +135,7 @@ closes, and starts an agent in the folder if none is running.
 approval, a decision), send_message to "user": kind "task" for something to \
 do, expects_reply for a question. It waits in their Inbox, and on Discord \
 when you have a channel there; their answer comes back to you.
-- If peerlink itself misbehaves (a reply that never comes, a message that \
-reached the wrong agent, an error from these tools), call report_issue with \
-the message ids and agent names, then carry on with your task. When \
-peerlink gets in your way or could work better, report_issue with type \
-"idea".""".replace("{clear_rule}", CLEAR_RULE)
+{feedback_rule}""".replace("{clear_rule}", CLEAR_RULE).replace("{feedback_rule}", FEEDBACK_RULE)
 
 DEFAULT_CONFIG = {
     "poll_interval_ms": 3000,
@@ -144,6 +149,7 @@ DEFAULT_CONFIG = {
     "announce_per_hour": 6,  # announcements each agent may send: each one reaches a whole space
     "max_message_chars": 8000,
     "guidance": "",
+    "feedback": False,  # agents get report_issue, for bugs and ideas about peerlink itself; see the Feedback page
     "issue_agent": "peerlink",
     "roster_in_prompt": True,
     "auto_summary": True,
@@ -353,6 +359,8 @@ def load_config():
     for k in DEFAULT_CONFIG:
         if config_value(k, merged[k])[1]:  # a bad value saved by an older daemon: back to the default
             merged[k] = DEFAULT_CONFIG[k]
+    if data and "feedback" not in data:  # an install from before the setting keeps reporting, as it did
+        merged["feedback"] = True
     if merged.get("guidance") == OLD_GUIDANCE_V1:  # an untouched old default follows the new one
         merged["guidance"] = ""
     config.clear()
@@ -369,6 +377,11 @@ def save_config():
 
 def session_cfg(sid):
     return {"nickname": "", "muted": False, "auto_wake": None, **config["sessions"].get(sid, {})}
+
+
+def default_guidance():
+    text = DEFAULT_GUIDANCE if config.get("clear_between_tasks", True) else DEFAULT_GUIDANCE.replace(CLEAR_RULE, "")
+    return text if config.get("feedback") else text.replace(FEEDBACK_RULE, "")
 
 
 def client_config(sid):
@@ -393,7 +406,8 @@ def client_config(sid):
         "auto_wake_idle": config["auto_wake_idle"] if s["auto_wake"] is None else s["auto_wake"],
         "inject_while_busy": config["inject_while_busy"],
         "wake_delay_s": config.get("wake_delay_s", 15),
-        "guidance": config["guidance"] or (DEFAULT_GUIDANCE if config.get("clear_between_tasks", True) else DEFAULT_GUIDANCE.replace(CLEAR_RULE, "")),
+        "guidance": config["guidance"] or default_guidance(),
+        "feedback": config.get("feedback", False),
         "clear_nudge_tokens": config.get("clear_nudge_tokens", 400000),
         "muted": s["muted"],
         "roster_in_prompt": config["roster_in_prompt"],
@@ -3703,7 +3717,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if rest == ["config"]:
             if method == "GET":
-                return self.reply(200, {**config, "default_guidance": DEFAULT_GUIDANCE})
+                return self.reply(200, {**config, "default_guidance": default_guidance()})
             if method in ("PUT", "POST"):
                 checked = {k: config_value(k, v) for k, v in self.body().items() if k in DEFAULT_CONFIG}
                 # Only you, in the browser: no agent lets itself start agents without asking.
@@ -4647,6 +4661,8 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <div class="check"><input type="checkbox" name="clear_between_tasks" id="cbt"><label for="cbt" style="margin:0">Agents clear their own context after each task, saving notes to memory first</label></div>
 <div class="row"><div><label for="cnt">Ask an agent to save and clear once its context passes (tokens, 0 for never)</label><input type="number" name="clear_nudge_tokens" id="cnt" min="0" step="50000"></div><div></div></div>
 <div class="mut small">A large context is re-read on every turn and drains the usage limit fast. The ask arrives with the agent's next prompt, so it clears at a stopping point.</div>
+<div class="check"><input type="checkbox" name="feedback" id="fbk"><label for="fbk" style="margin:0">Agents report bugs and ideas about peerlink itself, on the Feedback page</label></div>
+<div class="mut small">For people developing peerlink. Agents started after you change this get the report_issue tool, or don't.</div>
 <label>Guidance for every agent</label><textarea name="guidance" id="guidance"></textarea><div class="mut small">Leave empty to use the default, shown in grey.</div>
 <details class="adv"><summary>Other machines</summary>
 <label>Their daemons, one URL per line</label><textarea name="remotes" style="min-height:60px"></textarea>

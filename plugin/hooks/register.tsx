@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.60'
+const DAEMON_VERSION = '0.8.61'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -52,6 +52,8 @@ type ClientConfig = {
   wake_delay_s?: number
   inject_while_busy: boolean
   guidance: string
+  // Agents get report_issue, for bugs and ideas about peerlink itself.
+  feedback?: boolean
   muted: boolean
   roster_in_prompt: boolean
   auto_summary: boolean
@@ -366,6 +368,7 @@ async function announce($: EngineInterface, succeeds?: string) {
     myName = res.data.name
     cfg = res.data.config
     previous = res.data.previous ?? null
+    await offerFeedback($).catch(() => {})
   }
   return res.ok
 }
@@ -685,6 +688,7 @@ async function poll($: EngineInterface) {
   cfg = res.data.config
   myName = res.data.name
   limit = res.data.limit ?? null
+  await offerFeedback($).catch(() => {})
   const hadPeers = peerCount > 0
   peerCount = Number(res.data.peer_count ?? 0)
   // The first peer to show up gets a real summary to read.
@@ -1281,6 +1285,28 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
   }
 }
 
+// report_issue is offered only where the feedback setting is on: elsewhere a report would sit unread on the user's machine.
+let feedbackTool = false
+async function offerFeedback($: EngineInterface) {
+  if (!cfg?.feedback || feedbackTool) return
+  await $.tool.register({
+    name: 'report_issue',
+    description:
+      "Report a problem with peerlink itself (a message that never arrived or reached the wrong agent, a peer you expected that isn't listed, an error from these tools), or suggest how peerlink could work better for you. It goes into the feedback queue your user reviews; a bug also goes straight to the agent working on peerlink when one is live. Not for problems with your own task or a peer's work.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        type: { type: 'string', enum: ['bug', 'idea'], description: 'bug (the default): something broke. idea: an improvement you would like' },
+        what: { type: 'string', description: 'What went wrong and what you expected, or the improvement, briefly' },
+        details: { type: 'string', description: 'Message ids, agent names, exact error text' },
+      },
+      required: ['what'],
+    },
+    isDeferred: false,
+  })
+  feedbackTool = true
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
@@ -1379,21 +1405,6 @@ export const register: Register = on => {
           start: { type: 'boolean', description: 'create: start an agent there when none is running (the default, needs approval); false holds the prompt for the next agent instead' },
           id: { type: 'string', description: 'cancel: the schedule id, like c3' },
         },
-      },
-      isDeferred: false,
-    })
-    await $.tool.register({
-      name: 'report_issue',
-      description:
-        "Report a problem with peerlink itself (a message that never arrived or reached the wrong agent, a peer you expected that isn't listed, an error from these tools), or suggest how peerlink could work better for you. It goes into the feedback queue your user reviews; a bug also goes straight to the agent working on peerlink when one is live. Not for problems with your own task or a peer's work.",
-      inputSchema: {
-        type: 'object',
-        properties: {
-          type: { type: 'string', enum: ['bug', 'idea'], description: 'bug (the default): something broke. idea: an improvement you would like' },
-          what: { type: 'string', description: 'What went wrong and what you expected, or the improvement, briefly' },
-          details: { type: 'string', description: 'Message ids, agent names, exact error text' },
-        },
-        required: ['what'],
       },
       isDeferred: false,
     })
