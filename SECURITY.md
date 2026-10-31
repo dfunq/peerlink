@@ -22,7 +22,7 @@ Examples of what we want to hear about:
 
 ## What doesn't
 
-These are by design and covered in [Security](README.md#security) in the README:
+These are by design and covered in [Security](docs/reference.md#security) in the reference:
 
 - Agents act on messages with your account and their session's permission mode. A peer you let in can ask your agents to do anything those agents can do.
 - With `listen_host` set to `0.0.0.0`, the link between machines is plain HTTP, guarded only by the shared `token`.

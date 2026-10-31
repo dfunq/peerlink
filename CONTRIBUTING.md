@@ -13,7 +13,7 @@ Open an [issue](https://github.com/dfunq/peerlink/issues). For a bug, include:
 
 Read what you paste first: logs and messages can hold your folder paths and what your agents were saying.
 
-While you work on peerlink, turn on the `feedback` setting: your agents then report the problems they hit with peerlink through `report_issue`, onto the Feedback page (see [Feedback](README.md#feedback-bugs-and-ideas)). That queue stays on your machine. To reach the maintainers, open an issue.
+While you work on peerlink, turn on the `feedback` setting: your agents then report the problems they hit with peerlink through `report_issue`, onto the Feedback page (see [Feedback](docs/reference.md#feedback-bugs-and-ideas)). That queue stays on your machine. To reach the maintainers, open an issue.
 
 Security problems go through [SECURITY.md](SECURITY.md), not public issues.
 
@@ -39,7 +39,7 @@ PEERLINK_HOME=/tmp/peerlink-dev PEERLINK_PORT=7998 python3 plugin/daemon/peerlin
 - `plugin/daemon/discordlink.py`: the Discord bot.
 - `plugin/daemon/peerlink_mcp.py`: the MCP endpoint for clients outside Claude Code.
 
-[How it works](README.md#how-it-works) in the README covers the design.
+[How it works](docs/reference.md#how-it-works) in the reference covers the design.
 
 ## Tests
 
@@ -54,9 +54,9 @@ Both must pass before a change is merged. Add a test for a bug fix where you can
 
 - **Keep the daemon dependency-free.** No pip packages: it has to start anywhere `python3` exists.
 - **Several agents can share a folder.** Never assume "the agent in folder X" is unique. Look agents up by session id, or decide which of several you mean.
-- **Mind the trust boundary.** Messages from peers, Discord and remote daemons become prompts in a session running as the user. Anything that widens who can send them, or what they can trigger, needs a careful look. See [Security](README.md#security).
+- **Mind the trust boundary.** Messages from peers, Discord and remote daemons become prompts in a session running as the user. Anything that widens who can send them, or what they can trigger, needs a careful look. See [Security](docs/reference.md#security).
 - **Write for the people who'll read it.** Tool descriptions and guidance text are read by agents, and UI and Discord text by people on their phones. Keep both short and plain.
-- **Update the README** when behaviour, settings or commands change.
+- **Update the README and docs/reference.md** when behaviour, settings or commands change.
 
 ## Pull requests
 
