@@ -387,7 +387,9 @@ plugin/hooks/hooks.json           points at the hooks module
 plugin/hooks/register.tsx         tools, /peerlink, polling, delivery, summaries, guidance, chat rows
 plugin/hooks/register.test.tsx    tests (claude plugin test plugin)
 plugin/daemon/peerlinkd.py        daemon, CLI and web UI
+plugin/daemon/chatlink.py         what the chat platforms share: errors, which platform a channel id is on
 plugin/daemon/discordlink.py      the Discord bot: gateway, REST, buttons, /peerlink
+plugin/daemon/test_chat.py        tests for the chat layer, against a fake Discord
 plugin/daemon/peerlink_mcp.py     an MCP endpoint for clients outside Claude Code
 plugin/daemon/test_peerlink_mcp.py  its tests (python3 -m unittest)
 ```

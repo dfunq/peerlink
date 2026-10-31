@@ -29,15 +29,16 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.62"
+VERSION = "0.8.63"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
-import discordlink  # noqa: E402  (beside this file; installs nothing)
+import chatlink  # noqa: E402  (beside this file; installs nothing)
+import discordlink  # noqa: E402
 
-# A fingerprint of the daemon's code, this file and discordlink.py together.
+# A fingerprint of the daemon's code, this file and the chat modules beside it together.
 _h = hashlib.sha256()
-for _name in ("peerlinkd.py", "discordlink.py"):
+for _name in ("peerlinkd.py", "chatlink.py", "discordlink.py"):
     with open(os.path.join(_here, _name), "rb") as _f:
         _h.update(_f.read())
 CODE = _h.hexdigest()[:16]
@@ -1017,6 +1018,64 @@ def start_discord():
         discord_bot[0].on_command, discord_bot[0].on_autocomplete = on_slash, on_slash_typing
 
 
+# Chat platforms: every post, reaction and button press goes through these, which pick the platform's module by the
+# channel id (chatlink). Discord is the only one yet; its ids are bare digits.
+ChatError = chatlink.ChatError
+
+
+def chat_link(channel_id):
+    """(module, credential) for the platform a channel is on; ChatError when it isn't set up."""
+    if chatlink.platform(channel_id) == "discord" and discord.get("token"):
+        return discordlink, discord["token"]
+    raise ChatError(f"{chatlink.name(channel_id)} isn't set up")
+
+
+def chat_ready(channel_id=""):
+    """Whether the platform a channel is on is set up with its bot running; with no channel, whether any is."""
+    return bool(discord.get("token") and discord_bot[0])
+
+
+def choices(options, key):
+    """Options as buttons for chat_post: [(label, "key:<n>")]."""
+    return [(o, f"{key}:{i}") for i, o in enumerate(options)]
+
+
+def chat_post(channel_id, text, reply_to=None, buttons=None, files=None):
+    """Post to a chat, split as the platform needs; the id of the last part, where the buttons and files go."""
+    link, cred = chat_link(channel_id)
+    return link.post(cred, channel_id, text, reply_to, buttons, files)["id"]
+
+
+def chat_clear_buttons(channel_id, message_id):
+    link, cred = chat_link(channel_id)
+    link.clear_buttons(cred, channel_id, message_id)
+
+
+def chat_answer_press(press, text=None, clear=False):
+    """Acknowledge a button press: `text` only the presser sees, `clear` takes the buttons off, and otherwise they're
+    disabled with the pressed one highlighted."""
+    chat_link(press["channel_id"])[0].answer_press(press, text, clear)
+
+
+def chat_react(channel_id, message_id, emoji, on=True):
+    """A reaction is a courtesy: a platform that refuses it, or isn't set up, mustn't lose the message."""
+    try:
+        link, cred = chat_link(channel_id)
+    except ChatError:
+        return
+    (link.react if on else link.unreact)(cred, channel_id, message_id, emoji)
+
+
+def chat_download(channel_id, file, limit):
+    link, cred = chat_link(channel_id)
+    return link.download(cred, file, limit)
+
+
+def chat_via(channel_id, author):
+    """Who acted, for logs and notes: "Discord (Dillon)"."""
+    return f"{chatlink.name(channel_id)} ({author})"
+
+
 def folder_name(cwd):
     return (config.get("folder_names") or {}).get(cwd) or os.path.basename(cwd.rstrip("/")) or cwd
 
@@ -1024,7 +1083,7 @@ def folder_name(cwd):
 def discord_channel_label(channel_id):
     bot = discord_bot[0]
     name = bot.channel_name(channel_id) if bot else ""
-    return f"#{name}" if name else "Discord"
+    return f"#{name}" if name else chatlink.name(channel_id)
 
 
 def routes_for(cwd):
@@ -1062,13 +1121,13 @@ KINDS = ("message", "task", "announcement")
 
 def post_async(posts):
     """[(channel, text, reply_to)] posted off the request thread: Discord's latency is none of the caller's business."""
-    if not posts or not discord.get("token") or not discord_bot[0]:
+    if not posts or not chat_ready():
         return
     def run():
         for channel, text, ref in posts:
             try:
-                discordlink.post(discord["token"], channel, text, ref)
-            except discordlink.DiscordError as err:
+                chat_post(channel, text, ref)
+            except ChatError as err:
                 log("discord", "post failed:", err)
     threading.Thread(target=run, daemon=True).start()
 
@@ -1079,7 +1138,7 @@ def announce(sender_rec, space, text, hops=0, from_discord=None):
         now = time.time()
         recipients = [r for r in sessions.values() if is_live(r, now) and r["id"] != (sender_rec or {}).get("id") and space in reach(r)]
         if from_discord:
-            sender = {"from": f"discord:{from_discord['channel_id']}", "from_name": f"{from_discord['author']} on Discord", "from_host": "discord",
+            sender = {"from": f"discord:{from_discord['channel_id']}", "from_name": f"{from_discord['author']} on {chatlink.name(from_discord['channel_id'])}", "from_host": "discord",
                       "from_cwd": "", "from_space": "discord", "discord": {"channel_id": from_discord["channel_id"], "message_id": from_discord["message_id"]}}
         else:
             sender = {"from": sender_rec["id"], "from_name": display_name(sender_rec), "from_host": HOSTNAME,
@@ -1101,15 +1160,15 @@ def save_discord_files(d):
     if not d.get("files"):
         return ""
     if not discord.get("files_in", True):
-        return "\n\n(Files were attached on Discord, but saving them is turned off on the Channels page.)"
+        return f"\n\n(Files were attached on {chatlink.name(d['channel_id'])}, but saving them is turned off on the Channels page.)"
     limit = int(float(discord.get("max_file_mb") or 10) * 1024 * 1024)
     folder = os.path.join(DISCORD_FILES, d["message_id"])
     lines = []
     for f in d["files"][:10]:
         name = os.path.basename(f["filename"]) or "file"
         try:
-            data = discordlink.download(f["url"], limit)
-        except OSError as err:
+            data = chat_download(d["channel_id"], f, limit)
+        except (OSError, ChatError) as err:
             lines.append(f"- {name}: couldn't download it ({err})")
             continue
         if data is None:
@@ -1120,7 +1179,7 @@ def save_discord_files(d):
         with open(path, "wb") as out:
             out.write(data)
         lines.append(f"- {path} ({len(data):,} bytes)")
-    return "\n\nAttached on Discord:\n" + "\n".join(lines)
+    return f"\n\nAttached on {chatlink.name(d['channel_id'])}:\n" + "\n".join(lines)
 
 
 def queue_for_folder(cwd, msg, prefer=None):
@@ -1156,7 +1215,7 @@ def channel_agent(channel_id, dm):
 
 def on_slash(cmd):
     """/peerlink <sub> on Discord: (the reply, any buttons)."""
-    sub, opt, who = cmd["sub"], cmd["options"], f"Discord ({cmd['author']})"
+    sub, opt, who = cmd["sub"], cmd["options"], chat_via(cmd["channel_id"], cmd["author"])
     if sub == "status":
         lim = limit_view()
         with lock:
@@ -1190,11 +1249,11 @@ def on_slash(cmd):
     if sub == "resume":
         if not usage_limit:
             return "No usage limit is held.", None
-        lift_limit(f"resumed on Discord by {cmd['author']}")
+        lift_limit(f"resumed on {chatlink.name(cmd['channel_id'])} by {cmd['author']}")
         return "Lifted: agents carry on with what was held.", None
     if sub == "clear" and str(opt.get("agent", "")).lower() == "all":
         n = len(live_agents())
-        return f"Clear the context of all {n} running agents? Each finishes its current turn first.", discordlink.buttons(["Clear all", "Keep"], "pa:all")
+        return f"Clear the context of all {n} running agents? Each finishes its current turn first.", choices(["Clear all", "Keep"], "pa:all")
     agent = agent_named(opt["agent"]) if opt.get("agent") else channel_agent(cmd["channel_id"], cmd["dm"]) if sub == "run" else None
     if agent is None:
         return (f"No running agent is called {opt['agent']}." if opt.get("agent") else "No agent is running for this channel; name one with agent:"), None
@@ -1203,7 +1262,7 @@ def on_slash(cmd):
         code, out = clear_context(agent["id"], who)
         return (f"Clearing {name}'s context{' after its current turn' if agent.get('busy') else ''}." if code == 200 else out["error"]), None
     if sub == "kill":
-        return f"End **{name}** ({tilde_path(agent.get('cwd', ''))})? It finishes its current turn first.", discordlink.buttons(["End it", "Keep it"], f"pk:{agent['id']}")
+        return f"End **{name}** ({tilde_path(agent.get('cwd', ''))})? It finishes its current turn first.", choices(["End it", "Keep it"], f"pk:{agent['id']}")
     if sub in ("mute", "unmute"):
         with lock:
             config["sessions"].setdefault(agent["id"], {})["muted"] = sub == "mute"
@@ -1233,16 +1292,12 @@ def on_slash_typing(cmd):
 
 
 def on_clear_all_press(press):
-    rows = (press["message"] or {}).get("components") or []
-    for row in rows:
-        for b in row.get("components", []):
-            b["disabled"], b["style"] = True, 3 if b.get("custom_id") == press["custom_id"] else 2
-    discordlink.answer_interaction(press["id"], press["token"], 7, {"components": rows})
+    chat_answer_press(press)
     if press["custom_id"].endswith(":0"):
         agents = live_agents()
         for r in agents:
-            clear_context(r["id"], f"Discord ({press['author']})")
-        discordlink.post(discord["token"], press["channel_id"], f"Clearing {len(agents)} agents' context, each once its current turn ends.")
+            clear_context(r["id"], chat_via(press["channel_id"], press["author"]))
+        chat_post(press["channel_id"], f"Clearing {len(agents)} agents' context, each once its current turn ends.")
 
 
 def on_discord(d):
@@ -1288,7 +1343,7 @@ def on_discord(d):
             cwd = replied["from_cwd"]
     asker = continuation(replied["from"], replied.get("from_name", ""), cwd) if replied else None
     if not cwd:
-        discordlink.post(discord["token"], d["channel_id"], "No agent here receives messages yet: tick Receives for one in the peerlink web UI, under Channels.", d["message_id"])
+        chat_post(d["channel_id"], "No agent here receives messages yet: tick Receives for one in the peerlink web UI, under Channels.", d["message_id"])
         return
     text += save_discord_files(d)
     if not text.strip():
@@ -1300,12 +1355,12 @@ def on_discord(d):
         space = space_of({"id": "", "cwd": cwd})[0]
         msg = announce(None, space, text[prefix.end():] if prefix else text, from_discord=d)
         n = len(msg["recipients"])
-        discordlink.post(discord["token"], d["channel_id"], f"Announced to {n} agent{'' if n == 1 else 's'} in {space}." if n else f"No agent in {space} is running; nobody heard it.", d["message_id"])
+        chat_post(d["channel_id"], f"Announced to {n} agent{'' if n == 1 else 's'} in {space}." if n else f"No agent in {space} is running; nobody heard it.", d["message_id"])
         return
     with lock:
         msg = {
             "id": f"m{next_msg[0]}", "ts": time.time(),
-            "from": f"discord:{d['channel_id']}", "from_name": f"{d['author']} on Discord", "from_host": "discord",
+            "from": f"discord:{d['channel_id']}", "from_name": f"{d['author']} on {chatlink.name(d['channel_id'])}", "from_host": "discord",
             "from_cwd": "", "to_cwd": cwd, "from_space": "discord", "to_space": "",
             "text": text[:20000], "expects_reply": True, "reply_to": replied["id"] if replied else None, "hops": 0, "status": "queued", "v": 2,
             "discord": {"channel_id": d["channel_id"], "message_id": d["message_id"]},
@@ -1320,7 +1375,7 @@ def on_discord(d):
     log("discord in", msg["id"], d["author"], "->", msg["to_name"])
     set_reaction(msg, "👀")
     if not agent:
-        discordlink.post(discord["token"], d["channel_id"], f"{folder_name(cwd)} isn't running right now. Your message waits up to an hour for it.", d["message_id"])
+        chat_post(d["channel_id"], f"{folder_name(cwd)} isn't running right now. Your message waits up to an hour for it.", d["message_id"])
 
 
 # A message from Discord shows where it's at: 👀 heard, 🤔 thinking, 🛠️ using tools,
@@ -1350,9 +1405,9 @@ def reaction_worker():
         while reaction_jobs:
             channel, message, old, new = reaction_jobs.pop(0)
             if old:
-                discordlink.unreact(discord["token"], channel, message, old)
+                chat_react(channel, message, old, on=False)
             if new:
-                discordlink.react(discord["token"], channel, message, new)
+                chat_react(channel, message, new)
 
 
 # Activity shows on a Discord message only during the turn that handles it: once that turn ends it's settled,
@@ -1446,18 +1501,17 @@ def post_to_discord(sender_rec, channel_id, text, reply_ref=None, reply_to=None,
     if options and (quoted or not use_buttons):
         body = body.rstrip() + "\n" + "\n".join(f"{'> ' if quoted else ''}{i + 1}. {o}" for i, o in enumerate(options))
     try:
-        sent = discordlink.post(discord["token"], channel_id, body, reply_ref,
-                                discordlink.buttons(options, f"pl:{mid}") if use_buttons else None, uploads)
-    except discordlink.DiscordError as err:
-        return 502, {"error": f"Discord refused it: {err}"}
+        sent = chat_post(channel_id, body, reply_ref, choices(options, f"pl:{mid}") if use_buttons else None, uploads)
+    except ChatError as err:
+        return 502, {"error": f"{chatlink.name(channel_id)} refused it: {err}"}
     with lock:
         msg = {
             "id": mid, "ts": time.time(), "from": sender_rec["id"], "from_name": name,
-            "from_host": HOSTNAME, "to": f"discord:{channel_id}", "to_name": f"{discord_channel_label(channel_id)} on Discord",
+            "from_host": HOSTNAME, "to": f"discord:{channel_id}", "to_name": f"{discord_channel_label(channel_id)} on {chatlink.name(channel_id)}",
             "from_cwd": sender_rec.get("cwd", ""), "to_cwd": "", "from_space": space_of(sender_rec)[0], "to_space": "discord",
             "text": text[:20000], "expects_reply": bool(use_buttons) or expects_reply, "reply_to": reply_to, "hops": hops, "status": "delivered", "v": 2,
             "options": list(options or []), "files": [os.path.expanduser(str(f)) for f in files or []],
-            "discord_out": {"channel_id": channel_id, "message_id": str((sent[-1] or {}).get("id", "")) if sent else ""},
+            "discord_out": {"channel_id": channel_id, "message_id": sent},
         }
         record(msg)
     return 200, {"id": msg["id"], "to": msg["to_name"], "status": "delivered"}
@@ -1475,56 +1529,47 @@ def on_press(press):
     if press["custom_id"].startswith("pa:"):
         return on_clear_all_press(press)
     if press["custom_id"] in ("pr:0", "pl:0"):  # "pl:0" from before 0.8.33; an agent's buttons are "pl:<message>:<n>"
-        discordlink.answer_interaction(press["id"], press["token"], 7, {"components": []})
-        return lift_limit(f"resumed on Discord by {press['author']}")
+        chat_answer_press(press, clear=True)
+        return lift_limit(f"resumed on {chatlink.name(press['channel_id'])} by {press['author']}")
     if press["custom_id"].startswith("pk:"):
         _, sid, idx = (press["custom_id"].split(":") + ["", ""])[:3]
-        code, out = terminate(sid, f"Discord ({press['author']})") if idx == "0" else (200, {"kept": True})
-        rows = (press["message"] or {}).get("components") or []
-        for row in rows:
-            for b in row.get("components", []):
-                b["disabled"], b["style"] = True, 3 if b.get("custom_id") == press["custom_id"] else 2
-        discordlink.answer_interaction(press["id"], press["token"], 7, {"components": rows})
+        code, out = terminate(sid, chat_via(press["channel_id"], press["author"])) if idx == "0" else (200, {"kept": True})
+        chat_answer_press(press)
         if code != 200:
-            discordlink.post(discord["token"], press["channel_id"], out.get("error", "Couldn't end it."))
+            chat_post(press["channel_id"], out.get("error", "Couldn't end it."))
         return
     _, mid, idx = (press["custom_id"].split(":") + ["", ""])[:3]
     asked = next((m for m in messages if m["id"] == mid), None)
     options = (asked or {}).get("options") or []
     if not asked or not idx.isdigit() or int(idx) >= len(options):
-        discordlink.answer_interaction(press["id"], press["token"], 4, {"content": "That question isn't open anymore.", "flags": 64})
+        chat_answer_press(press, "That question isn't open anymore.")
         return
     with lock:
         settled = asked.get("handled") or asked.get("inbox_done") or any(m.get("reply_to") == mid for m in messages)
     if settled:
         # Answered already, in the web UI, the terminal or another press: its buttons go, and this one does nothing.
-        discordlink.answer_interaction(press["id"], press["token"], 7, {"components": []})
-        discordlink.post(discord["token"], press["channel_id"], "That question was already answered, so this choice wasn't sent.", (asked.get("discord_out") or {}).get("message_id"))
+        chat_answer_press(press, clear=True)
+        chat_post(press["channel_id"], "That question was already answered, so this choice wasn't sent.", (asked.get("discord_out") or {}).get("message_id"))
         return
     choice = options[int(idx)]
-    done = decide_relayed(choice, asked.get("text", ""), f"Discord ({press['author']}), on {asked.get('from_name', 'an agent')}'s question")
-    rows = (press["message"] or {}).get("components") or []
-    for row in rows:
-        for b in row.get("components", []):
-            b["disabled"] = True
-            b["style"] = 3 if b.get("custom_id") == press["custom_id"] else 2
-    discordlink.answer_interaction(press["id"], press["token"], 7, {"components": rows})
+    done = decide_relayed(choice, asked.get("text", ""), f"{chat_via(press['channel_id'], press['author'])}, on {asked.get('from_name', 'an agent')}'s question")
+    chat_answer_press(press)
     with lock:
         msg = {
             "id": f"m{next_msg[0]}", "ts": time.time(),
-            "from": f"discord:{press['channel_id']}", "from_name": f"{press['author']} on Discord", "from_host": "discord",
+            "from": f"discord:{press['channel_id']}", "from_name": f"{press['author']} on {chatlink.name(press['channel_id'])}", "from_host": "discord",
             "from_cwd": "", "to_cwd": asked.get("from_cwd", ""), "from_space": "discord", "to_space": asked.get("from_space", ""),
             "text": f"Chose: {choice}" + (f" (peerlink {', '.join(done)})" if done else ""), "expects_reply": False, "reply_to": mid, "hops": 0, "status": "queued", "v": 2,
             "discord": {"channel_id": press["channel_id"], "message_id": (asked.get("discord_out") or {}).get("message_id", "")},
         }
         next_msg[0] += 1
         queue_for_folder(asked.get("from_cwd", ""), msg, continuation(asked.get("from", ""), asked.get("from_name", ""), asked.get("from_cwd", "")))
-    log("discord press", msg["id"], press["author"], "->", msg["to_name"], choice)
+    log("chat press", msg["id"], press["author"], "->", msg["to_name"], choice)
 
 
 def send_discord(sender_rec, to, text, parent, hops, options=None, files=None, expects_reply=False):
     """`to: "discord"` or `"discord#name"`, or a reply to a message from Discord. None when it's not for Discord."""
-    if not sender_rec or not discord.get("token") or not discord_bot[0]:
+    if not sender_rec or not chat_ready():
         return None
     if parent and parent.get("discord") and parent.get("to_cwd") == sender_rec.get("cwd"):
         d = parent["discord"]
@@ -1548,7 +1593,7 @@ def send_discord(sender_rec, to, text, parent, hops, options=None, files=None, e
 
 def user_send(sender_rec, word, text, kind, parent_task, expects_reply, hops, options, files):
     """A message or task for you: it waits in your Inbox, and is posted to Discord when the agent has a channel there."""
-    chans = [r for r in routes_for(sender_rec.get("cwd", "")) if r["channel_id"] != "dm" and r["sends"]] if discord.get("token") and discord_bot[0] else []
+    chans = [r for r in routes_for(sender_rec.get("cwd", "")) if r["channel_id"] != "dm" and r["sends"]] if chat_ready() else []
     if word.startswith("discord#"):
         chans = [r for r in chans if r["channel"].lower() == "#" + word.split("#", 1)[1].lstrip("#")]
     if (word == "discord" or word.startswith("discord#")) and not chans:
@@ -1556,7 +1601,7 @@ def user_send(sender_rec, word, text, kind, parent_task, expects_reply, hops, op
     channel = chans[0]["channel_id"] if chans else ""
     # A question from an agent with no channel of its own goes where its approvals do, its space lead's channel, so it's
     # answered (and leaves the Inbox) on Discord too.
-    if not channel and kind != "task" and expects_reply and word in USER_ALIASES and discord.get("token") and discord_bot[0]:
+    if not channel and kind != "task" and expects_reply and word in USER_ALIASES and chat_ready():
         channel = approval_channel(sender_rec)
     if kind != "task" and channel:
         return post_to_discord(sender_rec, channel, text, None, None, hops, options, files, expects_reply)
@@ -1578,12 +1623,12 @@ def user_send(sender_rec, word, text, kind, parent_task, expects_reply, hops, op
         record(msg)
     if task and channel:
         try:
-            sent = discordlink.post(discord["token"], channel, labelled(f"**{msg['from_name']}** has a task for you ({task['id']}):", text),
-                                    None, discordlink.buttons(["Done", "Couldn't do it"], f"pt:{task['id']}"))
+            sent = chat_post(channel, labelled(f"**{msg['from_name']}** has a task for you ({task['id']}):", text),
+                             None, choices(["Done", "Couldn't do it"], f"pt:{task['id']}"))
             with lock:
-                task["discord_out"] = {"channel_id": channel, "message_id": str((sent[-1] or {}).get("id", "")) if sent else ""}
+                task["discord_out"] = {"channel_id": channel, "message_id": sent}
                 save_tasks()
-        except discordlink.DiscordError as err:
+        except ChatError as err:
             log("discord", "task post failed:", err)
     log("to user", msg["id"], msg["from_name"], task["id"] if task else "")
     out = {"id": msg["id"], "to": USER_NAME, "status": "waiting in their Inbox"}
@@ -1648,7 +1693,7 @@ def inbox_act(body, discord_from=None):
         if action not in ("approve", "deny"):
             return 400, {"error": "a request to start an agent is approved or denied"}
         decide = decide_schedule if iid in schedules else decide_spawn
-        return decide(iid, action == "approve", "Discord" if discord_from else "the web UI")
+        return decide(iid, action == "approve", chatlink.name(discord_from["channel_id"]) if discord_from else "the web UI")
     if kind == "feedback":
         if action not in ("accepted", "dismissed"):
             return 400, {"error": "feedback is accepted or dismissed"}
@@ -1667,7 +1712,7 @@ def inbox_act(body, discord_from=None):
                 return 400, {"error": "reply with text, or dismiss"}
             if discord_from:
                 d = discord_from
-                msg = {"from": f"discord:{d['channel_id']}", "from_name": f"{d['author']} on Discord", "from_host": "discord",
+                msg = {"from": f"discord:{d['channel_id']}", "from_name": f"{d['author']} on {chatlink.name(d['channel_id'])}", "from_host": "discord",
                        "discord": {"channel_id": d["channel_id"], "message_id": d["message_id"]}}
             else:
                 msg = {"from": "user", "from_name": f"{USER_NAME} (web UI)", "from_host": HOSTNAME}
@@ -1684,12 +1729,12 @@ def inbox_act(body, discord_from=None):
 def close_task_buttons(t):
     """Grey out the Done / Couldn't do it buttons on a task's Discord post once it's settled elsewhere."""
     out = t.get("discord_out") or {}
-    if not out.get("message_id") or not discord.get("token"):
+    if not out.get("message_id"):
         return
     def edit():
         try:
-            discordlink.call(discord["token"], "PATCH", f"/channels/{out['channel_id']}/messages/{out['message_id']}", {"components": []})
-        except discordlink.DiscordError as err:
+            chat_clear_buttons(out["channel_id"], out["message_id"])
+        except ChatError as err:
             log("discord", "could not clear task buttons:", err)
     threading.Thread(target=edit, daemon=True).start()
 
@@ -1698,17 +1743,12 @@ def on_task_press(press):
     _, tid, idx = (press["custom_id"].split(":") + ["", ""])[:3]
     t = tasks.get(tid)
     if not t or t["status"] not in TASK_OPEN:
-        discordlink.answer_interaction(press["id"], press["token"], 4, {"content": f"Task {tid} is already {t['status'] if t else 'gone'}.", "flags": 64})
+        chat_answer_press(press, f"Task {tid} is already {t['status'] if t else 'gone'}.")
         return
     action = "done" if idx == "0" else "failed"
-    rows = (press["message"] or {}).get("components") or []
-    for row in rows:
-        for b in row.get("components", []):
-            b["disabled"] = True
-            b["style"] = 3 if b.get("custom_id") == press["custom_id"] else 2
-    discordlink.answer_interaction(press["id"], press["token"], 7, {"components": rows})
+    chat_answer_press(press)
     update_task(tid, {"status": action}, web=True)
-    log("discord press", tid, press["author"], action)
+    log("chat press", tid, press["author"], action)
 
 
 inbox_lists = {}  # Discord channel -> (when, [(kind, id)]): what "1 done" refers to after "/inbox"
@@ -1732,7 +1772,7 @@ def inbox_text(channel):
 def inbox_command(d):
     """Handle what you write on Discord to work your Inbox. True when it was one of those, not a message for an agent."""
     text, channel = d["text"].strip(), d["channel_id"]
-    say = lambda line: discordlink.post(discord["token"], channel, line, d["message_id"])
+    say = lambda line: chat_post(channel, line, d["message_id"])
     # A reply to a task posted for you settles it: "done", "done: it's set", "failed: no access".
     task = next((t for t in tasks.values() if t.get("user") and d.get("ref") and (t.get("discord_out") or {}).get("message_id") == d["ref"]), None)
     if task:
@@ -1754,8 +1794,8 @@ def inbox_command(d):
                 return False  # "kill it" is a message for the agent, not a command
             say(f"No running agent is called {kill.group(1)}.")
             return True
-        discordlink.post(discord["token"], channel, f"End **{display_name(agent)}** ({tilde_path(agent.get('cwd', ''))})? It finishes its current turn first.",
-                         d["message_id"], discordlink.buttons(["End it", "Keep it"], f"pk:{agent['id']}"))
+        chat_post(channel, f"End **{display_name(agent)}** ({tilde_path(agent.get('cwd', ''))})? It finishes its current turn first.",
+                  d["message_id"], choices(["End it", "Keep it"], f"pk:{agent['id']}"))
         return True
     if text.lower() in ("/inbox", "inbox"):
         say(inbox_text(channel))
@@ -2571,12 +2611,12 @@ def task_closed(t, web=False):
             chans = [r for r in routes_for(t["owner_cwd"]) + routes_for(req.get("cwd", "")) if r["channel_id"] != "dm" and r["sends"]]
             if chans:
                 posts.append((chans[0]["channel_id"], f"**{t['owner']}**: {line} (asked by {req.get('name') or 'an agent'})", None))
-    if posts and discord.get("token") and discord_bot[0]:
+    if posts and chat_ready():
         def post_all():
             for channel, text, ref in posts:
                 try:
-                    discordlink.post(discord["token"], channel, text, ref)
-                except discordlink.DiscordError as err:
+                    chat_post(channel, text, ref)
+                except ChatError as err:
                     log("discord", "task post failed:", err)
         threading.Thread(target=post_all, daemon=True).start()
 
@@ -2638,18 +2678,18 @@ def request_spawn(body):
     log("spawn asked", sp["id"], sp["requester"]["name"], folder)
     if auto:
         decide_spawn(sp["id"], True, "auto-approve")
-        if channel and discord.get("token") and discord_bot[0]:
+        if channel and chat_ready(channel):
             post_async([(channel, f"**{sp['requester']['name']}** started an agent in `{tilde_path(folder)}` without asking (auto-approve is on): {purpose[:600]}", None)])
         return 200, {"id": sp["id"], "status": sp["status"], "note": f" Auto-approved: {sp['note']}"}
-    if channel and discord.get("token") and discord_bot[0]:
+    if channel and chat_ready(channel):
         try:
-            sent = discordlink.post(discord["token"], channel,
-                                    f"**{sp['requester']['name']}** asks to start an agent in `{tilde_path(folder)}` (space {sp['space']}): {purpose}\nIts first prompt: {prompt[:600]}",
-                                    None, discordlink.buttons(["Approve", "Deny"], f"ps:{sp['id']}"))
+            sent = chat_post(channel,
+                             f"**{sp['requester']['name']}** asks to start an agent in `{tilde_path(folder)}` (space {sp['space']}): {purpose}\nIts first prompt: {prompt[:600]}",
+                             None, choices(["Approve", "Deny"], f"ps:{sp['id']}"))
             with lock:
-                sp["discord_out"] = {"channel_id": channel, "message_id": str((sent[-1] or {}).get("id", "")) if sent else ""}
+                sp["discord_out"] = {"channel_id": channel, "message_id": sent}
                 save_spawns()
-        except discordlink.DiscordError as err:
+        except ChatError as err:
             log("discord", "spawn post failed:", err)
     note = f" An agent is already running there ({display_name(running)})." if running else ""
     return 200, {"id": sp["id"], "status": "pending", "note": note}
@@ -2758,12 +2798,12 @@ def decide_spawn(sid, approve, via):
 def close_buttons(item):
     """Clear the buttons on a Discord post once its question is settled elsewhere."""
     out = item.get("discord_out") or {}
-    if not out.get("message_id") or not discord.get("token"):
+    if not out.get("message_id"):
         return
     def edit():
         try:
-            discordlink.call(discord["token"], "PATCH", f"/channels/{out['channel_id']}/messages/{out['message_id']}", {"components": []})
-        except discordlink.DiscordError as err:
+            chat_clear_buttons(out["channel_id"], out["message_id"])
+        except ChatError as err:
             log("discord", "could not clear buttons:", err)
     threading.Thread(target=edit, daemon=True).start()
 
@@ -2795,15 +2835,10 @@ def on_spawn_press(press, decide=None, items=None):
     _, sid, idx = (press["custom_id"].split(":") + ["", ""])[:3]
     sp = items.get(sid)
     if not sp or sp["status"] != "pending":
-        discordlink.answer_interaction(press["id"], press["token"], 4, {"content": f"{sid} is already {sp['status'] if sp else 'gone'}.", "flags": 64})
+        chat_answer_press(press, f"{sid} is already {sp['status'] if sp else 'gone'}.")
         return
-    rows = (press["message"] or {}).get("components") or []
-    for row in rows:
-        for b in row.get("components", []):
-            b["disabled"] = True
-            b["style"] = 3 if b.get("custom_id") == press["custom_id"] else 2
-    discordlink.answer_interaction(press["id"], press["token"], 7, {"components": rows})
-    decide(sid, idx == "0", f"Discord ({press['author']})")
+    chat_answer_press(press)
+    decide(sid, idx == "0", chat_via(press["channel_id"], press["author"]))
 
 
 # Schedules: a prompt the daemon sends a folder's agent at a time or on a cron, whether or not a terminal is open.
@@ -2965,17 +3000,17 @@ def create_schedule(body, by=None):
         save_schedules()
         channel = approval_channel(by) if by else ""
     log("schedule", c["id"], c["status"], c["agent"] or tilde_path(folder), when_text(c))
-    if by and start and c["status"] == "active" and channel and discord.get("token") and discord_bot[0]:
+    if by and start and c["status"] == "active" and channel and chat_ready(channel):
         post_async([(channel, f"**{c['requester']['name']}** scheduled `{tilde_path(folder)}` ({when_text(c)}) without asking (auto-approve is on): {start_note(c)}.\n{prompt[:600]}", None)])
-    if c["status"] == "pending" and channel and discord.get("token") and discord_bot[0]:
+    if c["status"] == "pending" and channel and chat_ready(channel):
         try:
-            sent = discordlink.post(discord["token"], channel,
-                                    f"**{c['requester']['name']}** asks to schedule `{tilde_path(folder)}` ({when_text(c)}): {start_note(c)}.\n{prompt[:600]}",
-                                    None, discordlink.buttons(["Approve", "Deny"], f"pc:{c['id']}"))
+            sent = chat_post(channel,
+                             f"**{c['requester']['name']}** asks to schedule `{tilde_path(folder)}` ({when_text(c)}): {start_note(c)}.\n{prompt[:600]}",
+                             None, choices(["Approve", "Deny"], f"pc:{c['id']}"))
             with lock:
-                c["discord_out"] = {"channel_id": channel, "message_id": str((sent[-1] or {}).get("id", "")) if sent else ""}
+                c["discord_out"] = {"channel_id": channel, "message_id": sent}
                 save_schedules()
-        except discordlink.DiscordError as err:
+        except ChatError as err:
             log("discord", "schedule post failed:", err)
     return 200, {"schedule": {**c, "when_text": when_text(c)}}
 
@@ -3182,16 +3217,16 @@ def hit_limit(rec, body):
         chans = [r for r in routes_for(rec.get("cwd", "")) if r["channel_id"] != "dm"] or discord.get("routes", [])
     log("limit", "hit by", display_name(rec), "resets", time.strftime("%H:%M", time.localtime(resets)) if resets else "unknown",
         f"({len(back)} message{'s' if len(back) != 1 else ''} put back)")
-    if fresh and chans and discord.get("token") and discord_bot[0]:
+    if fresh and chans and chat_ready(chans[0]["channel_id"]):
         when = f"resets {time.strftime('%a %H:%M', time.localtime(resets))}" if resets else "no reset time given"
         try:
-            sent = discordlink.post(discord["token"], chans[0]["channel_id"],
-                                    f"⏸️ **Usage limit reached** ({when}; hit by {display_name(rec)}). Agents hold their messages and schedules wait. "
-                                    "Press Resume after switching accounts; it also lifts by itself at the reset, or when any agent's turn goes through.",
-                                    None, discordlink.buttons(["Resume now"], "pr"))
+            sent = chat_post(chans[0]["channel_id"],
+                             f"⏸️ **Usage limit reached** ({when}; hit by {display_name(rec)}). Agents hold their messages and schedules wait. "
+                             "Press Resume after switching accounts; it also lifts by itself at the reset, or when any agent's turn goes through.",
+                             None, choices(["Resume now"], "pr"))
             with lock:
-                usage_limit["discord_out"] = {"channel_id": chans[0]["channel_id"], "message_id": str((sent[-1] or {}).get("id", "")) if sent else ""}
-        except discordlink.DiscordError as err:
+                usage_limit["discord_out"] = {"channel_id": chans[0]["channel_id"], "message_id": sent}
+        except ChatError as err:
             log("discord", "limit post failed:", err)
     return 200, {"limit": limit_view()}
 
@@ -3207,8 +3242,8 @@ def lift_limit(why):
     log("limit", "lifted:", why)
     close_buttons(was)
     out = was.get("discord_out") or {}
-    if out.get("channel_id") and discord.get("token") and discord_bot[0]:
-        threading.Thread(target=lambda: discordlink.post(discord["token"], out["channel_id"], f"▶️ Usage limit lifted ({why}): agents carry on with what was held, one a minute.", out.get("message_id")),
+    if out.get("channel_id") and chat_ready(out["channel_id"]):
+        threading.Thread(target=lambda: chat_post(out["channel_id"], f"▶️ Usage limit lifted ({why}): agents carry on with what was held, one a minute.", out.get("message_id")),
                          daemon=True).start()
     return 200, {"limit": None}
 
@@ -3542,8 +3577,8 @@ class Handler(BaseHTTPRequestHandler):
         if rest == ["test"] and method == "POST":
             channel = str(self.body().get("channel_id") or "")
             try:
-                discordlink.post(discord["token"], channel, "👋 peerlink is connected. Messages here go to this channel's first receiving agent; start with an agent's name and a colon to reach another one that receives here.")
-            except discordlink.DiscordError as err:
+                chat_post(channel, "👋 peerlink is connected. Messages here go to this channel's first receiving agent; start with an agent's name and a colon to reach another one that receives here.")
+            except ChatError as err:
                 return self.reply(502, {"error": str(err)})
             return self.reply(200, {"ok": True})
         if rest == ["reconnect"] and method == "POST":
