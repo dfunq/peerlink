@@ -30,6 +30,8 @@ import time
 import urllib.error
 import urllib.request
 
+from chatlink import ChatError
+
 API = os.environ.get("PEERLINK_DISCORD_API", "https://discord.com/api/v10")
 GATEWAY = os.environ.get("PEERLINK_DISCORD_GATEWAY", "wss://gateway.discord.gg/?v=10&encoding=json")
 
@@ -46,7 +48,7 @@ POSTABLE = {0, 5}
 LIMIT = 2000
 
 
-class DiscordError(ValueError):
+class DiscordError(ChatError):
     pass
 
 
@@ -160,35 +162,51 @@ def chunks(text, limit=LIMIT - 50):
     return out
 
 
-def buttons(options, prefix):
-    """Options as Discord buttons, five to a row, at most 25; each button's id is `prefix:<index>`."""
+def components(buttons):
+    """[(label, id)] as Discord buttons, five to a row, at most 25."""
     rows = []
-    for i, label in enumerate(options[:25]):
+    for i, (label, custom_id) in enumerate(buttons[:25]):
         if i % 5 == 0:
             rows.append({"type": 1, "components": []})
-        rows[-1]["components"].append({"type": 2, "style": 1, "label": str(label)[:80], "custom_id": f"{prefix}:{i}"})
+        rows[-1]["components"].append({"type": 2, "style": 1, "label": str(label)[:80], "custom_id": custom_id})
     return rows
 
 
-def post(token, channel_id, text, reply_to=None, components=None, files=None):
+def post(token, channel_id, text, reply_to=None, buttons=None, files=None):
     """Post text to a channel, split as needed; the first part replies to `reply_to`, the last carries the
-    buttons and the files, so they sit under the whole message."""
-    sent = []
+    buttons ([(label, id)]) and the files, so they sit under the whole message. {"id": the last part's id}."""
+    sent = None
     parts = chunks(text)
     for i, part in enumerate(parts):
         body = {"content": part, "allowed_mentions": {"parse": []}}
         if i == 0 and reply_to:
             body["message_reference"] = {"message_id": reply_to, "fail_if_not_exists": False}
         last = i == len(parts) - 1
-        if last and components:
-            body["components"] = components
-        sent.append(call(token, "POST", f"/channels/{channel_id}/messages", body, files=files if last else None))
-    return sent
+        if last and buttons:
+            body["components"] = components(buttons)
+        sent = call(token, "POST", f"/channels/{channel_id}/messages", body, files=files if last else None)
+    return {"id": str((sent or {}).get("id", ""))}
+
+
+def clear_buttons(token, channel_id, message_id):
+    call(token, "PATCH", f"/channels/{channel_id}/messages/{message_id}", {"components": []})
 
 
 def answer_interaction(interaction_id, interaction_token, kind, data=None):
     """Acknowledge a button press within Discord's three seconds: 7 rewrites the message it was on."""
     call("", "POST", f"/interactions/{interaction_id}/{interaction_token}/callback", {"type": kind, **({"data": data} if data else {})})
+
+
+def answer_press(press, text=None, clear=False):
+    """Acknowledge a button press. With `text`, a line only the presser sees; with `clear`, the buttons go;
+    otherwise they're disabled with the pressed one highlighted, so the message reads as answered."""
+    if text:
+        return answer_interaction(press["id"], press["token"], 4, {"content": text, "flags": 64})
+    rows = [] if clear else (press["message"] or {}).get("components") or []
+    for row in rows:
+        for b in row.get("components", []):
+            b["disabled"], b["style"] = True, 3 if b.get("custom_id") == press["custom_id"] else 2
+    answer_interaction(press["id"], press["token"], 7, {"components": rows})
 
 
 # The /peerlink slash command: one entry in Discord's picker, its subcommands under it. Discord registers commands
@@ -221,9 +239,10 @@ def register_commands(token, app_id, guild_id):
     call(token, "PUT", f"/applications/{app_id}/guilds/{guild_id}/commands", [SLASH])
 
 
-def download(url, limit):
-    """An attachment's bytes, up to `limit`; None when it's bigger. Discord's CDN links need no token."""
-    req = urllib.request.Request(url, headers={"User-Agent": "DiscordBot (https://github.com/dfunq/peerlink, 1)"})
+def download(token, file, limit):
+    """An attachment's bytes ({url, filename, size} as Bot reports it), up to `limit`; None when it's bigger.
+    Discord's CDN links need no token."""
+    req = urllib.request.Request(file["url"], headers={"User-Agent": "DiscordBot (https://github.com/dfunq/peerlink, 1)"})
     with urllib.request.urlopen(req, timeout=30) as r:
         data = r.read(limit + 1)
     return None if len(data) > limit else data
@@ -360,7 +379,7 @@ class Bot:
         self.app_id = ""
         self.commands_in = set()  # servers /peerlink was put in since the daemon started
         self.resume = None  # [session id, resume url, last seq]: a dropped connection picks up what it missed
-        self.on_command = lambda cmd: ("", None)  # (reply, buttons) for a /peerlink subcommand
+        self.on_command = lambda cmd: ("", None)  # (reply, [(label, id)] buttons) for a /peerlink subcommand
         self.on_autocomplete = lambda cmd: []  # choices for the option being typed
         self.stop = threading.Event()
         # Handlers run off the gateway thread, so a slow one (downloads, starting an agent) can't miss heartbeats:
@@ -522,7 +541,7 @@ class Bot:
             self.log("discord", "command failed:", err)
             text, rows = f"That failed: {err}", None
         answer_interaction(d["id"], d["token"], 4, {"content": (text or "Done.")[:2000], "allowed_mentions": {"parse": []},
-                                                    **({"components": rows} if rows else {})})
+                                                    **({"components": components(rows)} if rows else {})})
 
     def _dispatch(self, kind, d):
         if kind == "READY":
