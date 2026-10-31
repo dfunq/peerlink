@@ -29,16 +29,17 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.63"
+VERSION = "0.8.64"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
 import chatlink  # noqa: E402  (beside this file; installs nothing)
 import discordlink  # noqa: E402
+import telegramlink  # noqa: E402
 
 # A fingerprint of the daemon's code, this file and the chat modules beside it together.
 _h = hashlib.sha256()
-for _name in ("peerlinkd.py", "chatlink.py", "discordlink.py"):
+for _name in ("peerlinkd.py", "chatlink.py", "discordlink.py", "telegramlink.py"):
     with open(os.path.join(_here, _name), "rb") as _f:
         _h.update(_f.read())
 CODE = _h.hexdigest()[:16]
@@ -402,7 +403,7 @@ def client_config(sid):
         "space_parent": space_parent(space) if rec else "",
         "lead": lead,
         "children": children,
-        "discord": routes_for(rec.get("cwd", "")) if rec and discord.get("token") else [],
+        "discord": routes_for(rec.get("cwd", "")) if rec and chat_configured() else [],
         "poll_interval_ms": config["poll_interval_ms"],
         "auto_wake_idle": config["auto_wake_idle"] if s["auto_wake"] is None else s["auto_wake"],
         "inject_while_busy": config["inject_while_busy"],
@@ -966,8 +967,15 @@ discord = {"token": "", "app_id": "", "user": "", "enabled": True, "routes": [],
            "trusted_bots": [],
            # People's user IDs who may talk to agents and answer buttons as you do, beside the app's owner or team.
            "allowed_users": []}
+# Telegram's bot, beside Discord's in the same file. Its chats map to agents in `routes`, as "tg:<chat id>".
+TELEGRAM = {"token": "", "user": "", "enabled": True,
+            # Nobody may talk to agents until listed here (Telegram user ids): anyone can find a bot by name.
+            "allowed_users": [],
+            "chats": {},  # "tg:<id>" -> title, every chat the bot has heard from, for the mapping's picker
+            "strangers": []}  # the last few people who wrote without being allowed, offered on the Channels page
 DISCORD_FILES = os.path.join(HOME, "files", "discord")  # what you attach on Discord, for the agent to read
 discord_bot = [None]
+telegram_bot = [None]
 
 
 def load_discord():
@@ -977,6 +985,9 @@ def load_discord():
     except (OSError, ValueError):
         pass
     discord["routes"] = [clean_route(r) for r in discord.get("routes", []) if r.get("channel_id")]
+    tg = discord.setdefault("telegram", {})
+    for k, v in TELEGRAM.items():
+        tg.setdefault(k, json.loads(json.dumps(v)))
 
 
 def clean_route(r):
@@ -1018,21 +1029,82 @@ def start_discord():
         discord_bot[0].on_command, discord_bot[0].on_autocomplete = on_slash, on_slash_typing
 
 
+def start_telegram():
+    old = telegram_bot[0]
+    if old:
+        old.close()
+    telegram_bot[0] = None
+    tg = discord["telegram"]
+    if tg.get("token") and tg.get("enabled", True):
+        bot = telegram_bot[0] = telegramlink.Bot(tg["token"], on_discord, log, on_press)
+        bot.allowed_users = set(tg.get("allowed_users") or [])
+        bot.chats = dict(tg.get("chats") or {})
+        bot.on_command = on_slash
+        bot.on_chat, bot.on_stranger, bot.on_migrate = telegram_chat, telegram_stranger, telegram_migrate
+
+
+def telegram_chat(channel_id, title):
+    with lock:
+        discord["telegram"]["chats"][channel_id] = title
+        save_discord()
+
+
+def telegram_stranger(who):
+    """Someone not allowed wrote to the bot: they're offered on the Channels page, newest first, and nothing else."""
+    log("telegram", "ignored a message from", who["name"], who["id"], "(not allowed)")
+    with lock:
+        tg = discord["telegram"]
+        tg["strangers"] = [{**who, "ts": time.time()}] + [s for s in tg["strangers"] if s["id"] != who["id"]][:9]
+        save_discord()
+
+
+def telegram_migrate(old, new):
+    """A Telegram group that became a supergroup has a new id: its mapping moves with it."""
+    log("telegram", "chat", old, "is now", new)
+    with lock:
+        for r in discord.get("routes", []):
+            if r["channel_id"] == old:
+                r["channel_id"] = new
+        chats = discord["telegram"]["chats"]
+        chats[new] = chats.pop(old, chats.get(new, ""))
+        save_discord()
+
+
 # Chat platforms: every post, reaction and button press goes through these, which pick the platform's module by the
-# channel id (chatlink). Discord is the only one yet; its ids are bare digits.
+# channel id (chatlink): Discord's are bare digits, Telegram's "tg:<chat id>".
 ChatError = chatlink.ChatError
+CHAT_LINKS = {"discord": discordlink, "telegram": telegramlink}
+
+
+def chat_token(platform):
+    return discord.get("token", "") if platform == "discord" else (discord.get(platform) or {}).get("token", "")
 
 
 def chat_link(channel_id):
     """(module, credential) for the platform a channel is on; ChatError when it isn't set up."""
-    if chatlink.platform(channel_id) == "discord" and discord.get("token"):
-        return discordlink, discord["token"]
+    platform = chatlink.platform(channel_id)
+    if platform in CHAT_LINKS and chat_token(platform):
+        return CHAT_LINKS[platform], chat_token(platform)
     raise ChatError(f"{chatlink.name(channel_id)} isn't set up")
+
+
+def chat_bot(channel_id):
+    """The running bot for the platform a channel is on, or None."""
+    platform = chatlink.platform(channel_id)
+    bot = {"discord": discord_bot, "telegram": telegram_bot}.get(platform, [None])[0]
+    return bot if chat_token(platform) else None
 
 
 def chat_ready(channel_id=""):
     """Whether the platform a channel is on is set up with its bot running; with no channel, whether any is."""
-    return bool(discord.get("token") and discord_bot[0])
+    if channel_id:
+        return chat_bot(channel_id) is not None
+    return chat_bot("0") is not None or chat_bot("tg:0") is not None
+
+
+def chat_configured():
+    """Whether any platform has a token, running or not: agents are told their channels then."""
+    return any(chat_token(p) for p in CHAT_LINKS)
 
 
 def choices(options, key):
@@ -1081,7 +1153,7 @@ def folder_name(cwd):
 
 
 def discord_channel_label(channel_id):
-    bot = discord_bot[0]
+    bot = chat_bot(channel_id)
     name = bot.channel_name(channel_id) if bot else ""
     return f"#{name}" if name else chatlink.name(channel_id)
 
@@ -1093,10 +1165,10 @@ def routes_for(cwd):
     for r in discord.get("routes", []):
         a = next((a for a in r.get("agents", []) if a["cwd"] == cwd), None)
         if a:
-            out.append({"channel_id": r["channel_id"], "channel": discord_channel_label(r["channel_id"]),
+            out.append({"channel_id": r["channel_id"], "channel": discord_channel_label(r["channel_id"]), "platform": chatlink.name(r["channel_id"]),
                         "master": receivers(r)[:1] == [cwd], "receives": a["receives"], "sends": a["sends"]})
     if discord.get("dm") == cwd:
-        out.append({"channel_id": "dm", "channel": "direct messages", "master": True, "receives": True, "sends": True})
+        out.append({"channel_id": "dm", "channel": "direct messages", "platform": "Discord", "master": True, "receives": True, "sends": True})
     return out
 
 
@@ -1162,7 +1234,10 @@ def save_discord_files(d):
     if not discord.get("files_in", True):
         return f"\n\n(Files were attached on {chatlink.name(d['channel_id'])}, but saving them is turned off on the Channels page.)"
     limit = int(float(discord.get("max_file_mb") or 10) * 1024 * 1024)
-    folder = os.path.join(DISCORD_FILES, d["message_id"])
+    # Telegram's message ids count up per chat, so its folders name the chat too.
+    cid = d["channel_id"]
+    folder = (os.path.join(DISCORD_FILES, d["message_id"]) if chatlink.platform(cid) == "discord"
+              else os.path.join(HOME, "files", chatlink.platform(cid), f"{cid.split(':', 1)[1]}-{d['message_id']}"))
     lines = []
     for f in d["files"][:10]:
         name = os.path.basename(f["filename"]) or "file"
@@ -1301,8 +1376,8 @@ def on_clear_all_press(press):
 
 
 def on_discord(d):
-    """A message from you on Discord: to the channel's first receiver, or to another one it names first."""
-    bot = discord_bot[0]
+    """A message from you on Discord or Telegram: to the chat's first receiver, or to another one it names first."""
+    bot = chat_bot(d["channel_id"])
     if not bot:
         return
     # Your own words can work the Inbox: "/inbox", "1 done", or a reply to a task posted for you. Never a bot's.
@@ -1567,8 +1642,22 @@ def on_press(press):
     log("chat press", msg["id"], press["author"], "->", msg["to_name"], choice)
 
 
+def chat_target(word):
+    """A chat `to` names: "discord", "telegram", "telegram#family", as (platform name or "" for any, "#channel" or "").
+    None when it names no chat. "discord" is any platform, as it was before there were others."""
+    head, sep, channel = word.partition("#")
+    if head not in ("discord", "telegram"):
+        return None
+    return ("" if head == "discord" else chatlink.NAMES[head]), ("#" + channel.lstrip("#") if sep else "")
+
+
+def chats_matching(chans, target):
+    platform, channel = target
+    return [r for r in chans if (not platform or r.get("platform") == platform) and (not channel or r["channel"].lower() == channel)]
+
+
 def send_discord(sender_rec, to, text, parent, hops, options=None, files=None, expects_reply=False):
-    """`to: "discord"` or `"discord#name"`, or a reply to a message from Discord. None when it's not for Discord."""
+    """`to: "discord"`, `"telegram"` or one with "#name", or a reply to a message from a chat. None when it's not for one."""
     if not sender_rec or not chat_ready():
         return None
     if parent and parent.get("discord") and parent.get("to_cwd") == sender_rec.get("cwd"):
@@ -1577,27 +1666,26 @@ def send_discord(sender_rec, to, text, parent, hops, options=None, files=None, e
         if out[0] == 200:
             set_reaction(parent, "✅")
         return out
-    word = to.strip().lower()
-    if not (word == "discord" or word.startswith("discord#")):
+    target = chat_target(to.strip().lower())
+    if target is None:
         return None
-    mine = [r for r in routes_for(sender_rec.get("cwd", "")) if r["channel_id"] != "dm" and r["sends"]]
-    if word.startswith("discord#"):
-        want = "#" + word.split("#", 1)[1].lstrip("#")
-        mine = [r for r in mine if r["channel"].lower() == want]
+    mine = chats_matching([r for r in routes_for(sender_rec.get("cwd", "")) if r["channel_id"] != "dm" and r["sends"]], target)
+    where = target[0] or "chat"
     if not mine:
-        return 404, {"error": "this agent isn't ticked to send in any Discord channel; the mapping is in the web UI, under Channels"}
+        return 404, {"error": f"this agent isn't ticked to send in any {where} channel; the mapping is in the web UI, under Channels"}
     if len(mine) > 1:
-        return 409, {"error": "this agent is in several Discord channels: say which, e.g. " + ", ".join(f"discord{r['channel']}" for r in mine)}
+        return 409, {"error": f"this agent is in several {where} channels: say which, e.g. " + ", ".join(f"{r['platform'].lower()}{r['channel']}" for r in mine)}
     return post_to_discord(sender_rec, mine[0]["channel_id"], text, None, None, hops, options, files, expects_reply)
 
 
 def user_send(sender_rec, word, text, kind, parent_task, expects_reply, hops, options, files):
     """A message or task for you: it waits in your Inbox, and is posted to Discord when the agent has a channel there."""
     chans = [r for r in routes_for(sender_rec.get("cwd", "")) if r["channel_id"] != "dm" and r["sends"]] if chat_ready() else []
-    if word.startswith("discord#"):
-        chans = [r for r in chans if r["channel"].lower() == "#" + word.split("#", 1)[1].lstrip("#")]
-    if (word == "discord" or word.startswith("discord#")) and not chans:
-        return 404, {"error": "this agent isn't mapped to that Discord channel; send it to \"user\" to put it in their Inbox, or map a channel under Channels"}
+    target = chat_target(word)
+    if target:
+        chans = chats_matching(chans, target)
+    if target and not chans:
+        return 404, {"error": f"this agent isn't mapped to that {target[0] or 'chat'} channel; send it to \"user\" to put it in their Inbox, or map a channel under Channels"}
     channel = chans[0]["channel_id"] if chans else ""
     # A question from an agent with no channel of its own goes where its approvals do, its space lead's channel, so it's
     # answered (and leaves the Inbox) on Discord too.
@@ -1774,7 +1862,8 @@ def inbox_command(d):
     text, channel = d["text"].strip(), d["channel_id"]
     say = lambda line: chat_post(channel, line, d["message_id"])
     # A reply to a task posted for you settles it: "done", "done: it's set", "failed: no access".
-    task = next((t for t in tasks.values() if t.get("user") and d.get("ref") and (t.get("discord_out") or {}).get("message_id") == d["ref"]), None)
+    task = next((t for t in tasks.values() if t.get("user") and d.get("ref") and (t.get("discord_out") or {}).get("message_id") == d["ref"]
+                 and (t.get("discord_out") or {}).get("channel_id") == channel), None)
     if task:
         verb, _, note = text.partition(":")
         verb = verb.strip().lower()
@@ -1911,8 +2000,8 @@ def send(body):
         out = send_discord(sender_rec, to, text, parent, hops, options, files, bool(body.get("expects_reply")))
         if out is not None:
             return out
-    # "discord" or "discord#channel", not an agent whose name starts with discord, like discord-voice.
-    if sender_rec and (word in USER_ALIASES or (kind == "task" and (word == "discord" or word.startswith("discord#")) and not parent)):
+    # "discord", "telegram" or one with "#channel", not an agent whose name starts with discord, like discord-voice.
+    if sender_rec and (word in USER_ALIASES or (kind == "task" and chat_target(word) and not parent)):
         return user_send(sender_rec, word, text, kind, parent_task, bool(body.get("expects_reply")), hops, options, files)
     out = send_discord(sender_rec, to, text, parent, hops, options, files, bool(body.get("expects_reply")))
     if out is not None:
@@ -3562,8 +3651,12 @@ class Handler(BaseHTTPRequestHandler):
             start_discord()
             return self.reply(200, {"ok": True})
         if rest == ["channels"] and method == "GET":
+            # Telegram's chats come as one more group, the ones its bot has heard from.
+            tg = discord["telegram"]
+            chats = ([{"id": "telegram", "name": "Telegram", "channels": sorted(({"id": k, "name": v} for k, v in tg["chats"].items()), key=lambda c: c["name"].lower())}]
+                     if tg.get("token") else [])
             if not discord.get("token"):
-                return self.reply(200, {"guilds": []})
+                return self.reply(200, {"guilds": chats})
             # ↻ Refresh asks Discord itself (fresh=1), and what it says replaces the gateway's view.
             live_view = bot.channels_live() if bot and "fresh" not in q else None
             try:
@@ -3571,9 +3664,9 @@ class Handler(BaseHTTPRequestHandler):
                     live_view = discordlink.channels_rest(discord["token"])
                     if bot:
                         bot.set_channels(live_view)
-                return self.reply(200, {"guilds": live_view})
+                return self.reply(200, {"guilds": live_view + chats})
             except discordlink.DiscordError as err:
-                return self.reply(502, {"error": str(err)})
+                return self.reply(502, {"error": str(err), "guilds": chats})
         if rest == ["test"] and method == "POST":
             channel = str(self.body().get("channel_id") or "")
             try:
@@ -3583,6 +3676,52 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, {"ok": True})
         if rest == ["reconnect"] and method == "POST":
             start_discord()
+            return self.reply(200, {"ok": True})
+        return self.reply(404, {"error": "not found"})
+
+    def telegram_api(self, rest, method):
+        tg, bot = discord["telegram"], telegram_bot[0]
+        if rest == [] and method == "GET":
+            return self.reply(200, {
+                "configured": bool(tg.get("token")), "token_hint": telegramlink.hint(tg.get("token", "")), "user": tg.get("user", ""),
+                "enabled": tg.get("enabled", True), "state": bot.state if bot else ("off" if tg.get("token") else "unconfigured"),
+                "error": bot.error if bot else "", "reads_messages": bool(bot and bot.reads_messages),
+                "allowed_users": tg.get("allowed_users", []), "strangers": tg.get("strangers", []), "chats": tg.get("chats", {}),
+            })
+        if rest == [] and method == "PUT":
+            b = self.body()
+            restart = False
+            with lock:
+                if "token" in b:
+                    try:
+                        info = telegramlink.inspect_token(b["token"])
+                    except telegramlink.TelegramError as err:
+                        return self.reply(400, {"error": str(err)})
+                    tg.update({"token": b["token"].strip(), "user": info["user"], "enabled": True})
+                    restart = True
+                if "enabled" in b:
+                    tg["enabled"], restart = bool(b["enabled"]), True
+                if "allowed_users" in b:
+                    raw = b["allowed_users"]
+                    tg["allowed_users"] = list(dict.fromkeys(re.findall(r"\d{3,20}", raw if isinstance(raw, str) else " ".join(map(str, raw or [])))))
+                if b.get("allow"):
+                    # Pairing: someone who wrote to the bot, allowed from the list of who tried.
+                    who = str(b["allow"])
+                    tg["allowed_users"] = list(dict.fromkeys(tg["allowed_users"] + [who]))
+                    tg["strangers"] = [s for s in tg["strangers"] if s["id"] != who]
+                if b.get("dismiss"):
+                    tg["strangers"] = [s for s in tg["strangers"] if s["id"] != str(b["dismiss"])]
+                if bot:
+                    bot.allowed_users = set(tg["allowed_users"])
+                save_discord()
+            if restart:
+                start_telegram()
+            return self.reply(200, {"ok": True})
+        if rest == [] and method == "DELETE":
+            with lock:
+                tg.update({"token": "", "user": ""})
+                save_discord()
+            start_telegram()
             return self.reply(200, {"ok": True})
         return self.reply(404, {"error": "not found"})
 
@@ -4097,6 +4236,11 @@ class Handler(BaseHTTPRequestHandler):
 
         if rest and rest[0] == "discord":
             return self.discord_api(rest[1:], method, q)
+        if rest and rest[0] == "telegram":
+            # Who may talk to your agents is yours to say: changes come from your browser, never an agent holding the key.
+            if method != "GET" and (not browser or self.key_ok()):
+                return self.reply(403, {"error": "Telegram is set up from the web UI"})
+            return self.telegram_api(rest[1:], method)
 
         if len(rest) == 2 and rest[0] == "issues" and method == "POST":
             code, out = update_feedback(rest[1], self.body())
@@ -4215,6 +4359,7 @@ def serve():
     threading.Thread(target=reaction_worker, name="discord-reactions", daemon=True).start()
     clean_stale_reactions()
     start_discord()
+    start_telegram()
     try:
         write_launcher()
     except OSError as err:
@@ -4670,8 +4815,18 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <ol class="steps">
 <li class="step" id="dstep1"><span class="step-n">1</span><div class="step-body"><div class="step-t">Create the bot and paste its token</div><div id="dstep1b"></div></div></li>
 <li class="step" id="dstep2"><span class="step-n">2</span><div class="step-body"><div class="step-t">Invite it to your server</div><div id="dstep2b"></div></div></li>
-<li class="step" id="dstep3"><span class="step-n">3</span><div class="step-body"><div class="step-t">Map channels to agents</div><div id="dstep3b"></div></div></li>
+<li class="step" id="dstep3"><span class="step-n">3</span><div class="step-body"><div class="step-t">Map channels to agents</div><p class="meta">Under <b>Chats and agents</b>, below.</p></div></li>
 </ol>
+<h2>Telegram</h2>
+<p class="lead">A private chat with your bot, or a group it's in, works like a Discord channel. Telegram bots answer anyone who finds them, so peerlink ignores everyone until you allow them.</p>
+<div id="tstatus"></div>
+<ol class="steps">
+<li class="step" id="tstep1"><span class="step-n">1</span><div class="step-body"><div class="step-t">Create the bot and paste its token</div><div id="tstep1b"></div></div></li>
+<li class="step" id="tstep2"><span class="step-n">2</span><div class="step-body"><div class="step-t">Message it, then allow yourself</div><div id="tstep2b"></div></div></li>
+<li class="step" id="tstep3"><span class="step-n">3</span><div class="step-body"><div class="step-t">Map chats to agents</div><div id="tstep3b"></div></div></li>
+</ol>
+<h2>Chats and agents</h2>
+<div id="dstep3b"></div>
 <div id="dmore"></div>
 </section>
 
@@ -5209,24 +5364,26 @@ const folderLabel=cwd=>{const a=agentFolders().find(x=>x.cwd===cwd);return a?`${
 function agentSelect(val,attrs,placeholder){const opts=agentFolders();const extra=val&&!opts.some(o=>o.cwd===val)?[{cwd:val}]:[];
   return `<select ${attrs}><option value="">${placeholder}</option>${[...opts,...extra].map(o=>`<option value="${esc(o.cwd)}" ${o.cwd===val?'selected':''}>${esc(folderLabel(o.cwd))}</option>`).join('')}</select>`}
 function channelSelect(val,attrs){const gs=dGuilds||[];
-  return `<select ${attrs}><option value="">Pick a channel…</option>${gs.map(g=>`<optgroup label="${esc(g.name)}">${g.channels.map(c=>`<option value="${esc(c.id)}" ${c.id===val?'selected':''}>#${esc(c.name)}</option>`).join('')}</optgroup>`).join('')}</select>`}
-const chanName=id=>{for(const g of dGuilds||[])for(const c of g.channels)if(c.id===id)return '#'+c.name;return 'channel '+id};
+  return `<select ${attrs}><option value="">Pick a channel…</option>${gs.map(g=>`<optgroup label="${esc(g.name)}">${g.channels.map(c=>`<option value="${esc(c.id)}" ${c.id===val?'selected':''}>${g.id==='telegram'?'':'#'}${esc(c.name)}</option>`).join('')}</optgroup>`).join('')}</select>`}
+const chanName=id=>{for(const g of dGuilds||[])for(const c of g.channels)if(c.id===id)return (g.id==='telegram'?'':'#')+c.name;return 'channel '+id};
 async function loadDiscord(check){
   dState=await api('/api/discord'+(check?'?check=1':''));
-  if(dState.configured&&dGuilds===null){const r=await api('/api/discord/channels');dGuilds=r.guilds||[]}
+  if(dGuilds===null){const r=await api('/api/discord/channels');dGuilds=r.guilds||[]}
   if(!dDraft)dDraft={routes:JSON.parse(JSON.stringify(dState.routes||[])),dm:dState.dm||''};
   renderDiscord()}
-function renderDiscord(){if(!dState)return;const d=dState,invited=(dGuilds||[]).length>0,mapped=(d.routes||[]).some(r=>(r.agents||[]).length);
+function renderDiscord(){if(!dState)return;const d=dState,invited=(dGuilds||[]).some(g=>g.id!=='telegram'),mapped=(d.routes||[]).some(r=>(r.agents||[]).length);
+  const tgChats=(dGuilds||[]).some(g=>g.id==='telegram'&&g.channels.length);
   $('#n-discord').textContent=d.state==='online'?'on':'';
   const label={online:'Online',connecting:'Connecting…',error:'Error',off:'Turned off',unconfigured:'Not set up'}[d.state]||d.state;
   $('#dstatus').innerHTML=d.configured?`<div class="dstate"><span class="dot ${d.state==='online'?'':'busy'}"></span><b>${esc(label)}</b>${d.user?` as ${esc(d.user)}`:''}${d.error?` · <span class="err">${esc(d.error)}</span>`:''}</div>`:'';
-  $('#dstep1').classList.toggle('done',d.configured);$('#dstep2').classList.toggle('done',d.configured&&invited);$('#dstep3').classList.toggle('done',mapped);
+  $('#dstep1').classList.toggle('done',d.configured);$('#dstep2').classList.toggle('done',d.configured&&invited);$('#dstep3').classList.toggle('done',(d.routes||[]).some(r=>!r.channel_id.startsWith('tg:')&&(r.agents||[]).length));
+  $('#tstep3').classList.toggle('done',(d.routes||[]).some(r=>r.channel_id.startsWith('tg:')&&(r.agents||[]).length));
   $('#dstep1b').innerHTML=d.configured?`<p class="meta">Token <span class="mono">${esc(d.token_hint)}</span> saved. <button class="ghost small" data-dact="forget">Disconnect</button></p>`
    :`<p class="meta">On the <a href="https://discord.com/developers/applications" target="_blank" rel="noreferrer">Developer Portal ↗</a>, click <b>New Application</b> and give it a name. Open <b>Bot</b>, click <b>Reset Token</b>, and copy it. Optional: on the same page, turn on <b>Message Content Intent</b> so you can talk to it without @mentioning it every time.</p>
      <form class="addline" id="dtoken"><input type="password" class="mono grow" autocomplete="off" spellcheck="false" placeholder="Bot token" name="token"><button type="submit" ${dBusy?'disabled':''}>${dBusy?'Checking…':'Connect'}</button></form><p class="small err" id="dtokerr"></p>`;
   $('#dstep2b').innerHTML=!d.configured?'':`<p class="meta">${invited?`In ${dGuilds.map(g=>esc(g.name)).join(', ')}. `:`Pick your server on Discord's page, then come back here. This step completes on its own. `}
     ${d.invite_url?`<a href="${esc(d.invite_url)}" target="_blank" rel="noreferrer">${invited?'Invite to another server ↗':'<button>Invite the bot ↗</button>'}</a>`:''}</p>`;
-  if(!d.configured||!invited){$('#dstep3b').innerHTML='';$('#dmore').innerHTML='';return}
+  if(!(d.configured&&invited)&&!tgChats){$('#dstep3b').innerHTML='<p class="meta">Set up Discord or Telegram above; the channels and chats its bot can see are mapped to agents here.</p>';$('#dmore').innerHTML='';return}
   const rows=dDraft.routes.map((r,i)=>`<tr>
     <td>${channelSelect(r.channel_id,`data-droute="${i}" data-dfield="channel_id"`)}</td>
     <td><div class="kinds">${(r.agents||[]).map((a,j)=>`<div class="addline small"><b>${esc(folderLabel(a.cwd))}</b>
@@ -5234,33 +5391,33 @@ function renderDiscord(){if(!dState)return;const d=dState,invited=(dGuilds||[]).
         <label class="small"><input type="checkbox" data-dflag="${i}:${j}:sends" ${a.sends?'checked':''}> Sends</label>
         <button class="ghost small" title="Remove" data-dunagent="${i}:${j}">✕</button></div>`).join('')}
       ${agentSelect('',`data-daddagent="${i}"`,'+ add agent')}</div></td>
-    <td style="white-space:nowrap"><button class="ghost small" data-dtest="${esc(r.channel_id)}" ${r.channel_id&&d.state==='online'?'':'disabled'}>Send a test</button> <button class="ghost small" data-dremove="${i}" title="Remove this channel">✕</button></td></tr>`).join('');
+    <td style="white-space:nowrap"><button class="ghost small" data-dtest="${esc(r.channel_id)}" ${r.channel_id&&(r.channel_id.startsWith('tg:')?tState?.state:d.state)==='online'?'':'disabled'}>Send a test</button> <button class="ghost small" data-dremove="${i}" title="Remove this channel">✕</button></td></tr>`).join('');
   $('#dstep3b').innerHTML=`<p class="meta">Your messages go to the first agent that receives. To reach another that receives, start with its name and a colon: <span class="mono">storefront: how's the build?</span> An agent that sends posts its messages and updates there; any agent answers you where you asked.</p>
     <table class="dmap"><thead><tr><th>Channel</th><th>Agents</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="3" class="mut small">No channels mapped yet.</td></tr>'}</tbody></table>
     <p class="small mut" style="margin-top:6px">Start a post with <span class="mono">Task:</span> to hand it over as a task, or <span class="mono">Announcement:</span> to tell the receiving agent's whole space.</p>
     <div class="addline" style="margin-top:8px"><button class="ghost" data-dact="addroute">+ Map a channel</button><button class="ghost" data-dact="refresh" title="Look for new servers and channels">↻ Refresh channels</button></div>
-    <div class="addline" style="margin-top:12px"><label class="small mut">Direct messages to the bot go to</label>${agentSelect(dDraft.dm,'data-ddm','Nobody (ignored)')}</div>
+    ${d.configured?`<div class="addline" style="margin-top:12px"><label class="small mut">Direct messages to the Discord bot go to</label>${agentSelect(dDraft.dm,'data-ddm','Nobody (ignored)')}</div>`:''}
     <div class="addline" style="margin-top:12px"><button data-dact="save">Save mapping</button><span class="small" id="dsaved"></span></div>`;
   const reading=d.reads_messages?`<p class="meta">Everything you write in a mapped channel goes to its first receiving agent. No @mention needed.</p>`
     :d.message_content_switch?`<p class="meta">The Message Content switch is on in Discord, but the bot connected before it was. <button class="ghost small" data-dact="reconnect">Reconnect now</button></p>`
     :`<p class="meta">${d.message_content_switch===false?'<b>Discord says the Message Content switch is off.</b> ':''}@mention the bot each time, or DM it. To talk without @mentioning, turn on <b>Message Content Intent</b> on the <a href="${d.app_id?`https://discord.com/developers/applications/${esc(d.app_id)}/bot`:'https://discord.com/developers/applications'}" target="_blank" rel="noreferrer">Bot page ↗</a> (under Privileged Gateway Intents) and save. <button class="ghost small" data-dact="check">I turned it on</button></p>`;
-  $('#dmore').innerHTML=`<h2>Talking to your agents</h2>${reading}
+  $('#dmore').innerHTML=`<h2>Talking to your agents</h2>${d.configured?reading:''}
     <p class="meta">A reaction on your message shows its progress:</p>
     <div class="legend"><span>👀</span><span>delivered to the agent</span><span>🤔</span><span>thinking</span><span>🛠️</span><span>using tools</span><span>❓</span><span>asked you something</span><span>✅</span><span>answered</span></div>
     <p class="meta" style="margin-top:12px">Agents can message you first, labelled with their name. If an agent isn't running, your message waits up to an hour for it.</p>
     <h2>What agents can send</h2>
     <label class="check"><input type="checkbox" data-dopt="buttons" ${d.buttons?'checked':''}> <span><b>Buttons</b> for choices: tap one and it goes back to the agent as your answer. Off, the choices are a numbered list you reply to.</span></label>
     <label class="check"><input type="checkbox" data-dopt="files_out" ${d.files_out?'checked':''}> <span><b>Files from agents:</b> an agent can attach files from this machine to its messages.</span></label>
-    <label class="check"><input type="checkbox" data-dopt="files_in" ${d.files_in?'checked':''}> <span><b>Files to agents:</b> what you attach on Discord is saved here, in <span class="mono">~/.peerlink/files/discord</span>, and the agent gets the paths.</span></label>
-    <div class="addline" style="margin-top:8px"><label class="small mut" for="dmaxmb">Largest file, either way</label><input id="dmaxmb" type="number" min="1" max="500" step="1" value="${esc(d.max_file_mb)}" style="width:90px" data-dopt="max_file_mb"> <span class="small mut">MB (Discord allows 10 MB without Nitro)</span></div>
-    <h2>People who can talk to agents</h2>
+    <label class="check"><input type="checkbox" data-dopt="files_in" ${d.files_in?'checked':''}> <span><b>Files to agents:</b> what you attach is saved here, under <span class="mono">~/.peerlink/files</span>, and the agent gets the paths.</span></label>
+    <div class="addline" style="margin-top:8px"><label class="small mut" for="dmaxmb">Largest file, either way</label><input id="dmaxmb" type="number" min="1" max="500" step="1" value="${esc(d.max_file_mb)}" style="width:90px" data-dopt="max_file_mb"> <span class="small mut">MB (Discord allows 10 MB without Nitro; Telegram bots get files up to 20 MB)</span></div>
+    ${d.configured?`<h2>Discord: people who can talk to agents</h2>
     <p class="meta">Only you can, as the bot's owner (or its team's members). Add other people's user IDs here, separated by commas: they can then message agents and answer buttons as you do. To find one, turn on Developer Mode in Discord, right-click the person and choose Copy User ID.</p>
     <div class="addline"><input id="dusers" class="mono" placeholder="e.g. 1562000000000000000" value="${esc((d.allowed_users||[]).join(', '))}" data-dusers style="flex:1;min-width:0"></div>
-    <h2>Bots that can post to agents</h2>
+    <h2>Discord: bots that can post to agents</h2>
     <p class="meta">Other bots are ignored unless listed here. Add their user IDs, separated by commas. To find one, turn on Developer Mode in Discord, right-click the bot and choose Copy User ID. List only bots you control.</p>
     <div class="addline"><input id="dbots" class="mono" placeholder="e.g. 1562000000000000000" value="${esc((d.trusted_bots||[]).join(', '))}" data-dbots style="flex:1;min-width:0"></div>
-    <h2>Bot</h2>
-    <label class="check"><input type="checkbox" data-dact="enabled" ${d.enabled?'checked':''}> Bot running</label>`}
+    <h2>Discord bot</h2>
+    <label class="check"><input type="checkbox" data-dact="enabled" ${d.enabled?'checked':''}> Bot running</label>`:''}`}
 document.addEventListener('click',e=>{if(e.target.closest('[data-limresume]'))post('/api/limit/resume',{}).then(()=>refresh(true))});
 document.addEventListener('submit',async e=>{if(e.target.id!=='dtoken')return;e.preventDefault();const t=e.target.token.value.trim();if(!t)return;
   dBusy=true;renderDiscord();const r=await api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({token:t})});dBusy=false;
@@ -5289,9 +5446,42 @@ document.addEventListener('click',async e=>{const t=e.target.closest('button');i
   if(a==='save'){const bad=dDraft.routes.find(r=>!r.channel_id||!(r.agents||[]).some(a=>a.receives||a.sends));if(bad){$('#dsaved').className='small err';$('#dsaved').textContent='Every row needs a channel and an agent that receives or sends.';return}
     await api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({routes:dDraft.routes,dm:dDraft.dm})});dState=null;dDraft=null;await loadDiscord();
     $('#dsaved').className='small ok';$('#dsaved').textContent='Saved'}});
+// -- Telegram: the bot's token, who may talk to it, and the chats it has heard from ------------------
+let tState=null,tBusy=false;
+async function loadTelegram(){const before=JSON.stringify(Object.keys(tState?.chats||{}));tState=await api('/api/telegram');renderTelegram();
+  // A chat the bot heard from for the first time joins the mapping's picker.
+  if(before!==JSON.stringify(Object.keys(tState.chats||{}))&&dState){dGuilds=null;loadDiscord()}}
+function renderTelegram(){const t=tState;if(!t)return;
+  const label={online:'Online',connecting:'Connecting…',error:'Error',off:'Turned off',unconfigured:'Not set up'}[t.state]||t.state;
+  $('#tstatus').innerHTML=t.configured?`<div class="dstate"><span class="dot ${t.state==='online'?'':'busy'}"></span><b>${esc(label)}</b>${t.user?` as @${esc(t.user)}`:''}${t.error?` · <span class="err">${esc(t.error)}</span>`:''}</div>`:'';
+  $('#tstep1').classList.toggle('done',t.configured);$('#tstep2').classList.toggle('done',t.configured&&(t.allowed_users||[]).length>0);
+  $('#tstep1b').innerHTML=t.configured?`<p class="meta">Token <span class="mono">${esc(t.token_hint)}</span> saved. <label class="small"><input type="checkbox" data-tact="enabled" ${t.enabled?'checked':''}> Bot running</label> <button class="ghost small" data-tact="forget">Disconnect</button></p>`
+   :`<p class="meta">In Telegram, message <a href="https://t.me/BotFather" target="_blank" rel="noreferrer">@BotFather ↗</a>, send <span class="mono">/newbot</span>, and pick a name and a username. It answers with a token: paste it here.</p>
+     <form class="addline" id="ttoken"><input type="password" class="mono grow" autocomplete="off" spellcheck="false" placeholder="123456789:AAE…" name="token"><button type="submit" ${tBusy?'disabled':''}>${tBusy?'Checking…':'Connect'}</button></form><p class="small err" id="ttokerr"></p>`;
+  const strangers=(t.strangers||[]).map(x=>`<div class="addline small"><b>${esc(x.name)}</b>${x.username?` @${esc(x.username)}`:''} <span class="mono mut">${esc(x.id)}</span> <span class="mut">in ${esc(x.chat_name||x.chat)}, ${ago(x.ts)} ago</span>
+      <button class="small" data-tallow="${esc(x.id)}">Allow</button><button class="ghost small" data-tdismiss="${esc(x.id)}">Dismiss</button></div>`).join('');
+  $('#tstep2b').innerHTML=!t.configured?'':`<p class="meta">Open <a href="https://t.me/${esc(t.user)}" target="_blank" rel="noreferrer">@${esc(t.user)} ↗</a> and send it any message. You show up here; allow yourself, and the bot answers you from then on.</p>
+    ${strangers?`<p class="meta"><b>Wrote to the bot, not allowed yet:</b></p>${strangers}`:'<p class="small mut">Nobody waiting. This updates by itself.</p>'}
+    <p class="meta" style="margin-top:8px">Allowed (Telegram user ids, separated by commas): they can message agents and answer buttons as you do.</p>
+    <div class="addline"><input class="mono" placeholder="e.g. 123456789" value="${esc((t.allowed_users||[]).join(', '))}" data-tusers style="flex:1;min-width:0"></div>`;
+  $('#tstep3b').innerHTML=!t.configured?'':`<p class="meta">Every chat the bot has heard from, your private chat with it or a group you added it to, is listed under <b>Chats and agents</b>, below.
+    ${t.reads_messages?'In groups it reads every message.':'In groups, Telegram shows the bot only commands, @mentions and replies to it. To talk without @mentioning, send <span class="mono">/setprivacy</span> to @BotFather, choose Disable, then remove the bot from the group and add it again.'}
+    Commands work too: <span class="mono">/status</span>, <span class="mono">/inbox</span>, <span class="mono">/peerlink run loop 5m check the deploy</span>.</p>`}
+document.addEventListener('submit',async e=>{if(e.target.id!=='ttoken')return;e.preventDefault();const tok=e.target.token.value.trim();if(!tok)return;
+  tBusy=true;renderTelegram();const r=await api('/api/telegram',{method:'PUT',headers:J,body:JSON.stringify({token:tok})});tBusy=false;
+  if(r.error){renderTelegram();$('#ttokerr').textContent=r.error;return}await loadTelegram()});
+document.addEventListener('change',e=>{const t=e.target;
+  if(t.dataset.tusers!==undefined)api('/api/telegram',{method:'PUT',headers:J,body:JSON.stringify({allowed_users:t.value})}).then(loadTelegram);
+  if(t.dataset.tact==='enabled')api('/api/telegram',{method:'PUT',headers:J,body:JSON.stringify({enabled:t.checked})}).then(loadTelegram)});
+document.addEventListener('click',async e=>{const t=e.target.closest('button');if(!t)return;
+  if(t.dataset.tallow){await api('/api/telegram',{method:'PUT',headers:J,body:JSON.stringify({allow:t.dataset.tallow})});loadTelegram()}
+  if(t.dataset.tdismiss){await api('/api/telegram',{method:'PUT',headers:J,body:JSON.stringify({dismiss:t.dataset.tdismiss})});loadTelegram()}
+  if(t.dataset.tact==='forget'&&confirm('Disconnect the Telegram bot? The chat mapping and allowed people are kept.')){await api('/api/telegram',{method:'DELETE'});loadTelegram()}});
+// Someone messaging the bot, or a chat it joins, shows up without a reload.
+setInterval(()=>{if(location.hash==='#channels'&&tState?.configured&&!document.hidden)loadTelegram()},4000);
 // Invited in another tab, or back from the Developer Portal: look again when this tab gets focus.
 window.addEventListener('focus',()=>{if(location.hash==='#channels'&&dState?.configured){dGuilds=null;loadDiscord(true)}});
-window.addEventListener('hashchange',()=>{if(location.hash==='#discord')location.hash='#channels';if(location.hash==='#channels')loadDiscord()});
+window.addEventListener('hashchange',()=>{if(location.hash==='#discord')location.hash='#channels';if(location.hash==='#channels'){loadDiscord();loadTelegram()}});
 
 async function loadCfg(){cfg=await api('/api/config');const f=$('#cfg');
   for(const el of f.elements){if(!el.name)continue;const v=cfg[el.name];
@@ -5319,7 +5509,7 @@ async function tick(){
   catch(e){if(!signedOut){misses++;$('#offline').style.display='block'}}
   if(signedOut){live?.close();return}
   setTimeout(tick,streamOk?30000:misses?10000:2000)}
-show();loadCfg().then(()=>refresh(true)).then(()=>{if(location.hash==='#discord')location.hash='#channels';else if(location.hash==='#channels')loadDiscord()}).catch(()=>{misses=1;$('#offline').style.display='block'}).finally(()=>{connect();setTimeout(tick,2000)});
+show();loadCfg().then(()=>refresh(true)).then(()=>{if(location.hash==='#discord')location.hash='#channels';else if(location.hash==='#channels'){loadDiscord();loadTelegram()}}).catch(()=>{misses=1;$('#offline').style.display='block'}).finally(()=>{connect();setTimeout(tick,2000)});
 </script></body></html>
 """
 
