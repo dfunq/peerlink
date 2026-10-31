@@ -318,6 +318,8 @@ claude --plugin-dir ~/Repos/peerlink/plugin
 
 Requires `python3` on your `PATH`.
 
+**Pairs well with [herdr](https://herdr.dev).** herdr is a terminal workspace manager for AI coding agents: it keeps your agents in panes and tabs of one persistent session, so you can watch them all. peerlink lets them talk to each other.
+
 ## Settings
 
 You can change these in the web UI, with `peerlink config <name> <value>`, or in `~/.peerlink/config.json`. The daemon's log is at `~/.peerlink/daemon.log`.
