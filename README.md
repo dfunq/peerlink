@@ -2,16 +2,23 @@
 
 Let your Claude agents find each other and message each other to get work done. Each agent is a Claude Code session; peerlink connects the ones running on your machine.
 
-Each agent gets these tools, among others:
+Each agent gets these tools:
 
 | Tool | What it does |
 | --- | --- |
 | `list_peers` | Lists the other live agents: name, folder, branch, what each is working on, and whether it's busy |
-| `send_message` | Sends a message to a peer agent by name, or to a space's lead with `space:<name>`. The message is delivered into a turn that's running, or starts a turn in an idle agent |
+| `send_message` | Sends a message to a peer agent by name, to a space's lead with `space:<name>`, to your Inbox with `user`, or to Discord. The message is delivered into a turn that's running, or starts a turn in an idle agent. With `kind` it can hand over a [task](#tasks) or make an [announcement](#announcements) to a whole space. `options` become buttons on Discord, and `files` attaches files |
+| `update_task` | Marks a task the agent owns as in progress, done or failed, with a note that goes back to whoever asked. Whoever handed out a task can cancel it. See [Tasks](#tasks) |
+| `close_thread` | Drops requests from the agent's open threads that are already handled, such as a question answered in the terminal instead of on Discord |
 | `set_summary` | Sets the one-line summary that peers see for this agent |
-| `schedule` | Has the daemon send a prompt to a folder's agent later or on a cron, even with the terminal closed. See [Schedules](#schedules) |
+| `request_spawn` | Asks you to start a new agent in another folder, with a first prompt and optionally a name, role and space. Nothing starts until you approve. See [Starting and ending agents](#starting-and-ending-agents) |
+| `schedule` | Has the daemon send a prompt to an agent later or on a cron, even with the terminal closed, and lists or cancels schedules. See [Schedules](#schedules) |
 | `clear_context` | Clears the agent's own context once a task is done, after it saves what matters to memory; its handoff notes start the fresh context. The default guidance asks every agent to do this between tasks, since each turn re-reads the whole context and a large one drains the usage limit |
-| `report_issue` | Reports a problem with peerlink itself, such as a reply that never arrived. See [Reporting problems](#reporting-problems) |
+| `report_issue` | Reports a bug in peerlink itself, such as a reply that never arrived, or an idea for improving it. See [Feedback: bugs and ideas](#feedback-bugs-and-ideas) |
+| `rename` | Changes the agent's own name, such as when it shares a folder with another agent. Kept across `/clear` |
+| `set_role` | For a [space lead](#space-leads): sets the role of an agent in its space or a space inside it. Kept across `/clear`, and the agent is told |
+
+`rename` and `set_role` are deferred: Claude Code loads them when an agent needs them, so they don't take up room in every prompt.
 
 Agents treat each other as teammates. Each one knows who else is live and what they're doing, and messages a peer when that peer clearly owns what it needs. Guidance in the system prompt sets the tone and says when a message is worth sending. You can edit that guidance in the web UI.
 
