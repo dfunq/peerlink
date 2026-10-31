@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.61'
+const DAEMON_VERSION = '0.8.62'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -1031,7 +1031,11 @@ function hierarchyGuidance() {
       `You lead the "${cfg.space}" space. Work sent to the space (to "space:${cfg.space}") comes to you: decide which agent in it owns the work, delegate with send_message (or do it yourself if it is yours), and report the outcome to whoever asked, with reply_to their message id.`,
     )
   else if (cfg.lead)
-    lines.push(`${cfg.lead} leads the "${cfg.space}" space and relays work from outside it. Report results to ${cfg.lead}, and ask it for anything that lives outside your space.`)
+    lines.push(
+      `${cfg.lead} leads the "${cfg.space}" space and relays work from outside it. Report results to ${cfg.lead}, and ask it for anything that lives outside your space.` +
+        // A space is often named after its lead; a member has taken the lead's messages for its own (i28).
+        (cfg.lead.toLowerCase() === cfg.space.toLowerCase() ? ` The space is named after that agent: you are "${myName}", not ${cfg.lead}.` : ''),
+    )
   if (cfg.also?.length)
     lines.push(
       `Your user also made you a member of ${cfg.also.map(s => `"${s}"`).join(', ')}: you see and message the agents there, and they see you. Your own space is still "${cfg.space}".`,
