@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.63'
+const DAEMON_VERSION = '0.8.64'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -45,7 +45,7 @@ type ClientConfig = {
   children?: { name: string; space: string }[]
   // The Discord channels this agent's folder is mapped into: where it receives your messages (master: the ones
   // that name nobody too) and where it may post.
-  discord?: { channel_id: string; channel: string; master: boolean; receives?: boolean; sends?: boolean }[]
+  discord?: { channel_id: string; channel: string; master: boolean; receives?: boolean; sends?: boolean; platform?: string }[]
   poll_interval_ms: number
   auto_wake_idle: boolean
   // How long an idle agent waits after another agent's message, so ones close together share a turn.
@@ -1005,15 +1005,19 @@ function hierarchyGuidance() {
     const masters = chans.filter(c => c.master).map(c => c.channel)
     const members = chans.filter(c => !c.master && c.receives !== false).map(c => c.channel)
     const posts = chans.filter(c => c.sends !== false)
+    // Discord, Telegram or both, as the daemon names each channel's platform (before 0.8.64, always Discord).
+    const platforms = [...new Set([...(cfg.discord ?? []).map(c => c.platform ?? 'Discord')])]
+    const on = platforms.join(' and ')
+    const target = (c: { platform?: string; channel: string }) => `${(c.platform ?? 'Discord').toLowerCase()}${c.channel}`
     lines.push(
       [
-        masters.length || members.length || dm ? 'Your user can reach you on Discord.' : 'You can post to your user on Discord.',
+        masters.length || members.length || dm ? `Your user can reach you on ${on}.` : `You can post to your user on ${on}.`,
         masters.length ? `Their messages in ${masters.join(', ')} come to you.` : '',
         members.length ? `In ${members.join(', ')}, they reach you by starting a message with your name.` : '',
         dm ? 'Their direct messages to the bot come to you.' : '',
-        'A message from Discord reads "<name> on Discord": answer it with send_message and reply_to, and the answer is posted there.',
+        `A message from there reads "<name> on ${platforms[0]}": answer it with send_message and reply_to, and the answer is posted there.`,
         posts.length
-          ? `To tell them something first, send_message to "discord"${posts.length > 1 ? ` plus the channel, like "discord${posts[0]!.channel}"` : ''}.`
+          ? `To tell them something first, send_message to "${(posts[0]!.platform ?? 'Discord').toLowerCase()}"${posts.length > 1 ? ` plus the channel, like "${target(posts[0]!)}"` : ''}.`
           : '',
         'They read it on a phone: lead with the answer, keep it short, use plain markdown, no tables. Links work, as [text](url).',
         'When you need them to decide or approve something (yes or no, merge or not, pick one), pass options rather than asking them to type a reply: they become buttons, and the tap comes back as their reply. To share a file, pass its absolute path in files. Files they attach arrive as paths you can read.',

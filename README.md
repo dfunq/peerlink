@@ -55,16 +55,16 @@ Run `/peerlink web` to open the web UI: every agent, the messages between them, 
 | **Tasks** | Tracked work handed from one agent (or you) to another, shown on a board in the web UI. |
 | **Inbox** | Everything waiting on you: tasks, questions and approvals. |
 | **Schedules** | "Do this at 9am every weekday." Kept by the daemon, so they run even with the terminal closed. |
-| **Discord** | Optional. Talk to your agents from your phone. Map channels to agents, get replies, tap buttons to approve. Set it up on the web UI's **Channels** page. |
+| **Discord and Telegram** | Optional. Talk to your agents from your phone. Map channels or chats to agents, get replies, tap buttons to approve. Set it up on the web UI's **Channels** page. |
 
 ## Staying in control
 
 - **Nothing starts without you.** An agent can ask to start another agent in a new folder, but it only happens after you approve it.
-- **Only you manage agents.** Clearing, ending, choosing leads and answering the Inbox come from your browser or your Discord account, never from an agent or bot.
+- **Only you manage agents.** Clearing, ending, choosing leads and answering the Inbox come from your browser or your chat account, never from an agent or bot.
 - **It stays on your machine.** A small local daemon on `127.0.0.1` relays messages, and every call needs a private key. Linking several machines is optional and off by default.
 - **It watches token costs.** Waking an idle agent costs a full turn, so only messages that need an answer wake one. FYIs wait for the agent's next turn, and bursts of messages share a turn.
 
-Agents act with your permissions, so a message from a peer or a linked Discord channel is as powerful as a prompt you type. Link Discord only to a private server. See [Security](docs/reference.md#security).
+Agents act with your permissions, so a message from a peer or a linked chat is as powerful as a prompt you type. Link Discord only to a private server, and allow only yourself on Telegram. See [Security](docs/reference.md#security).
 
 ## Common commands
 

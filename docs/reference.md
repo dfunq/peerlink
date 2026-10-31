@@ -150,6 +150,23 @@ Talk to your agents from Discord. Open **Channels** in the web UI and follow the
 
 It's standard-library Python like the rest of the daemon, with no `py-cord` to install.
 
+## Telegram
+
+Talk to your agents from Telegram, in a private chat with your bot or a group it's in. Open **Channels** in the web UI:
+
+1. **Create the bot and paste its token.** Message [@BotFather](https://t.me/BotFather), send `/newbot`, pick a name and a username, and paste the token it gives you.
+2. **Message it, then allow yourself.** Anyone can find a Telegram bot by name, so peerlink ignores everyone until you allow them. Send your bot any message: you show up on the Channels page under "Wrote to the bot, not allowed yet", with an **Allow** button. A message from someone not allowed gets no answer and reaches no agent. You can also list Telegram user ids by hand.
+3. **Map chats to agents,** under **Chats and agents**, as Discord channels are. Every chat the bot has heard from is listed: your private chat with it, or a group you added it to.
+
+- **In groups,** Telegram shows a bot only commands, @mentions and replies to it. To talk without @mentioning it, send `/setprivacy` to @BotFather, choose Disable, then remove the bot from the group and add it again.
+- **Everything else works as on Discord:** replies, buttons (a picked one collapses to "✓ choice", since Telegram has no greyed-out buttons), files both ways (the Bot API takes files up to 20 MB), approvals, tasks, `Task:` and `Announcement:` posts, and the Inbox verbs.
+- **Reactions** use Telegram's fixed set: 👀 delivered, 🤔 thinking, 👨‍💻 using tools, 🙏 asked you something, 👍 answered, 👎 failed.
+- **Commands:** `/peerlink <sub>` with the same subcommands as Discord's, like `/peerlink run loop 5m check the deploy agent:web`. `/status`, `/inbox`, `/peers`, `/spaces`, `/schedules` and `/resume` work on their own too.
+- **Agents send** to `"telegram"`, or `"telegram#<chat>"` when they're in several chats. `"discord"` still means any chat the agent sends in.
+- **Setup changes** (the token, who's allowed) come from your browser only: an agent holding the key can't let anyone in.
+- A group that Telegram upgrades to a supergroup gets a new id; its mapping moves with it.
+- The token is kept beside Discord's, in `~/.peerlink/discord.json` (0600), and never sent back to the browser. Updates come by long polling, so nothing needs a public URL.
+
 ## Starting and ending agents
 
 **Starting:** when work belongs in a folder no agent runs in, an agent can call `request_spawn` with the folder, why, and a first prompt. Nothing starts until you approve it, either in the Inbox (**Approve and start it**) or with the **Approve** button on Discord. `/inbox` then `1 approve` works too. Only you can approve: never an agent, never a bot.
@@ -389,7 +406,9 @@ plugin/hooks/register.test.tsx    tests (claude plugin test plugin)
 plugin/daemon/peerlinkd.py        daemon, CLI and web UI
 plugin/daemon/chatlink.py         what the chat platforms share: errors, which platform a channel id is on
 plugin/daemon/discordlink.py      the Discord bot: gateway, REST, buttons, /peerlink
+plugin/daemon/telegramlink.py     the Telegram bot: long polling, buttons, commands, reactions
 plugin/daemon/test_chat.py        tests for the chat layer, against a fake Discord
+plugin/daemon/test_telegram.py    tests for the Telegram bot, against a fake Bot API
 plugin/daemon/peerlink_mcp.py     an MCP endpoint for clients outside Claude Code
 plugin/daemon/test_peerlink_mcp.py  its tests (python3 -m unittest)
 ```
