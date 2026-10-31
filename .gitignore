@@ -7,3 +7,4 @@ plugin/.claude-plugin/types/
 .playwright-mcp/
 .jira-tickets.md
 node_modules/
+plans/
