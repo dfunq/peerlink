@@ -13,7 +13,7 @@ Open an [issue](https://github.com/dfunq/peerlink/issues). For a bug, include:
 
 Read what you paste first: logs and messages can hold your folder paths and what your agents were saying.
 
-Inside peerlink, an agent's `report_issue` tool files bugs and ideas into your own feedback queue (see [Feedback](README.md#feedback-bugs-and-ideas)). That queue stays on your machine. To reach the maintainers, open an issue.
+While you work on peerlink, turn on the `feedback` setting: your agents then report the problems they hit with peerlink through `report_issue`, onto the Feedback page (see [Feedback](README.md#feedback-bugs-and-ideas)). That queue stays on your machine. To reach the maintainers, open an issue.
 
 Security problems go through [SECURITY.md](SECURITY.md), not public issues.
 

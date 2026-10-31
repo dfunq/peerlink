@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.8.60', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.8.61', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (state.forget && path.endsWith('/heartbeat') && 'busy' in body) {
       state.forget = false
       return { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'unknown agent; register again' }) } }
@@ -111,7 +111,8 @@ function engine(on: any, { turns = 0, percent = 85, readme = '', claudeMd = '', 
     if (!transcripts.length || !e.path.endsWith('/.claude/projects/-Users-x-r-web')) throw new Error('ENOENT')
     return { value: transcripts.map(t => ({ name: t.name, kind: 'file', size: 1, mtimeMs: 1_000_000 - t.ageMs, isLink: false })) }
   })
-  on('tool.register', (_: any, e: any) => ({ value: { tool: `mcp__peerlink__${e.name}` } }))
+  const tools: string[] = []
+  on('tool.register', (_: any, e: any) => (tools.push(e.name), { value: { tool: `mcp__peerlink__${e.name}` } }))
   on('command.register', () => ({ value: { command: 'peerlink' } }))
   // What the plugin submitted as a prompt of its own: a peer message waking this agent.
   const woke: string[] = []
@@ -130,7 +131,7 @@ function engine(on: any, { turns = 0, percent = 85, readme = '', claudeMd = '', 
       calls.model++
       return { value: { isAnswered: true, text, usage: {} } }
     })
-  return { clock, calls, answer, writes, ids, pinned, git, where, woke, submits, limits }
+  return { clock, calls, answer, writes, ids, pinned, git, where, woke, submits, limits, tools }
 }
 
 test('the model is told about peers beside the prompt, again only when who is there changes', async ($, on) => {
@@ -576,6 +577,21 @@ test('report_issue logs the problem and says who it went to', async ($, on) => {
   expect(sent.context).toContain('agent web')
 })
 
+test('report_issue is offered only when the feedback setting is on', async ($, on) => {
+  const off = engine(on)
+  fakeDaemon(on)
+  await $.session.start(START)
+  expect(off.tools).toContain('send_message')
+  expect(off.tools).not.toContain('report_issue')
+})
+
+test('with the feedback setting on, report_issue is offered', async ($, on) => {
+  const { tools } = engine(on)
+  fakeDaemon(on, 1, null, [], { feedback: true })
+  await $.session.start(START)
+  expect(tools).toContain('report_issue')
+})
+
 test('with the daemon down, a report waits in a file for it', async ($, on) => {
   const { writes } = engine(on)
   const daemon = fakeDaemon(on)
@@ -801,7 +817,7 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.8.60 · daemon 0.8.60 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.8.61 · daemon 0.8.61 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the space is listed once', async ($, on) => {
@@ -834,7 +850,7 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.8.60')
+  expect(reg.plugin).toBe('0.8.61')
 })
 
 test('an agent registers again under the folder it started in, wherever the host has moved its root since', async ($, on) => {
@@ -913,7 +929,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.8.61', true], ['0.8.60', false]] as const)
+for (const [installed, reloads] of [['0.8.62', true], ['0.8.61', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     const daemon = fakeDaemon(on)

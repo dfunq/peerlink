@@ -14,11 +14,11 @@ Each agent gets these tools:
 | `request_spawn` | Asks you to start a new agent in another folder, with a first prompt and optionally a name, role and space. Nothing starts until you approve. See [Starting and ending agents](#starting-and-ending-agents) |
 | `schedule` | Has the daemon send a prompt to an agent later or on a cron, even with the terminal closed, and lists or cancels schedules. See [Schedules](#schedules) |
 | `clear_context` | Clears the agent's own context once a task is done, after it saves what matters to memory; its handoff notes start the fresh context. The default guidance asks every agent to do this between tasks, since each turn re-reads the whole context and a large one drains the usage limit |
-| `report_issue` | Reports a bug in peerlink itself, such as a reply that never arrived, or an idea for improving it. See [Feedback: bugs and ideas](#feedback-bugs-and-ideas) |
+| `report_issue` | Reports a bug in peerlink itself, such as a reply that never arrived, or an idea for improving it. Only when the `feedback` setting is on; see [Feedback: bugs and ideas](#feedback-bugs-and-ideas) |
 | `rename` | Changes the agent's own name, such as when it shares a folder with another agent. Kept across `/clear` |
 | `set_role` | For a [space lead](#space-leads): sets the role of an agent in its space or a space inside it. Kept across `/clear`, and the agent is told |
 
-`rename` and `set_role` are deferred: Claude Code loads them when an agent needs them, so they don't take up room in every prompt.
+`rename` and `set_role` are deferred: Claude Code loads them when an agent needs them, so they don't take up room in every prompt. `report_issue` is for people developing peerlink, so it's off unless you turn it on.
 
 Agents treat each other as teammates. Each one knows who else is live and what they're doing, and messages a peer when that peer clearly owns what it needs. Guidance in the system prompt sets the tone and says when a message is worth sending. You can edit that guidance in the web UI.
 
@@ -215,7 +215,9 @@ Compaction, `/clear` and `/resume` reset what an agent remembers, but not what i
 
 ## Feedback: bugs and ideas
 
-Agents call `report_issue` when peerlink itself misbehaves (a `bug`), or when it could work better for them (an `idea`). Every agent can, whatever its space. Each one lands in the **Feedback** page of the web UI, and the menu counts the new ones.
+This is for people developing peerlink. Turn it on with the `feedback` setting (Settings in the web UI, or `peerlink config feedback true`); it's off by default. Reports stay on your machine, so to tell the peerlink maintainers about a bug, open a [GitHub issue](https://github.com/dfunq/peerlink/issues) instead.
+
+With it on, agents call `report_issue` when peerlink itself misbehaves (a `bug`), or when it could work better for them (an `idea`). Every agent can, whatever its space. Each one lands in the **Feedback** page of the web UI, and the menu counts the new ones. Agents that start after you turn it on get the tool.
 
 - **Triage:** mark each one accepted, dismissed or done, with an optional note.
 - **Accepting one** makes it a task for the agent that works on peerlink (the `issue_agent` setting, `peerlink` by default). It goes to that agent's folder, so it waits even when that agent isn't running. When the task is done, the feedback is too.
@@ -347,6 +349,7 @@ You can change these in the web UI, with `peerlink config <name> <value>`, or in
 | `clear_nudge_tokens` | 400000 | Once an agent's context passes this many tokens, its next prompt asks it to save and clear at a stopping point, once per conversation; 0 turns it off |
 | `auto_reload` | true | Agents reload their plugins by themselves when a newer peerlink is installed |
 | `max_message_chars` | 8000 | Longer messages are refused, with a note to send a file path instead |
+| `feedback` | false | Agents get `report_issue`, and the guidance asks them to report problems with peerlink itself. Installs from before this setting keep it on |
 | `issue_agent` | peerlink | The agent that `report_issue` reports are also sent to, when it's live |
 | `sessions` | `{}` | Per-agent `nickname`, `role`, `muted` and `auto_wake`, keyed by Claude Code session id |
 | `folder_spaces` | `{}` | The space you put each folder in, such as `{"/Users/you/Repos/games": "acme"}` |
