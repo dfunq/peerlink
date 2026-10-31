@@ -316,7 +316,7 @@ For local development:
 claude --plugin-dir ~/Repos/peerlink/plugin
 ```
 
-Requires `python3` on your `PATH`.
+Requires Python 3 (`python3` on your `PATH`). The daemon runs on the newest Python 3 it finds, including Homebrew's when PATH lists macOS's own first; set `PEERLINK_PYTHON` to choose one. Use a Python that still gets security fixes (3.10 or later): macOS's built-in 3.9 doesn't.
 
 **Pairs well with [herdr](https://herdr.dev).** herdr is a terminal workspace manager for AI coding agents: it keeps your agents in panes and tabs of one persistent session, so you can watch them all. peerlink lets them talk to each other.
 

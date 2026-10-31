@@ -2655,6 +2655,25 @@ def find_claude():
     return ""
 
 
+def best_python():
+    """The newest Python 3 on this machine, to run the daemon: macOS's own python3 (3.9) no longer gets security fixes,
+    and PATH often lists it ahead of Homebrew's. PEERLINK_PYTHON picks one outright."""
+    if os.environ.get("PEERLINK_PYTHON"):
+        return os.environ["PEERLINK_PYTHON"]
+    best, best_ver = sys.executable, sys.version_info[:2]
+    names = ["python3"] + [f"python3.{n}" for n in range(20, 9, -1)]
+    found = {shutil.which(n) for n in names} | {f"{d}/{n}" for d in ("/opt/homebrew/bin", "/usr/local/bin") for n in names}
+    for p in sorted(p for p in found if p and os.access(p, os.X_OK)):
+        try:
+            out = subprocess.run([p, "-c", "import sys; print(*sys.version_info[:2])"], capture_output=True, text=True, timeout=5).stdout.split()
+            ver = (int(out[0]), int(out[1]))
+        except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+            continue
+        if ver > best_ver:
+            best, best_ver = p, ver
+    return best
+
+
 def launch(sp):
     """Start Claude Code in the folder: (how, "") when it started, ("", why not) when it didn't."""
     claude = find_claude()
@@ -4105,7 +4124,7 @@ def detach():
     # the daemon down when a Discord token was connected).
     out = os.open(LOG_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     with open(os.devnull, "rb") as devnull:
-        subprocess.Popen([sys.executable, os.path.abspath(__file__), "serve"], stdin=devnull, stdout=out, stderr=out,
+        subprocess.Popen([best_python(), os.path.abspath(__file__), "serve"], stdin=devnull, stdout=out, stderr=out,
                          start_new_session=True, close_fds=True)
     os.close(out)
     for _ in range(50):
