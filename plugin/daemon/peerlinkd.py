@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.69"
+VERSION = "0.8.70"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -2030,10 +2030,14 @@ def send(body):
             hops = (parent["hops"] + 1) if parent else int(body.get("hops", 0)) + 1
         elif body.get("hops") is not None:
             hops = int(body["hops"])
+        limit, task_id = hop_limit(parent) if parent else (config["max_hops"], "")
         # The answer to a question asked at the limit still gets through, as the thread's last word: it can't be replied to.
-        last_word = hops > config["max_hops"] and kind == "message" and bool(parent and parent.get("expects_reply"))
-        if hops > config["max_hops"] and not last_word:
-            return 429, {"error": f"conversation hit max_hops={config['max_hops']}; stop and tell your user"}
+        last_word = hops > limit and kind == "message" and bool(parent and parent.get("expects_reply"))
+        if hops > limit and not last_word:
+            if task_id:
+                return 429, {"error": f"the thread of task {task_id} hit its {limit}-reply limit: report where it stands with update_task, "
+                                      "or tell your user if it needs more back and forth"}
+            return 429, {"error": f"conversation hit max_hops={limit}; stop and tell your user"}
         if sender_rec is not None:
             recent = [t for t in sent_times.get(sender, []) if now - t < 60]
             if len(recent) >= config["rate_limit_per_min"]:
@@ -2142,7 +2146,7 @@ def send(body):
             "v": 2,  # logs older than this never recorded delivery, so they are not replayed
         }
         if last_word:
-            msg["text"] += f"\n\n(peerlink: this thread reached its {config['max_hops']}-reply limit with this answer, so it can't be answered. If more is needed, tell your user.)"
+            msg["text"] += f"\n\n(peerlink: this thread reached its {limit}-reply limit with this answer, so it can't be answered. If more is needed, tell your user.)"
         # Worth starting a turn for: a question, a task, or the answer to a question this agent asked. An FYI, or a
         # reply to a reply, waits for the agent's next turn (wake_for "all" wakes for everything, as before 0.8.11).
         msg["wake"] = config.get("wake_for", "needed") == "all" or msg["expects_reply"] or bool(parent and parent.get("expects_reply"))
@@ -2156,8 +2160,24 @@ def send(body):
     log("msg", msg["id"], msg["from_name"], "->", msg["to_name"])
     out = {"id": msg["id"], "to": msg["to_name"], "status": "queued", "task": msg.get("task")}
     if last_word:
-        out["note"] = f"delivered as this thread's last reply: it reached max_hops={config['max_hops']}, so neither of you can reply to it"
+        out["note"] = f"delivered as this thread's last reply: it reached its {limit}-reply limit, so neither of you can reply to it"
     return 200, out
+
+
+def hop_limit(parent):
+    """How many replies the thread `parent` is in may run to, and the open task it started from ('' for none). A loop
+    of acknowledgements is what max_hops stops; a lead and its worker trading instructions and reports under a task
+    still open pass ten replies doing real work, so a task's thread gets three times as many."""
+    by_id = {m["id"]: m for m in messages}
+    m, seen = parent, 0
+    while m and seen < 200:
+        if m.get("task"):
+            t = tasks.get(m["task"])
+            if t and t["status"] in TASK_OPEN:
+                return config["max_hops"] * 3, m["task"]
+            break
+        m, seen = by_id.get(m.get("reply_to") or ""), seen + 1
+    return config["max_hops"], ""
 
 
 def web_send(body):
