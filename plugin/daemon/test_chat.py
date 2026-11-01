@@ -127,6 +127,41 @@ class ChatTest(unittest.TestCase):
         self.assertEqual([(m["id"], m.get("status")) for m in both], [("m1", None), ("m2", "delivered")])
         self.assertEqual([m["id"] for m in peerlinkd.conversation("n:skyforge", "discord:tg:5")], ["m3"])
 
+    def test_a_thread_under_an_open_task_may_run_three_times_as_long(self):
+        peerlinkd.load_config()
+        peerlinkd.config["max_hops"] = 10
+        now = peerlinkd.time.time()
+        for sid, name in (("s-lead", "lead"), ("s-work", "worker")):
+            peerlinkd.sessions[sid] = {"id": sid, "name": name, "cwd": "/x/" + name, "last_seen": now}
+        peerlinkd.tasks["t-hop"] = {"id": "t-hop", "status": "in_progress"}
+        # The task, then twelve replies between the lead and its worker; the last is the lead's, at hop 12.
+        thread = [{"id": "h0", "task": "t-hop", "hops": 0, "from": "s-lead", "to": "s-work", "reply_to": None}]
+        for n in range(1, 13):
+            a, b = ("s-work", "s-lead") if n % 2 else ("s-lead", "s-work")
+            thread.append({"id": f"h{n}", "hops": n, "from": a, "to": b, "reply_to": f"h{n - 1}", "expects_reply": False})
+        peerlinkd.messages.extend(thread)
+
+        def cleanup():
+            for k in ("s-lead", "s-work"):
+                peerlinkd.sessions.pop(k, None)
+                peerlinkd.inboxes.pop(k, None)
+            peerlinkd.tasks.pop("t-hop", None)
+            peerlinkd.messages[:] = [m for m in peerlinkd.messages if m not in thread and not str(m.get("text", "")).startswith("status")]
+        self.addCleanup(cleanup)
+        self.assertEqual(peerlinkd.hop_limit(thread[-1]), (30, "t-hop"))
+        status, out = peerlinkd.send({"from": "s-work", "reply_to": "h12", "text": "status: run timed at 4 min"})
+        self.assertEqual(status, 200, out)
+        # Once the task is done, the thread has the usual limit, and the refusal says what to do.
+        peerlinkd.tasks["t-hop"]["status"] = "done"
+        self.assertEqual(peerlinkd.hop_limit(thread[-1]), (10, ""))
+        status, out = peerlinkd.send({"from": "s-work", "reply_to": "h12", "text": "status: again"})
+        self.assertEqual(status, 429)
+        self.assertIn("max_hops=10", out["error"])
+        peerlinkd.tasks["t-hop"]["status"] = "open"
+        peerlinkd.config["max_hops"] = 3
+        status, out = peerlinkd.send({"from": "s-work", "reply_to": "h12", "text": "status: once more"})
+        self.assertIn("task t-hop hit its 9-reply limit", out["error"])
+
 
 if __name__ == "__main__":
     unittest.main()
