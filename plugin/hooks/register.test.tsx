@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.8.66', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.8.67', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (state.forget && path.endsWith('/heartbeat') && 'busy' in body) {
       state.forget = false
       return { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'unknown agent; register again' }) } }
@@ -291,6 +291,18 @@ test('the summary model writes a headline for lists, then the summary', async ($
   const last = daemon.posted.filter(p => p.body?.summary).pop()
   expect(last?.body.summary).toBe('Building the invoice page in the web app; can answer on invoice PDFs')
   expect(last?.body.headline).toBe('Building the invoice page')
+})
+
+test('a headline and summary the model labelled on one line are split, without the labels', async ($, on) => {
+  const { answer } = engine(on, { turns: 4 })
+  answer('Line 1: Pushing the webhook fix Line 2: Fixing webhook ordering in pixelgrid; can answer on SKY-294')
+  const daemon = fakeDaemon(on)
+  await $.session.start(START)
+  await settle()
+
+  const last = daemon.posted.filter(p => p.body?.summary).pop()
+  expect(last?.body.headline).toBe('Pushing the webhook fix')
+  expect(last?.body.summary).toBe('Fixing webhook ordering in pixelgrid; can answer on SKY-294')
 })
 
 test('with no peers to read it, no summary is paid for', async ($, on) => {
@@ -840,7 +852,7 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.8.66 · daemon 0.8.66 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.8.67 · daemon 0.8.67 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the space is listed once', async ($, on) => {
@@ -873,7 +885,7 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.8.66')
+  expect(reg.plugin).toBe('0.8.67')
 })
 
 test('an agent registers again under the folder it started in, wherever the host has moved its root since', async ($, on) => {
@@ -975,7 +987,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.8.67', true], ['0.8.66', false]] as const)
+for (const [installed, reloads] of [['0.8.68', true], ['0.8.67', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     const daemon = fakeDaemon(on)

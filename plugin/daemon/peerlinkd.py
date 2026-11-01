@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.66"
+VERSION = "0.8.67"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -4687,13 +4687,14 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)
 .sub{margin-left:12px;padding-left:16px;border-left:2px solid var(--line)}.sub h2::before{content:"↳ ";color:var(--acc)}
 .card.is-lead{border-color:var(--acc)}
 .chart{overflow-x:auto;padding:4px 0 12px;margin-bottom:8px}
-.chart+.chart{margin-top:6px}
+.chart+.chart{margin-top:6px}.sgrid{display:flex;flex-wrap:wrap;gap:20px;align-items:flex-start}.sgrid .chart+.chart{margin-top:0}
 .unit{display:inline-flex;flex-direction:column;align-items:center;border:1px dashed var(--line);border-radius:12px;padding:10px 12px 12px;min-width:0}
 .unit-h{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin-bottom:10px;white-space:nowrap}
 .orow{display:flex;gap:12px;align-items:flex-start;justify-content:safe center}
 .ocol{display:flex;flex-direction:column;align-items:center}.orow.stack{flex-direction:column;gap:8px}
 .down{width:2px;height:14px;background:var(--acc);flex:none}
-.node{width:190px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 10px;cursor:pointer;text-align:left;font:inherit;color:inherit}
+.node{width:200px;height:136px;box-sizing:border-box;display:flex;flex-direction:column;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 10px;cursor:pointer;text-align:left;font:inherit;color:inherit;overflow:hidden}
+.node .state{margin-top:auto!important}
 .node:hover{border-color:var(--mut)}.node.is-lead{border-color:var(--acc)}.node.sel{box-shadow:0 0 0 2px var(--acc)}
 .node .nm{font-weight:600;display:flex;align-items:center;gap:4px 6px;justify-content:space-between;flex-wrap:wrap}.node .nm>span:first-child{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .node .tag{font-size:11px;font-weight:500;color:var(--acc);white-space:nowrap}
@@ -4738,8 +4739,9 @@ details.plat .pbody h2{font-size:14px;margin:16px 0 6px}.pill.warn{color:var(--w
 .ctx{font-size:11px;color:var(--mut);font-weight:500}.ctx.hi{color:var(--warn)}
 .node .state{font-size:11px;color:var(--mut);margin-top:4px;display:flex;align-items:center;justify-content:space-between;gap:6px}.hot{color:var(--warn);font-weight:600}
 .node .sum{font-size:12px;color:var(--mut);margin-top:4px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.sbox{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 12px;min-width:160px;max-width:260px;text-align:center}
-.sbox.led{border-color:var(--acc)}.spick{display:flex;flex-direction:column;gap:4px;margin-top:8px;text-align:left}.spick label{display:flex;justify-content:space-between;align-items:center;gap:6px;font-size:12px;color:var(--mut)}.spick select{font-size:12px;padding:2px 4px;max-width:150px}.sbox .small{margin-top:2px}
+.sbox{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px;width:240px;box-sizing:border-box;text-align:center;display:flex;flex-direction:column;min-height:150px}
+.sbox .small.mut{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}.sbox .spick{margin-top:auto;padding-top:8px}
+.sbox.led{border-color:var(--acc)}.spick{display:flex;flex-direction:column;gap:4px;margin-top:8px;text-align:left}.spick label{display:flex;justify-content:space-between;align-items:center;gap:6px;font-size:12px;color:var(--mut)}.spick select{font-size:12px;padding:2px 4px;width:160px}.sbox .small{margin-top:2px}
 #detail:empty{display:none}
 #detail{position:fixed;top:0;right:0;bottom:0;width:380px;max-width:100%;overflow-y:auto;background:var(--bg);border-left:1px solid var(--line);box-shadow:-8px 0 24px rgba(0,0,0,.08);padding:16px;z-index:10}
 #detail .panel{border:0;padding:0;background:transparent}
@@ -5164,7 +5166,7 @@ async function refresh(force,snap){
   const clearOff=x=>x.leads&&x.offline?`<div><span class="small mut" data-clearlead="${esc(x.space)}" title="Clear this lead" style="cursor:pointer">clear</span></div>`:'';
   const node=x=>`<${x.offline?'div':'button'} class="node${x.leads?' is-lead':''}${x.offline?' off':''}${x.id&&x.id===sel?' sel':''}"${x.offline?'':` data-sel="${esc(x.id)}"`}${x.leads?` title="Leads the ${esc(x.space)} space${x.offline?' (offline)':''}"`:''}>
     <div class="nm"><span title="${esc(x.name)}">${x.offline?'':`<span class="dot ${x.busy?'busy':''}"></span>`}${esc(x.name)}</span><span class="rt">${badge(x)}</span></div>${clearOff(x)}
-    <div class="dir">${esc(short(x.cwd))}</div>${x.branch?`<div class="dir" title="${esc(x.branch)}">⎇ ${esc(x.branch)}</div>`:''}<div class="sum" title="${esc(x.summary||x.role||'')}">${esc(headline(x)||x.role)||'no summary yet'}</div>${x.open_tasks?`<div class="small" style="color:var(--acc)">${x.open_tasks} open task${x.open_tasks>1?'s':''}</div>`:''}${x.offline?'':`<div class="state"><span>${state(x)}${x.sent_hour?' · '+rate(x):''}</span>${ctx(x)}</div>`}</${x.offline?'div':'button'}>`;
+    <div class="dir" title="${esc(tilde(x.cwd))}${x.branch?' · '+esc(x.branch):''}">${esc(short(x.cwd))}${x.branch?` · ⎇ ${esc(x.branch)}`:''}</div><div class="sum" title="${esc(x.summary||x.role||'')}">${esc(headline(x)||x.role)||'no summary yet'}</div>${x.offline?'':`<div class="state"><span>${state(x)}${x.sent_hour?' · '+rate(x):''}${x.open_tasks?` · <span style="color:var(--acc)">${x.open_tasks} task${x.open_tasks>1?'s':''}</span>`:''}</span>${ctx(x)}</div>`}</${x.offline?'div':'button'}>`;
   // Every live agent gets its own card, two sessions in one folder included: a hidden one can't be found to message.
   const rank=(a,b)=>(b.busy-a.busy)||(a.last_seen_s-b.last_seen_s);
   const unit=(n,seen)=>{if(seen.has(n))return '';seen.add(n);
@@ -5238,8 +5240,8 @@ async function refresh(force,snap){
   // The open panel takes room beside the chart rather than covering part of it.
   document.body.classList.toggle('drawer',!!picked);
   // The default space is always listed: it's where every agent with no space set lands.
-  const dflt=groups.default?'':`<div class="chart"><div class="orow" style="justify-content:flex-start"><div class="ocol"><div class="sbox"><div class="name">unassigned</div><div class="small mut">agents whose folder has no space · none live</div></div></div></div></div>`;
-  $('#spacelist').innerHTML=all((n,seen)=>{const u=sunit(n,seen);return u?`<div class="chart"><div class="orow" style="justify-content:flex-start">${u}</div></div>`:''})+dflt;
+  const dflt=groups.default?'':`<div class="chart"><div class="orow" style="justify-content:flex-start"><div class="ocol"><div class="sbox" style="min-height:0"><div class="name">unassigned</div><div class="small mut">agents whose folder has no space · none live</div></div></div></div></div>`;
+  $('#spacelist').innerHTML=`<div class="sgrid">${all((n,seen)=>{const u=sunit(n,seen);return u?`<div class="chart">${u}</div>`:''})}</div>`+dflt;
   livePeers=p.peers;lastMsgs=m.messages;renderMessages(lastMsgs);renderTasks();renderFeedback();renderInbox();renderSchedules();
 }
 // Schedules: what's active or waiting first; the ones that ended fold away. Each says who'd get it now.
