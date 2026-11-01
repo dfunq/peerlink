@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.68"
+VERSION = "0.8.69"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -309,7 +309,7 @@ def remember_dir(rec):
 def write_launcher():
     """~/.peerlink/bin/peerlink runs this file, wherever the plugin is installed."""
     os.makedirs(os.path.dirname(LAUNCHER_PATH), exist_ok=True)
-    script = f'#!/bin/sh\nexec python3 "{os.path.abspath(__file__)}" "$@"\n'
+    script = f'#!/bin/sh\nexec "{sys.executable or "python3"}" "{os.path.abspath(__file__)}" "$@"\n'
     try:
         with open(LAUNCHER_PATH) as f:
             if f.read() == script:
@@ -2871,7 +2871,7 @@ def best_python():
     if os.environ.get("PEERLINK_PYTHON"):
         return os.environ["PEERLINK_PYTHON"]
     best, best_ver = sys.executable, sys.version_info[:2]
-    names = ["python3"] + [f"python3.{n}" for n in range(20, 9, -1)]
+    names = ["python3", "python"] + [f"python3.{n}" for n in range(20, 9, -1)]
     found = {shutil.which(n) for n in names} | {f"{d}/{n}" for d in ("/opt/homebrew/bin", "/usr/local/bin") for n in names}
     for p in sorted(p for p in found if p and os.access(p, os.X_OK)):
         try:
@@ -3471,17 +3471,23 @@ def hard_stop(sid, grace=60):
         pid = rec.get("pid")
     # Only a process that is Claude Code's: a stale pid may belong to something else by now.
     try:
-        comm = subprocess.run(["ps", "-p", str(int(pid)), "-o", "comm="], capture_output=True, text=True, timeout=5).stdout.strip() if pid else ""
+        if not pid:
+            comm = ""
+        elif os.name == "nt":
+            comm = subprocess.run(["tasklist", "/FI", f"PID eq {int(pid)}", "/FO", "CSV", "/NH"], capture_output=True, text=True, timeout=5).stdout.strip()
+        else:
+            comm = subprocess.run(["ps", "-p", str(int(pid)), "-o", "comm="], capture_output=True, text=True, timeout=5).stdout.strip()
     except (OSError, ValueError, subprocess.SubprocessError):
         comm = ""
     if not re.search(r"claude|node", comm, re.I):
         log("terminate", sid, "still running, and its process can't be found to end it", repr(comm))
         return
     try:
-        os.kill(int(pid), signal.SIGTERM)
-        time.sleep(5)
-        os.kill(int(pid), 0)
-        os.kill(int(pid), signal.SIGKILL)
+        os.kill(int(pid), signal.SIGTERM)  # on Windows, this ends it outright
+        if os.name != "nt":
+            time.sleep(5)
+            os.kill(int(pid), 0)
+            os.kill(int(pid), signal.SIGKILL)
     except OSError:
         pass
     with lock:
@@ -4381,6 +4387,12 @@ def health():
         return None
 
 
+# How a process outlives the one that starts it: its own session on macOS and Linux, its own process group and no
+# console on Windows, where closing the terminal would end it otherwise.
+DETACHED = ({"creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
+            else {"start_new_session": True})
+
+
 def detach():
     """Start a background daemon unless one already answers; return at once."""
     if health():
@@ -4392,8 +4404,8 @@ def detach():
     # the daemon down when a Discord token was connected).
     out = os.open(LOG_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     with open(os.devnull, "rb") as devnull:
-        subprocess.Popen([best_python(), os.path.abspath(__file__), "serve"], stdin=devnull, stdout=out, stderr=out,
-                         start_new_session=True, close_fds=True)
+        subprocess.Popen([best_python(), "-X", "utf8", os.path.abspath(__file__), "serve"], stdin=devnull, stdout=out, stderr=out,
+                         close_fds=True, **DETACHED)
     os.close(out)
     for _ in range(50):
         time.sleep(0.1)
@@ -4404,8 +4416,8 @@ def detach():
 
 def restart_self(server):
     """Hand the port to a fresh copy of this file (it may be a newer version)."""
-    subprocess.Popen([sys.executable, os.path.abspath(__file__), "start", "--after-restart"], start_new_session=True,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.Popen([sys.executable, "-X", "utf8", os.path.abspath(__file__), "start", "--after-restart"],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **DETACHED)
     time.sleep(0.2)
     server.shutdown()
 
@@ -4476,6 +4488,8 @@ def detach_quiet():
 def open_url(url):
     opener = "open" if sys.platform == "darwin" else "xdg-open"
     try:
+        if os.name == "nt":
+            return os.startfile(url)
         subprocess.run([opener, url], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError:
         pass
@@ -5744,6 +5758,9 @@ code{font-family:ui-monospace,Menlo,monospace;font-size:13px;border:1px solid va
 
 
 if __name__ == "__main__":
+    # Windows reads and writes files in its own code page unless told otherwise, and an emoji in a message breaks that.
+    if os.name == "nt" and not sys.flags.utf8_mode:
+        sys.exit(subprocess.call([sys.executable, "-X", "utf8", *sys.argv]))
     argv = sys.argv[1:]
     name = ALIASES.get(argv[0], argv[0]) if argv else "help"
     if name in ("help", "-h", "--help") or name not in COMMANDS:
