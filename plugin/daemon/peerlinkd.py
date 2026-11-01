@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.64"
+VERSION = "0.8.65"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -294,7 +294,7 @@ def load_dirs():
 def remember_dir(rec):
     if not rec.get("cwd") or not rec.get("summary"):
         return
-    dir_summaries[rec["cwd"]] = {"summary": rec["summary"], "name": display_name(rec), "ts": time.time()}
+    dir_summaries[rec["cwd"]] = {"summary": rec["summary"], "headline": rec.get("headline", ""), "name": display_name(rec), "ts": time.time()}
     cutoff = time.time() - DIR_MEMORY_S
     for cwd in [c for c, d in dir_summaries.items() if d["ts"] < cutoff]:
         dir_summaries.pop(cwd)
@@ -767,6 +767,7 @@ def public_peer(rec):
         "repo": rec.get("repo", ""),
         "branch": rec.get("branch", ""),
         "summary": rec.get("summary", ""),
+        "headline": rec.get("headline", ""),
         "summary_ts": rec.get("summary_ts"),  # when it last changed: peers see how old it is
         "role": role_of(rec),
         "folder_role": folder_role(rec),
@@ -4023,6 +4024,10 @@ class Handler(BaseHTTPRequestHandler):
                 for k in ("cwd", "repo", "branch", "summary", "model", "plugin", "pid"):
                     if b.get(k) is not None:
                         rec[k] = b[k]
+                # A plugin just reloaded comes back with no summary: the one this agent last had in its folder stays.
+                known = dir_summaries.get(rec.get("cwd") or "") or {}
+                if not rec.get("summary") and known.get("summary") and known.get("name") == display_name(rec):
+                    rec.update(summary=known["summary"], headline=known.get("headline", ""), summary_ts=known.get("ts") or time.time())
                 # A folder in no space yet (none set, no .peerlink) takes the one its first started agent was asked for.
                 # A space set for one agent, as older versions allowed, becomes its folder's.
                 old_override = clean_space(config["sessions"].get(sid, {}).pop("space", ""))
@@ -4089,6 +4094,8 @@ class Handler(BaseHTTPRequestHandler):
                     if b["summary"][:500] != rec.get("summary"):
                         rec["summary_ts"] = time.time()
                     rec["summary"] = b["summary"][:500]
+                    # A few words for lists, from the summary model; a summary set by hand has none and the web UI cuts one.
+                    rec["headline"] = str(b.get("headline") or "")[:80]
                     if b.get("summary_kind") in ("model", "manual"):
                         remember_dir(rec)
                 cfg = client_config(sid)
@@ -4662,7 +4669,7 @@ body.wide main{max-width:none}
 .lrow:hover{border-color:var(--mut)}.lrow.is-lead{border-color:var(--acc)}.lrow.sel{box-shadow:0 0 0 2px var(--acc)}.lrow.off{opacity:.5;cursor:default;border-style:dashed}
 .lrow .ln{font-weight:600;display:flex;align-items:center;gap:6px;min-width:0}.lrow .ln>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .lrow .lid{display:flex;flex-direction:column;gap:1px;min-width:0}.lrow .lwhere{font-size:11px;color:var(--mut);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-left:14px}
-.lrow .lw{font-size:13px;line-height:1.4;color:var(--mut);min-width:0;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.lrow .lw{font-size:13px;color:var(--fg);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .lrow .lbusy{color:var(--warn)}.pill.acc{color:var(--acc);border-color:var(--acc)}
 .panel .phead{display:flex;align-items:center;gap:10px;min-width:0}.panel .phead .plogo{flex:none;width:36px;height:36px;border-radius:10px;display:grid;place-items:center}
 .panel .phead .ptitle{display:flex;flex-direction:column;min-width:0}.panel .phead .psub{font-size:12px;color:var(--mut);display:flex;align-items:center;gap:5px;flex-wrap:wrap}.panel .phead .psub .dot{margin:0}
@@ -5146,6 +5153,9 @@ async function refresh(force,snap){
   // Messages sent in the last hour, flagged from 20: each one can cost its recipient a turn.
   const rate=x=>x.sent_hour?`<span class="${x.sent_hour>=20?'hot':'mut'}" title="messages sent in the last hour">${x.sent_hour}/h</span>`:'';
   // Context as a small meter: how full the agent's window is, its number on hover.
+  // The list shows a few words; the side panel the whole summary. Older plugins send no headline: the first sentence, cut.
+  const headline=x=>{if(x.headline)return x.headline;const first=String(x.summary||'').split(/(?<=[.;!?])\s|\s[—–-]\s/)[0].trim();
+    return first.length>80?first.slice(0,first.lastIndexOf(' ',78)>40?first.lastIndexOf(' ',78):78)+'…':first};
   const ctx=x=>x.context==null?'':`<span class="cmeter${x.context>=80?' hi':x.context>=50?' mid':''}" title="${x.context}% of its context window in use"><i style="width:${Math.min(100,x.context)}%"></i></span>`;
   // A lead is told apart by its outline (and says which team on hover), so every card keeps its context in one place.
   // The badge sits in the name row, left of the context; an offline lead's clear link goes beneath.
@@ -5188,7 +5198,7 @@ async function refresh(force,snap){
   const lrow=x=>{const where=[short(x.cwd),x.branch?'⎇ '+x.branch:''].filter(Boolean).map(esc).join(' · ');
     return `<${x.offline?'div':'button'} class="lrow${x.leads?' is-lead':''}${x.offline?' off':''}${x.id&&x.id===sel?' sel':''}"${x.offline?'':` data-sel="${esc(x.id)}"`}>
       <span class="lid"><span class="ln"><span title="${esc(x.name)}">${x.offline?'':`<span class="dot ${x.busy?'busy':''}"></span>`}${esc(x.name)}</span>${badge(x)}</span><span class="lwhere mono" title="${esc(tilde(x.cwd))}">${where}</span></span>
-      <span class="lw"${x.role?` title="Role: ${esc(x.role)}"`:''}>${esc(x.summary||x.role||(x.offline?'offline':''))}</span>
+      <span class="lw" title="${esc(x.summary||x.role||'')}">${esc(headline(x)||x.role||(x.offline?'offline':''))}</span>
       <span class="lr">${x.busy&&!x.offline?`<span class="lbusy">${state(x)}</span>`:''}${x.sent_hour>=20?rate(x):''}${x.open_tasks?`<span class="pill acc">${x.open_tasks} task${x.open_tasks>1?'s':''}</span>`:''}${ctx(x)}</span></${x.offline?'div':'button'}>`};
   const lspace=(n,seen)=>{if(seen.has(n))return '';seen.add(n);
     const nested=inside[n]&&inside[n].parent!==n;
