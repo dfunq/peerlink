@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.66'
+const DAEMON_VERSION = '0.8.67'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -65,7 +65,7 @@ type ClientConfig = {
 type Previous = { summary: string; name: string; ts: number } | null
 
 const SUMMARY_SYSTEM =
-  'You keep the status other Claude agents see for this agent. Reply with two lines. Line 1: a headline of at most 6 words saying what it is doing now, like "Releasing PixelGrid v1.6.21". Line 2: in at most 200 characters, what it is working on, in which repo or service, and what it could answer questions about. Plain text, no preamble, no quotes, no labels. If the current status is still accurate, reply exactly UNCHANGED.'
+  'You keep the status other Claude agents see for this agent. Reply with two lines and nothing else: first a headline of at most 6 words saying what it is doing now, then on the next line, in at most 200 characters, what it is working on, in which repo or service, and what it could answer questions about. For example:\nReleasing PixelGrid v1.6.21\nShipping PixelGrid v1.6.21 from ~/Repos/pixelgrid; can answer on the release and its PRs.\nPlain text, no preamble, no quotes, no labels. If the current status is still accurate, reply exactly UNCHANGED.'
 
 // Summaries cost a model call, and every change is resent to each peer: refresh only this often.
 const SUMMARY_EVERY_TURNS = 8
@@ -880,7 +880,13 @@ async function summarize($: EngineInterface) {
     turnsSinceSummary = 0
     hasSummarizedTalk = true
     // The headline, then the summary; a model that answers in one line gives a summary alone.
-    const lines = done.text.trim().split('\n').map(l => l.trim()).filter(Boolean)
+    // A model that labels its lines ("Line 1: … Line 2: …", sometimes on one line) gets them split and the labels dropped.
+    const lines = done.text
+      .trim()
+      .replace(/\s*\bline\s*2\s*:\s*/i, '\n')
+      .split('\n')
+      .map(l => l.replace(/^\s*(line\s*\d|headline|summary)\s*:\s*/i, '').trim())
+      .filter(Boolean)
     const next = lines.length > 1 ? lines.slice(1).join(' ') : (lines[0] ?? '')
     const headline = lines.length > 1 ? lines[0] : ''
     if (next && next !== 'UNCHANGED' && next !== summary) await postSummary($, next, 'model', headline)
