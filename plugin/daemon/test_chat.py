@@ -89,6 +89,44 @@ class ChatTest(unittest.TestCase):
         self.assertEqual(peerlinkd.chat_via("slack:C1", "Dillon"), "Slack (Dillon)")
         self.assertEqual(peerlinkd.discord_channel_label("tg:5"), "Telegram")
 
+    def test_a_channel_can_name_one_of_the_agents_sharing_a_folder(self):
+        peerlinkd.load_config()  # PEERLINK_HOME is a fresh temp folder: the defaults
+        now = peerlinkd.time.time()
+        for sid, name in (("s-vault", "vault"), ("s-tg", "telegram")):
+            peerlinkd.sessions[sid] = {"id": sid, "name": name, "cwd": "/x/Vault", "last_seen": now}
+        self.addCleanup(lambda: [peerlinkd.sessions.pop(k, None) for k in ("s-vault", "s-tg")])
+        route = peerlinkd.clean_route({"channel_id": "tg:5", "agents": [
+            {"cwd": "/x/Vault", "name": "telegram", "receives": True, "sends": True},
+            {"cwd": "/x/Vault", "receives": False, "sends": True}]})  # a folder alone, as before 0.8.64
+        self.assertEqual(len(route["agents"]), 2)
+        peerlinkd.discord["routes"] = [route]
+        self.addCleanup(lambda: peerlinkd.discord.update({"routes": []}))
+        self.assertEqual(peerlinkd.entry_agent(route["agents"][0])["id"], "s-tg")
+        self.assertEqual(peerlinkd.entry_agent(route["agents"][1])["id"], "s-vault")  # the folder's own agent
+        self.assertTrue(peerlinkd.routes_for("/x/Vault", "telegram")[0]["master"])
+        self.assertFalse(peerlinkd.routes_for("/x/Vault", "vault")[0]["master"])
+        self.assertEqual(peerlinkd.channel_agent("tg:5", False)["id"], "s-tg")
+        # Not running, the named agent's message waits for it by name, not for another agent in its folder.
+        peerlinkd.sessions["s-tg"]["last_seen"] = 0
+        msg = {"id": "m-test", "text": "hi", "to_cwd": "/x/Vault"}
+        self.assertIsNone(peerlinkd.queue_for_entry(route["agents"][0], msg))
+        self.assertEqual(msg["to"], "agent:telegram")
+        peerlinkd.inboxes.pop("agent:telegram", None)
+
+    def test_a_conversation_is_both_ends_of_every_message_in_the_log(self):
+        log = peerlinkd.MESSAGES_PATH
+        self.addCleanup(lambda: [os.remove(f) for f in (log, log + ".1") if os.path.exists(f)])
+        rows = [(log + ".1", {"id": "m1", "ts": 1, "from": "s1", "from_name": "skyforge", "to": "s2", "to_name": "services", "text": "a"}),
+                (log, {"id": "m2", "ts": 2, "from": "s3", "from_name": "services", "to": "s4", "to_name": "Skyforge", "text": "b"}),
+                (log, {"id": "m2", "status": "delivered"}),  # an update to m2, as the daemon appends them
+                (log, {"id": "m3", "ts": 3, "from": "discord:tg:5", "from_name": "Dillon on Telegram", "to": "s4", "to_name": "skyforge", "text": "c"})]
+        for path, row in rows:
+            with open(path, "a") as f:
+                f.write(peerlinkd.json.dumps(row) + "\n")
+        both = peerlinkd.conversation("n:services", "n:skyforge")  # by name: the same pair after a /clear
+        self.assertEqual([(m["id"], m.get("status")) for m in both], [("m1", None), ("m2", "delivered")])
+        self.assertEqual([m["id"] for m in peerlinkd.conversation("n:skyforge", "discord:tg:5")], ["m3"])
+
 
 if __name__ == "__main__":
     unittest.main()

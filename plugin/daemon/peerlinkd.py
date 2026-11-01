@@ -403,7 +403,7 @@ def client_config(sid):
         "space_parent": space_parent(space) if rec else "",
         "lead": lead,
         "children": children,
-        "discord": routes_for(rec.get("cwd", "")) if rec and chat_configured() else [],
+        "discord": routes_for(rec.get("cwd", ""), display_name(rec)) if rec and chat_configured() else [],
         "poll_interval_ms": config["poll_interval_ms"],
         "auto_wake_idle": config["auto_wake_idle"] if s["auto_wake"] is None else s["auto_wake"],
         "inject_while_busy": config["inject_while_busy"],
@@ -907,6 +907,34 @@ def record(msg):
     append_log(msg)
 
 
+def party(m, side):
+    """One end of a message, as the web UI's Messages page groups them: a chat channel by its id, anyone else by name,
+    which survives an agent's /clear."""
+    who = str(m.get(side) or "")
+    return who if who.startswith("discord:") else "n:" + str(m.get(side + "_name") or who).lower()
+
+
+def conversation(a, b, limit=500):
+    """Every message between two parties still in the log (this file and the one before it), oldest first."""
+    pair, by_id = {a, b}, {}
+    for path in (MESSAGES_PATH + ".1", MESSAGES_PATH):
+        try:
+            with open(path) as f:
+                for line in f:
+                    try:
+                        entry = json.loads(line)
+                    except ValueError:
+                        continue
+                    if "text" in entry:
+                        by_id[entry["id"]] = entry
+                    elif entry.get("id") in by_id:
+                        by_id[entry["id"]].update(entry)
+        except OSError:
+            continue
+    out = [m for m in by_id.values() if {party(m, "from"), party(m, "to")} == pair or (a == b and party(m, "from") == party(m, "to") == a)]
+    return sorted(out, key=lambda m: m.get("ts", 0))[-limit:]
+
+
 def load_messages():
     """Replay the log so ids keep counting and undelivered messages survive a restart."""
     try:
@@ -991,23 +1019,42 @@ def load_discord():
 
 
 def clean_route(r):
-    """A channel's mapping as {channel_id, agents: [{cwd, receives, sends}]}. Before 0.8.36 it was a master and
+    """A channel's mapping as {channel_id, agents: [{cwd, name, receives, sends}]}. `name` picks one agent where several
+    share the folder; without it (mappings before 0.8.64) the entry is the folder's. Before 0.8.36 it was a master and
     members, both of which got messages and posted, and kinds: those become agents that do both."""
     agents = r.get("agents")
     if agents is None:
         agents = [{"cwd": c, "receives": True, "sends": True} for c in [r.get("master")] + list(r.get("members") or [])]
     out, seen = [], set()
     for a in agents:
-        cwd = str(a.get("cwd") or "")
-        if cwd and cwd not in seen:
-            seen.add(cwd)
-            out.append({"cwd": cwd, "receives": bool(a.get("receives")), "sends": bool(a.get("sends"))})
+        cwd, name = str(a.get("cwd") or ""), str(a.get("name") or "").strip()
+        if cwd and (cwd, name.lower()) not in seen:
+            seen.add((cwd, name.lower()))
+            out.append({"cwd": cwd, "name": name, "receives": bool(a.get("receives")), "sends": bool(a.get("sends"))})
     return {"channel_id": str(r["channel_id"]), "agents": out}
 
 
 def receivers(route):
-    """The folders a channel's messages can reach, in order: the first gets them unless one is named."""
-    return [a["cwd"] for a in route.get("agents", []) if a.get("receives")]
+    """The agents a channel's messages can reach, as its entries, in order: the first gets them unless one is named."""
+    return [a for a in route.get("agents", []) if a.get("receives")]
+
+
+def entry_is(a, cwd, name=""):
+    """Whether a channel's entry is this agent: its folder, and its name when the entry names one. No name to check
+    (a folder alone) matches any entry there."""
+    return a["cwd"] == cwd and (not a.get("name") or not name or a["name"].lower() == name.lower())
+
+
+def entry_agent(a):
+    """The live agent a channel's entry reaches: the one it names, else the folder's."""
+    if not a.get("name"):
+        return successor(a["cwd"])
+    named = [r for r in sessions.values() if is_live(r) and r.get("cwd") == a["cwd"] and display_name(r).lower() == a["name"].lower()]
+    return max(named, key=lambda r: r["last_seen"]) if named else None
+
+
+def entry_label(a):
+    return a.get("name") or folder_name(a["cwd"])
 
 
 def save_discord():
@@ -1158,15 +1205,16 @@ def discord_channel_label(channel_id):
     return f"#{name}" if name else chatlink.name(channel_id)
 
 
-def routes_for(cwd):
-    """The channels an agent's folder is mapped into: whether it receives and sends there, and whether it's the
-    first receiver (`master`), which gets messages that name nobody."""
+def routes_for(cwd, name=""):
+    """The channels an agent is mapped into, by its folder and name (a folder alone: any agent there): whether it
+    receives and sends there, and whether it's the first receiver (`master`), which gets messages that name nobody."""
     out = []
     for r in discord.get("routes", []):
-        a = next((a for a in r.get("agents", []) if a["cwd"] == cwd), None)
+        a = next((a for a in r.get("agents", []) if entry_is(a, cwd, name)), None)
         if a:
+            first = receivers(r)[:1]
             out.append({"channel_id": r["channel_id"], "channel": discord_channel_label(r["channel_id"]), "platform": chatlink.name(r["channel_id"]),
-                        "master": receivers(r)[:1] == [cwd], "receives": a["receives"], "sends": a["sends"]})
+                        "master": bool(first) and entry_is(first[0], cwd, name), "receives": a["receives"], "sends": a["sends"]})
     if discord.get("dm") == cwd:
         out.append({"channel_id": "dm", "channel": "direct messages", "platform": "Discord", "master": True, "receives": True, "sends": True})
     return out
@@ -1181,8 +1229,8 @@ def approval_channel(rec):
     """The Discord channel to ask your approval in for an agent: one its folder is in, else its space lead's, else
     the parent space lead's. '' when none of them has one, and the request waits in the Inbox only."""
     space = space_of(rec)[0]
-    for cwd in (rec.get("cwd", ""), space_lead(space)[0], space_lead(space_parent(space))[0] if space_parent(space) else ""):
-        chans = [r for r in routes_for(cwd) if r["channel_id"] != "dm"] if cwd else []
+    for cwd, name in ((rec.get("cwd", ""), display_name(rec)), (space_lead(space)[0], ""), (space_lead(space_parent(space))[0] if space_parent(space) else "", "")):
+        chans = [r for r in routes_for(cwd, name) if r["channel_id"] != "dm"] if cwd else []
         if chans:
             return chans[0]["channel_id"]
     return ""
@@ -1257,6 +1305,20 @@ def save_discord_files(d):
     return f"\n\nAttached on {chatlink.name(d['channel_id'])}:\n" + "\n".join(lines)
 
 
+def queue_for_entry(a, msg, prefer=None):
+    """Deliver to `prefer` or the agent a channel's entry reaches. Not running, a named one's message is held for it
+    by name (adopt() hands it over), never to another agent in its folder."""
+    if not a.get("name") or prefer:
+        return queue_for_folder(a["cwd"], msg, prefer)
+    agent = entry_agent(a)
+    if agent:
+        return queue_for_folder(a["cwd"], msg, agent)
+    msg["to"], msg["to_name"] = f"agent:{a['name'].lower()}", a["name"]
+    inboxes.setdefault(msg["to"], []).append(msg)
+    record(msg)
+    return None
+
+
 def queue_for_folder(cwd, msg, prefer=None):
     """Deliver to `prefer` or the folder's live agent, or hold it for the next one there (adopt() hands it over)."""
     agent = prefer or successor(cwd)
@@ -1283,9 +1345,12 @@ def agent_named(name):
 
 def channel_agent(channel_id, dm):
     """The agent a channel's messages go to: its first receiver, or your DMs'."""
-    cwd = discord.get("dm") if dm else next((receivers(r)[0] for r in discord.get("routes", []) if r["channel_id"] == channel_id and receivers(r)), "")
+    if dm:
+        with lock:
+            return successor(discord["dm"]) if discord.get("dm") else None
+    a = next((receivers(r)[0] for r in discord.get("routes", []) if r["channel_id"] == channel_id and receivers(r)), None)
     with lock:
-        return successor(cwd) if cwd else None
+        return entry_agent(a) if a else None
 
 
 def on_slash(cmd):
@@ -1384,13 +1449,13 @@ def on_discord(d):
     if not d.get("bot") and (d["dm"] or d["mentioned"] or bot.reads_messages) and inbox_command(d):
         return
     if d["dm"]:
-        route = {"channel_id": d["channel_id"], "agents": [{"cwd": discord.get("dm"), "receives": True, "sends": True}] if discord.get("dm") else []}
+        route = {"channel_id": d["channel_id"], "agents": [{"cwd": discord.get("dm"), "name": "", "receives": True, "sends": True}] if discord.get("dm") else []}
     else:
         route = next((r for r in discord.get("routes", []) if r["channel_id"] == d["channel_id"]), None)
         # Without the Message Content switch only @mentions carry text; with it, every message in a mapped channel.
         if route is None or not (d["mentioned"] or bot.reads_messages):
             return
-    text, cwd = d["text"], (receivers(route) or [""])[0]
+    text, entry = d["text"], (receivers(route) or [None])[0]
     # "storefront: ..." or "@storefront ..." addresses another agent this channel reaches, by name.
     head, sep, rest = text.partition(":")
     first = text.split(None, 1)
@@ -1399,10 +1464,10 @@ def on_discord(d):
         if not candidate:
             continue
         for member in receivers(route):
-            agent = successor(member or "")
-            names = {folder_name(member or "").lower(), (display_name(agent) if agent else "").lower()} - {""}
-            if member and candidate.lower() in names:
-                text, cwd = body or text, member
+            agent = entry_agent(member)
+            names = {entry_label(member).lower(), (display_name(agent) if agent else "").lower()} - {""}
+            if candidate.lower() in names:
+                text, entry = body or text, member
                 break
         else:
             continue
@@ -1415,8 +1480,9 @@ def on_discord(d):
             replied = next((m for m in reversed(messages) if m.get("to") == f"discord:{d['channel_id']}" and m.get("from_cwd")
                             and (m.get("discord_out") or {}).get("message_id") == d["ref"]), None)
         if replied:
-            cwd = replied["from_cwd"]
-    asker = continuation(replied["from"], replied.get("from_name", ""), cwd) if replied else None
+            entry = {"cwd": replied["from_cwd"], "name": replied.get("from_name", "")}
+    asker = continuation(replied["from"], replied.get("from_name", ""), entry["cwd"]) if replied else None
+    cwd = entry["cwd"] if entry else ""
     if not cwd:
         chat_post(d["channel_id"], "No agent here receives messages yet: tick Receives for one in the peerlink web UI, under Channels.", d["message_id"])
         return
@@ -1442,7 +1508,7 @@ def on_discord(d):
         }
         next_msg[0] += 1
         task = new_task(msg, {"id": "", "name": msg["from_name"], "cwd": "", "discord": msg["discord"]}) if kind == "task" else None
-        agent = queue_for_folder(cwd, msg, asker)
+        agent = queue_for_entry(entry, msg, asker)
         msg["to_space"] = space_of(agent)[0] if agent else ""
         if task:
             task["owner"], task["space"] = msg["to_name"], msg["to_space"]
@@ -1450,7 +1516,7 @@ def on_discord(d):
     log("discord in", msg["id"], d["author"], "->", msg["to_name"])
     set_reaction(msg, "👀")
     if not agent:
-        chat_post(d["channel_id"], f"{folder_name(cwd)} isn't running right now. Your message waits up to an hour for it.", d["message_id"])
+        chat_post(d["channel_id"], f"{entry_label(entry)} isn't running right now. Your message waits up to an hour for it.", d["message_id"])
 
 
 # A message from Discord shows where it's at: 👀 heard, 🤔 thinking, 🛠️ using tools,
@@ -1669,7 +1735,7 @@ def send_discord(sender_rec, to, text, parent, hops, options=None, files=None, e
     target = chat_target(to.strip().lower())
     if target is None:
         return None
-    mine = chats_matching([r for r in routes_for(sender_rec.get("cwd", "")) if r["channel_id"] != "dm" and r["sends"]], target)
+    mine = chats_matching([r for r in routes_for(sender_rec.get("cwd", ""), display_name(sender_rec)) if r["channel_id"] != "dm" and r["sends"]], target)
     where = target[0] or "chat"
     if not mine:
         return 404, {"error": f"this agent isn't ticked to send in any {where} channel; the mapping is in the web UI, under Channels"}
@@ -1680,7 +1746,7 @@ def send_discord(sender_rec, to, text, parent, hops, options=None, files=None, e
 
 def user_send(sender_rec, word, text, kind, parent_task, expects_reply, hops, options, files):
     """A message or task for you: it waits in your Inbox, and is posted to Discord when the agent has a channel there."""
-    chans = [r for r in routes_for(sender_rec.get("cwd", "")) if r["channel_id"] != "dm" and r["sends"]] if chat_ready() else []
+    chans = [r for r in routes_for(sender_rec.get("cwd", ""), display_name(sender_rec)) if r["channel_id"] != "dm" and r["sends"]] if chat_ready() else []
     target = chat_target(word)
     if target:
         chans = chats_matching(chans, target)
@@ -2697,7 +2763,7 @@ def task_closed(t, web=False):
         elif req.get("cwd"):
             task_message(t, req["cwd"], line if owner else f"{t['owner']}: {line}", sender=owner, reply_to=t["msg"], prefer=asker)
         if t["status"] == "failed" and not d and not t.get("user"):
-            chans = [r for r in routes_for(t["owner_cwd"]) + routes_for(req.get("cwd", "")) if r["channel_id"] != "dm" and r["sends"]]
+            chans = [r for r in routes_for(t["owner_cwd"], t.get("owner", "")) + routes_for(req.get("cwd", ""), req.get("name", "")) if r["channel_id"] != "dm" and r["sends"]]
             if chans:
                 posts.append((chans[0]["channel_id"], f"**{t['owner']}**: {line} (asked by {req.get('name') or 'an agent'})", None))
     if posts and chat_ready():
@@ -3303,7 +3369,7 @@ def hit_limit(rec, body):
         lifting.clear()
         usage_limit.update({"since": usage_limit.get("since", now), "resets_at": resets or usage_limit.get("resets_at"),
                             "kind": str(body.get("kind") or usage_limit.get("kind") or ""), "by": display_name(rec)})
-        chans = [r for r in routes_for(rec.get("cwd", "")) if r["channel_id"] != "dm"] or discord.get("routes", [])
+        chans = [r for r in routes_for(rec.get("cwd", ""), display_name(rec)) if r["channel_id"] != "dm"] or discord.get("routes", [])
     log("limit", "hit by", display_name(rec), "resets", time.strftime("%H:%M", time.localtime(resets)) if resets else "unknown",
         f"({len(back)} message{'s' if len(back) != 1 else ''} put back)")
     if fresh and chans and chat_ready(chans[0]["channel_id"]):
@@ -4222,6 +4288,8 @@ class Handler(BaseHTTPRequestHandler):
             code, out = update_task(rest[1], self.body(), web=bool(browser) and not self.key_ok())
             return self.reply(code, out)
 
+        if rest == ["conversation"] and method == "GET":
+            return self.reply(200, {"messages": conversation(q.get("a", [""])[0], q.get("b", [""])[0])})
         if rest == ["messages"]:
             if method == "GET":
                 with lock:
@@ -4590,11 +4658,20 @@ body.wide main{max-width:none}
 .lspace-h{display:flex;gap:8px;align-items:baseline;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin-bottom:6px}.lspace-h .small{text-transform:none;letter-spacing:0;font-weight:400}
 .lsub{margin-left:14px;border-left:2px solid var(--line);padding-left:12px;display:flex;flex-direction:column;gap:6px;margin-top:6px}.lsub.led{border-left-color:var(--acc)}
 .lsub>.lspace,.lflat>.lspace{margin-top:8px}.lflat{display:flex;flex-direction:column;gap:6px}
-.lrow{display:grid;grid-template-columns:minmax(150px,220px) minmax(0,1fr) auto;gap:4px 14px;align-items:baseline;width:100%;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:7px 12px;text-align:left;font:inherit;color:inherit;cursor:pointer}
+.lrow{display:grid;grid-template-columns:minmax(150px,230px) minmax(0,1fr) auto;gap:4px 16px;align-items:center;width:100%;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:7px 12px;text-align:left;font:inherit;color:inherit;cursor:pointer}
 .lrow:hover{border-color:var(--mut)}.lrow.is-lead{border-color:var(--acc)}.lrow.sel{box-shadow:0 0 0 2px var(--acc)}.lrow.off{opacity:.5;cursor:default;border-style:dashed}
 .lrow .ln{font-weight:600;display:flex;align-items:center;gap:6px;min-width:0}.lrow .ln>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.lrow .lw{font-size:12px;color:var(--mut);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.lrow .lw .mono{font-size:11px}
-.lrow .lr{display:flex;gap:10px;align-items:baseline;white-space:nowrap;font-size:12px}
+.lrow .lid{display:flex;flex-direction:column;gap:1px;min-width:0}.lrow .lwhere{font-size:11px;color:var(--mut);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-left:14px}
+.lrow .lw{font-size:13px;line-height:1.4;color:var(--mut);min-width:0;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.lrow .lbusy{color:var(--warn)}.pill.acc{color:var(--acc);border-color:var(--acc)}
+.panel .phead{display:flex;align-items:center;gap:10px;min-width:0}.panel .phead .plogo{flex:none;width:36px;height:36px;border-radius:10px;display:grid;place-items:center}
+.panel .phead .ptitle{display:flex;flex-direction:column;min-width:0}.panel .phead .psub{font-size:12px;color:var(--mut);display:flex;align-items:center;gap:5px;flex-wrap:wrap}.panel .phead .psub .dot{margin:0}
+.panel .pwhere{display:flex;align-items:center;gap:6px;margin-top:8px;font-size:12px;color:var(--mut);min-width:0}.panel .pwhere .mono{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.panel .pnow{margin-top:10px;background:var(--well);border:1px solid var(--line);border-radius:8px;padding:8px 10px;line-height:1.45}.panel .pnow .k{margin-bottom:2px}
+.panel .ptiles{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}.panel .ptiles>div{border:1px solid var(--line);border-radius:8px;padding:6px 10px;display:flex;flex-direction:column;gap:3px}
+.panel .ptiles b{font-size:16px}.panel .ptiles .cmeter{width:100%}
+.cmeter{display:inline-block;width:34px;height:5px;border-radius:3px;background:var(--line);overflow:hidden;vertical-align:middle}.cmeter i{display:block;height:100%;background:var(--ok)}.cmeter.mid i{background:var(--warn)}.cmeter.hi i{background:var(--bad)}
+.lrow .lr{display:flex;gap:10px;align-items:center;white-space:nowrap;font-size:12px;justify-content:flex-end}
 .lrow .badge{font-size:10px;font-weight:600;color:var(--acc);border:1px solid var(--acc);border-radius:4px;padding:0 4px}.lrow .badge.only{border-style:dashed}
 @media (max-width:720px){.lrow{grid-template-columns:1fr auto}.lrow .lw{grid-column:1/-1;grid-row:2;white-space:normal}}
 section{display:none}section.on{display:block}
@@ -4619,6 +4696,24 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)
 .node.off{opacity:.5;cursor:default;border-style:dashed}.node.off:hover{border-color:var(--acc)}
 .under{margin-left:14px;border-left:2px solid var(--acc);padding-left:12px;margin-top:8px}
 .node .dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--mut);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+details.plat{margin:0 0 12px;max-width:860px;background:var(--card);border:1px solid var(--line);border-radius:12px}
+#schedlist details.plat,#inboxlist details.plat,#fblist details.plat{max-width:none;margin:0}#schedadd{max-width:none}.grpbody{display:flex;flex-direction:column;gap:8px;padding-top:12px!important}
+.plat.static .psum{display:flex;align-items:center;gap:12px;padding:12px 14px;font-size:14px}.plat .pact{flex:none;display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+div.plat{margin:0 0 12px;max-width:860px;background:var(--card);border:1px solid var(--line);border-radius:12px}
+#cfg details.plat .pbody{padding-top:12px;display:flex;flex-direction:column;gap:10px}#cfg .savebar{max-width:860px}
+@media (max-width:640px){.plat.static .psum{flex-wrap:wrap}.plat .pact{width:100%;justify-content:flex-start}}
+details.plat>summary{display:flex;align-items:center;gap:12px;padding:12px 14px;list-style:none;font-size:14px;color:var(--fg)}details.plat>summary::-webkit-details-marker{display:none}
+.plat .plogo{flex:none;width:34px;height:34px;border-radius:9px;display:grid;place-items:center}.plat .plogo svg{width:20px;height:20px}
+.plat .ptitle{display:flex;flex-direction:column;min-width:0;flex:1}.plat .psub{font-size:12px;color:var(--mut)}
+details.plat .pstate{display:flex;align-items:center;gap:6px;font-size:13px;flex-wrap:wrap;justify-content:flex-end}details.plat .pstate .dstate{margin:0}
+details.plat .chev{flex:none;width:8px;height:8px;border-right:2px solid var(--mut);border-bottom:2px solid var(--mut);transform:rotate(-45deg);transition:transform .15s;margin:0 4px}
+details.plat[open] .chev{transform:rotate(45deg)}details.plat .pbody{padding:0 14px 14px;border-top:1px solid var(--line)}details.plat .pbody .steps .step{background:var(--bg)}
+.mlogo{flex:none;width:22px;height:22px;border-radius:6px;display:grid;place-items:center}.mlogo svg{width:14px;height:14px}
+details.conv{max-width:none;margin:0}details.conv .cnames{display:flex;align-items:center;gap:6px;flex-wrap:wrap}details.conv .psub{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+details.conv .pstate{flex-wrap:nowrap}.convbody{display:flex;flex-direction:column;gap:8px;padding-top:12px!important;max-height:70vh;overflow:auto}
+.cline{border-left:3px solid var(--acc);padding:4px 0 4px 10px}.cline.other{border-left-color:var(--line)}.cline .mh{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;font-size:13px}
+.cline .mh .when{margin-left:auto;color:var(--mut);font-size:12px}.cline .mt{margin-top:4px;white-space:pre-wrap;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:5;-webkit-box-orient:vertical;overflow:hidden;cursor:pointer}.cline.open .mt{display:block;cursor:auto}.cline .chip{font-size:11px;border-radius:999px;padding:1px 8px;border:1px solid var(--line);color:var(--mut)}
+details.plat .pbody h2{font-size:14px;margin:16px 0 6px}.pill.warn{color:var(--warn);border-color:var(--warn)}
 .steps{list-style:none;padding:0;margin:8px 0 16px;display:flex;flex-direction:column;gap:12px;max-width:820px}
 .step{display:flex;gap:12px;align-items:flex-start;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
 .step-n{flex:none;width:24px;height:24px;border-radius:50%;border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--mut)}
@@ -4646,7 +4741,8 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)
 .facts .k{color:var(--mut)}.threads{margin-top:8px;display:flex;flex-direction:column;gap:4px}.threads .k{color:var(--mut)}.panel form{margin-top:12px;border-top:1px solid var(--line);padding-top:12px;display:flex;flex-direction:column;gap:12px}
 .panel label{display:flex;flex-direction:column;gap:4px;font-size:13px;font-weight:500}.panel label .hint{font-weight:400;font-size:12px;color:var(--mut)}
 .panel label.check{flex-direction:row;align-items:center;gap:8px}.ok{color:var(--ok)}
-#stalebar .mono{white-space:nowrap}#stalebar{background:var(--card);border:1px solid var(--warn);border-radius:10px;padding:10px 14px;margin-bottom:14px}
+#stalebar .mono{white-space:nowrap}#stalebar{background:var(--card);border:1px solid var(--warn);border-radius:10px;padding:8px 14px;margin-bottom:14px;align-items:flex-start;gap:10px;max-width:1050px}
+#stalebar details{flex:1;margin:0}#stalebar summary{font-size:13px;color:var(--fg)}#stalebar details .small{margin-top:6px}
 #limitbar{background:var(--card);border:1px solid var(--warn);border-radius:10px;padding:10px 14px;margin-bottom:14px}
 #offline{display:none;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin-bottom:14px;color:var(--mut)}
 #signedout{display:none;background:var(--card);border:1px solid var(--warn);border-radius:10px;padding:10px 14px;margin-bottom:14px}
@@ -4760,7 +4856,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <li>Work sent to a space goes to its lead: the agent you picked, or else the one that was alone in it. Pick leads, and which space sits inside which, on the Spaces page.</li>
 <li>An agent only sees and messages agents in its own space. A lead also sees the space its space sits inside.</li>
 <li>To move an agent, open it and set its space on the Details tab: its folder keeps it, for every agent opened there.</li>
-<li>The percentage is how full the agent's context window is. A yellow dot means it's working, a green one that it's idle.</li></ul></details><div class="orgwrap"><div id="peers"></div><div id="detail"></div></div></section>
+<li>The bar is how full the agent's context window is: it turns yellow past half and red past 80%. A yellow dot means it's working, a green one that it's idle. Messages an hour show only when an agent is chatty, 20 or more.</li></ul></details><div class="orgwrap"><div id="peers"></div><div id="detail"></div></div></section>
 
 <section id="inbox"><h1>Inbox</h1><p class="lead">Everything waiting on you, the longest waiting first. On Discord, <span class="mono">/inbox</span> shows the same list, and you answer by number, like <span class="mono">1 done</span>.</p>
 <div class="msgbar"><button class="ghost small" id="notifybtn" data-notify>Desktop alerts: off</button></div>
@@ -4772,17 +4868,20 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <div id="spacelist"></div>
 </section>
 
-<section id="schedules"><h1>Schedules</h1><p class="lead">Prompts the daemon sends an agent at a time or on a repeat, with no terminal open. A schedule is for one agent: it goes to that agent wherever it runs, never to another in its folder. When it isn't running, the run waits for it, or the agent is started again in its folder. Agents add them with their <span class="mono">schedule</span> tool; one that may start an agent waits for your approval. Edit any of them here.</p>
-<form class="card" id="schedform"><div class="addline"><select name="target" class="grow" id="schedagents" required></select>
+<section id="schedules"><h1>Schedules</h1><p class="lead">Prompts the daemon sends an agent at a time or on a repeat, even with no terminal open.</p>
+<details class="how"><summary>How schedules work</summary><p>Prompts the daemon sends an agent at a time or on a repeat, with no terminal open. A schedule is for one agent: it goes to that agent wherever it runs, never to another in its folder. When it isn't running, the run waits for it, or the agent is started again in its folder. Agents add them with their <span class="mono">schedule</span> tool; one that may start an agent waits for your approval. Edit any of them here.</p></details>
+<details class="plat" id="schedadd"><summary><span class="plogo" style="background:var(--acc)"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 5v14M5 12h14"/></svg></span><span class="ptitle"><b>Add a schedule</b><span class="psub">A prompt for one agent, once or on a repeat</span></span><span class="chev" aria-hidden="true"></span></summary><div class="pbody" style="padding-top:12px">
+<form id="schedform"><div class="addline"><select name="target" class="grow" id="schedagents" required></select>
 <input name="when" type="text" placeholder="0 9 * * 1-5, or in 2h" title="A cron (minute hour day month weekday) repeats; 'in 30m', 'in 2h', 'in 1d' or 2026-10-25 09:00 runs once" style="width:190px"></div>
 <textarea name="prompt" rows="2" placeholder="What the agent should do when it runs" style="margin-top:8px;width:100%"></textarea>
-<div class="addline" style="margin-top:8px"><label class="check small"><input type="checkbox" name="start" checked> Start it when it isn&#39;t running</label><button type="submit">Add schedule</button><span class="small" id="schedmsg"></span></div></form>
+<div class="addline" style="margin-top:8px"><label class="check small"><input type="checkbox" name="start" checked> Start it when it isn&#39;t running</label><button type="submit">Add schedule</button><span class="small" id="schedmsg"></span></div></form></div></details>
 <div id="schedlist" style="margin-top:12px;display:flex;flex-direction:column;gap:8px"></div></section>
 
-<section id="messages"><h1>Messages</h1><p class="lead">Recent messages between agents, newest first. Click one to read it all.</p>
+<section id="messages"><h1>Messages</h1><p class="lead">Conversations between agents, and with you on Discord and Telegram, the latest first. Open one for its whole history.</p>
 <div class="msgbar"><span class="fl"><label class="small mut" for="msgspace">Space</label><select id="msgspace"><option value="">All spaces</option></select></span>
 <span class="fl"><label class="small mut" for="msgagent">Agent</label><select id="msgagent"><option value="">Everyone</option></select></span>
-<input id="msgq" class="search" type="search" placeholder="Search messages" aria-label="Search messages"></div>
+<input id="msgq" class="search" type="search" placeholder="Search messages" aria-label="Search messages">
+<label class="check small" style="margin:0"><input type="checkbox" id="msgnosched"> Hide schedule runs</label></div>
 <div class="mlist" id="msgs"></div></section>
 
 <section id="tasks"><h1>Tasks</h1><p class="lead">Work handed between agents. Click a card for details, or drag it.</p>
@@ -4803,80 +4902,81 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <div class="mlist" id="tasklist"></div></section>
 
 <section id="feedback"><h1>Feedback</h1><p class="lead">Bugs and ideas agents report about peerlink. Accept one to hand it to the peerlink agent as a task.</p>
-<div class="msgbar"><span class="fl"><label class="small mut" for="fstatus">Show</label><select id="fstatus"><option value="new">New</option><option value="accepted">Accepted</option><option value="done">Done</option><option value="dismissed">Dismissed</option><option value="">All</option></select></span>
+<div class="msgbar"><span class="fl"><label class="small mut" for="fstatus">Show</label><select id="fstatus"><option value="">All, by status</option><option value="new">New</option><option value="accepted">Accepted</option><option value="done">Done</option><option value="dismissed">Dismissed</option></select></span>
 <span class="fl"><label class="small mut" for="ftype">Type</label><select id="ftype"><option value="">Bugs and ideas</option><option value="bug">Bugs</option><option value="idea">Ideas</option></select></span></div>
 <div class="mlist" id="fblist"></div></section>
 
 <section id="channels"><h1>Channels</h1>
 <p class="lead">Talk to your agents from outside the terminal.</p>
-<h2>Discord</h2>
-<p class="lead">Each channel you map has agents: ones that <b>receive</b> get your messages there, ones that <b>send</b> can post there. Only you, the bot's owner, can talk to them.</p>
-<div id="dstatus"></div>
+<details class="plat" id="pdiscord"><summary><span class="plogo" style="background:#5865F2"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#fff" d="M20.317 4.37a19.79 19.79 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.865-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.74 19.74 0 0 0 3.677 4.37a.07.07 0 0 0-.032.028C.533 9.046-.32 13.58.099 18.058a.082.082 0 0 0 .031.056 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.1 13.1 0 0 1-1.872-.892.077.077 0 0 1-.008-.128c.126-.094.252-.192.372-.291a.074.074 0 0 1 .078-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.009c.12.099.246.198.373.292a.077.077 0 0 1-.007.128 12.3 12.3 0 0 1-1.873.891.077.077 0 0 0-.041.107c.36.698.772 1.363 1.225 1.993a.076.076 0 0 0 .084.029 19.84 19.84 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.331c-1.183 0-2.157-1.086-2.157-2.42 0-1.333.956-2.418 2.157-2.418 1.21 0 2.176 1.095 2.157 2.419 0 1.333-.956 2.419-2.157 2.419zm7.975 0c-1.183 0-2.157-1.086-2.157-2.42 0-1.333.955-2.418 2.157-2.418 1.21 0 2.176 1.095 2.157 2.419 0 1.333-.946 2.419-2.157 2.419z"/></svg></span><span class="ptitle"><b>Discord</b><span class="psub">Channels in your server</span></span><span class="pstate" id="dstatus"></span><span class="chev" aria-hidden="true"></span></summary><div class="pbody">
+<p class="meta">Each channel you map has agents: ones that <b>receive</b> get your messages there, ones that <b>send</b> can post there. Only you, the bot's owner, can talk to them.</p>
 <ol class="steps">
 <li class="step" id="dstep1"><span class="step-n">1</span><div class="step-body"><div class="step-t">Create the bot and paste its token</div><div id="dstep1b"></div></div></li>
 <li class="step" id="dstep2"><span class="step-n">2</span><div class="step-body"><div class="step-t">Invite it to your server</div><div id="dstep2b"></div></div></li>
 <li class="step" id="dstep3"><span class="step-n">3</span><div class="step-body"><div class="step-t">Map channels to agents</div><p class="meta">Under <b>Chats and agents</b>, below.</p></div></li>
-</ol>
-<h2>Telegram</h2>
-<p class="lead">A private chat with your bot, or a group it's in, works like a Discord channel. Telegram bots answer anyone who finds them, so peerlink ignores everyone until you allow them.</p>
-<div id="tstatus"></div>
+</ol></div></details>
+<details class="plat" id="ptelegram"><summary><span class="plogo" style="background:#26A5E4"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#fff" d="M4.6 11.6l13.1-5.05c.6-.22 1.13.15.93 1.06l-2.23 10.5c-.17.75-.6.93-1.23.58l-3.4-2.5-1.64 1.58c-.18.18-.33.33-.68.33l.24-3.46 6.3-5.69c.27-.24-.06-.38-.43-.14l-7.78 4.9-3.35-1.05c-.73-.23-.74-.73.15-1.07z"/></svg></span><span class="ptitle"><b>Telegram</b><span class="psub">A private chat or a group</span></span><span class="pstate" id="tgstatus"></span><span class="chev" aria-hidden="true"></span></summary><div class="pbody">
+<p class="meta">A private chat with your bot, or a group it's in, works like a Discord channel. Telegram bots answer anyone who finds them, so peerlink ignores everyone until you allow them.</p>
 <ol class="steps">
 <li class="step" id="tstep1"><span class="step-n">1</span><div class="step-body"><div class="step-t">Create the bot and paste its token</div><div id="tstep1b"></div></div></li>
 <li class="step" id="tstep2"><span class="step-n">2</span><div class="step-body"><div class="step-t">Message it, then allow yourself</div><div id="tstep2b"></div></div></li>
 <li class="step" id="tstep3"><span class="step-n">3</span><div class="step-body"><div class="step-t">Map chats to agents</div><div id="tstep3b"></div></div></li>
-</ol>
-<h2>Chats and agents</h2>
-<div id="dstep3b"></div>
-<div id="dmore"></div>
+</ol></div></details>
+<details class="plat" id="pmap"><summary><span class="plogo" style="background:var(--acc)"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" d="M4 7h11m0 0-3-3m3 3-3 3M20 17H9m0 0 3-3m-3 3 3 3"/></svg></span><span class="ptitle"><b>Chats and agents</b><span class="psub">Which agents hear and post in each channel</span></span><span class="pstate" id="mapstatus"></span><span class="chev" aria-hidden="true"></span></summary><div class="pbody">
+<div id="dstep3b"></div></div></details>
+<details class="plat" id="popts"><summary><span class="plogo" style="background:var(--mut)"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2" fill="none" stroke="#fff" stroke-width="2"/><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M5.6 18.4l1.8-1.8M16.6 7.4l1.8-1.8"/></svg></span><span class="ptitle"><b>Options</b><span class="psub">Progress reactions, buttons, files and who can talk</span></span><span class="pstate" id="optstatus"></span><span class="chev" aria-hidden="true"></span></summary><div class="pbody">
+<div id="dmore"></div></div></details>
 </section>
 
 <section id="settings"><h1>Settings</h1><p class="lead">Changes reach every agent within a few seconds.</p>
-<form class="card" id="cfg">
+<form id="cfg">
+<details class="plat" id="swake"><summary><span class="plogo" style="background:var(--acc)"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg></span><span class="ptitle"><b>Waking and delivery</b><span class="psub">When a message interrupts an agent, and when it waits</span></span><span class="chev" aria-hidden="true"></span></summary><div class="pbody">
+<div class="check"><input type="checkbox" name="auto_wake_idle" id="aw"><label for="aw" style="margin:0">Wake idle agents when a message arrives</label></div>
+<div class="check"><input type="checkbox" name="inject_while_busy" id="ib"><label for="ib" style="margin:0">Deliver into a running turn</label></div>
+<div class="row"><div><label for="wf">Wake an idle agent for</label><select name="wake_for" id="wf" style="width:100%"><option value="needed">Questions, tasks, your messages and answers (saves tokens)</option><option value="all">Every message</option></select></div>
+<div><label for="wd">Wait before waking for another agent's message (s)</label><input type="number" name="wake_delay_s" id="wd" min="0" max="120"></div></div>
+<div class="mut small">Each wake-up is a full turn that re-reads the agent's context. Waiting a few seconds lets messages that arrive together share one turn; your own messages never wait.</div>
+</div></details>
+<details class="plat" id="sctx"><summary><span class="plogo" style="background:#7a6ff0"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 3v4M12 17v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M3 12h4M17 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/></svg></span><span class="ptitle"><b>Context and usage</b><span class="psub">Clearing context so it doesn't drain your usage limit</span></span><span class="chev" aria-hidden="true"></span></summary><div class="pbody">
+<div class="check"><input type="checkbox" name="clear_between_tasks" id="cbt"><label for="cbt" style="margin:0">Agents clear their own context after each task, saving notes to memory first</label></div>
+<div class="row"><div><label for="cnt">Ask an agent to save and clear once its context passes (tokens, 0 for never)</label><input type="number" name="clear_nudge_tokens" id="cnt" min="0" step="50000"></div><div></div></div>
+<div class="mut small">A large context is re-read on every turn and drains the usage limit fast. The ask arrives with the agent's next prompt, so it clears at a stopping point.</div>
+</div></details>
+<details class="plat" id="sapprove"><summary><span class="plogo" style="background:var(--ok)"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10zM9 12l2 2 4-4"/></svg></span><span class="ptitle"><b>Approvals</b><span class="psub">Whether agents ask you before starting agents and schedules</span></span><span class="chev" aria-hidden="true"></span></summary><div class="pbody">
+<div class="check"><input type="checkbox" name="auto_approve_all" id="aaa"><label for="aaa" style="margin:0">Let every agent start agents and schedules without asking me</label></div>
+<div class="mut small">You're still told on Discord when one does. To allow only some agents, leave this off and turn it on in an agent's Controls tab.</div>
+</div></details>
+<details class="plat" id="ssee"><summary><span class="plogo" style="background:#3d8fd6"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/></svg></span><span class="ptitle"><b>What agents see</b><span class="psub">The live agent list, summaries and feedback</span></span><span class="chev" aria-hidden="true"></span></summary><div class="pbody">
+<div class="check"><input type="checkbox" name="roster_in_prompt" id="rp"><label for="rp" style="margin:0">Show each agent the live agent list when it changes</label></div>
+<div class="check"><input type="checkbox" name="auto_summary" id="as"><label for="as" style="margin:0">Keep agent summaries current automatically</label></div>
+<div class="row"><div><label>Summary model</label><input type="text" name="summary_model"></div><div></div></div>
+<div class="check"><input type="checkbox" name="feedback" id="fbk"><label for="fbk" style="margin:0">Agents report bugs and ideas about peerlink itself, on the Feedback page</label></div>
+<div class="mut small">For people developing peerlink. Agents started after you change this get the report_issue tool, or don't.</div>
+</div></details>
+<details class="plat" id="sguide"><summary><span class="plogo" style="background:#c58a2b"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6M8 13h8M8 17h5"/></svg></span><span class="ptitle"><b>Guidance</b><span class="psub">What every agent is told about working with its peers</span></span><span class="chev" aria-hidden="true"></span></summary><div class="pbody">
+<textarea name="guidance" id="guidance" aria-label="Guidance for every agent"></textarea><div class="mut small">Leave empty to use the default, shown in grey.</div>
+</div></details>
+<details class="plat" id="slimits"><summary><span class="plogo" style="background:var(--mut)"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 6v6l4 2"/></svg></span><span class="ptitle"><b>Limits and timing</b><span class="psub">Polling, timeouts and how much agents can send</span></span><span class="chev" aria-hidden="true"></span></summary><div class="pbody">
 <div class="row">
 <div><label>Poll interval (ms)</label><input type="number" name="poll_interval_ms" min="500"></div>
 <div><label>Agent timeout (s)</label><input type="number" name="peer_ttl_s" min="5"></div>
 <div><label>Max reply hops</label><input type="number" name="max_hops" min="1"></div>
 <div><label>Messages per minute per agent</label><input type="number" name="rate_limit_per_min" min="1"></div>
 </div>
-<div class="check"><input type="checkbox" name="auto_wake_idle" id="aw"><label for="aw" style="margin:0">Wake idle agents when a message arrives</label></div>
-<div class="check"><input type="checkbox" name="inject_while_busy" id="ib"><label for="ib" style="margin:0">Deliver into a running turn</label></div>
-<div class="row"><div><label for="wf">Wake an idle agent for</label><select name="wake_for" id="wf" style="width:100%"><option value="needed">Questions, tasks, your messages and answers (saves tokens)</option><option value="all">Every message</option></select></div>
-<div><label for="wd">Wait before waking for another agent's message (s)</label><input type="number" name="wake_delay_s" id="wd" min="0" max="120"></div></div>
-<div class="mut small">Each wake-up is a full turn that re-reads the agent's context. Waiting a few seconds lets messages that arrive together share one turn; your own messages never wait.</div>
-<div class="check"><input type="checkbox" name="roster_in_prompt" id="rp"><label for="rp" style="margin:0">Show each agent the live agent list when it changes</label></div>
-<div class="check"><input type="checkbox" name="auto_summary" id="as"><label for="as" style="margin:0">Keep agent summaries current automatically</label></div>
-<div class="row"><div><label>Summary model</label><input type="text" name="summary_model"></div><div></div></div>
-<div class="check"><input type="checkbox" name="auto_approve_all" id="aaa"><label for="aaa" style="margin:0">Let every agent start agents and schedules without asking me</label></div>
-<div class="mut small">You're still told on Discord when one does. To allow only some agents, leave this off and turn it on in an agent's Controls tab.</div>
-<div class="check"><input type="checkbox" name="clear_between_tasks" id="cbt"><label for="cbt" style="margin:0">Agents clear their own context after each task, saving notes to memory first</label></div>
-<div class="row"><div><label for="cnt">Ask an agent to save and clear once its context passes (tokens, 0 for never)</label><input type="number" name="clear_nudge_tokens" id="cnt" min="0" step="50000"></div><div></div></div>
-<div class="mut small">A large context is re-read on every turn and drains the usage limit fast. The ask arrives with the agent's next prompt, so it clears at a stopping point.</div>
-<div class="check"><input type="checkbox" name="feedback" id="fbk"><label for="fbk" style="margin:0">Agents report bugs and ideas about peerlink itself, on the Feedback page</label></div>
-<div class="mut small">For people developing peerlink. Agents started after you change this get the report_issue tool, or don't.</div>
-<label>Guidance for every agent</label><textarea name="guidance" id="guidance"></textarea><div class="mut small">Leave empty to use the default, shown in grey.</div>
-<details class="adv"><summary>Other machines</summary>
+</div></details>
+<details class="plat" id="sremote"><summary><span class="plogo" style="background:#4f6b7a"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M5 4h14v6H5zM5 14h14v6H5zM8 7h.01M8 17h.01"/></svg></span><span class="ptitle"><b>Other machines</b><span class="psub">Linking daemons on other computers</span></span><span class="chev" aria-hidden="true"></span></summary><div class="pbody">
 <label>Their daemons, one URL per line</label><textarea name="remotes" style="min-height:60px"></textarea>
 <div class="row"><div><label>Listen host (0.0.0.0 to accept other machines; needs a restart)</label><input type="text" name="listen_host"></div>
-<div><label>Shared token</label><input type="text" name="token"></div></div></details>
-<p><button type="submit">Save</button> <span class="mut small" id="saved"></span></p>
+<div><label>Shared token</label><input type="text" name="token"></div></div>
+</div></details>
+<p class="savebar"><button type="submit">Save</button> <span class="mut small" id="saved"></span></p>
 </form></section>
 
 <section id="controls"><h1>Controls</h1><p class="lead">Sign-in, the key, and the daemon.</p>
-<div class="card">
-<div class="row" style="align-items:center">
-<div><b>Browsers</b><div class="mut small" id="browsers"></div></div>
-<div style="flex:0 0 auto"><button class="ghost" data-act="logout">Sign out here</button> <button class="ghost" data-act="logout-all">Sign out everywhere</button></div>
-</div>
-<div class="row" style="align-items:center;margin-top:12px">
-<div><b>Key</b><div class="mut small">Agents and sign-in links use the key in <span class="mono" id="keypath"></span>. Rotating it signs out every browser.</div></div>
-<div style="flex:0 0 auto"><button class="ghost" data-act="rotate">Rotate key</button></div>
-</div>
-<div class="row" style="align-items:center;margin-top:12px">
-<div><b>Daemon</b><div class="mut small">Agents reconnect by themselves after a restart. Queued messages are kept.</div></div>
-<div style="flex:0 0 auto"><button class="ghost" data-act="restart">Restart daemon</button></div>
-</div>
-<p class="mut small" id="ctlmsg"></p>
-</div></section>
+<div class="plat static"><div class="psum"><span class="plogo" style="background:#3d8fd6"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M20 21a8 8 0 0 0-16 0M12 13a5 5 0 1 0 0-10 5 5 0 0 0 0 10z"/></svg></span><span class="ptitle"><b>Browsers</b><span class="psub"><span id="browsers"></span></span></span><span class="pact"><button class="ghost" data-act="logout">Sign out here</button> <button class="ghost" data-act="logout-all">Sign out everywhere</button></span></div></div>
+<div class="plat static"><div class="psum"><span class="plogo" style="background:#c58a2b"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M15.5 7.5a4.5 4.5 0 1 1-6.36 6.36A4.5 4.5 0 0 1 15.5 7.5zM15.5 7.5 21 2M18 5l2 2"/></svg></span><span class="ptitle"><b>Key</b><span class="psub">Agents and sign-in links use the key in <span class="mono" id="keypath"></span>. Rotating it signs out every browser.</span></span><span class="pact"><button class="ghost" data-act="rotate">Rotate key</button></span></div></div>
+<div class="plat static"><div class="psum"><span class="plogo" style="background:var(--acc)"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 2v10M18.4 6.6a9 9 0 1 1-12.8 0"/></svg></span><span class="ptitle"><b>Daemon</b><span class="psub">Agents reconnect by themselves after a restart. Queued messages are kept.</span></span><span class="pact"><button class="ghost" data-act="restart">Restart daemon</button></span></div></div>
+<p class="mut small" id="ctlmsg"></p></section>
 </main></div>
 <script>
 const $=s=>document.querySelector(s);let cfg={},editing=false,sel='';
@@ -4907,10 +5007,14 @@ function agentPanel(x,others=[]){const sc=cfg.sessions?.[x.id]||{};const setSpac
   const opt=(v,t)=>`<option value="${v}" ${wake===v?'selected':''}>${t}</option>`;
   const tab=x.remote?'about':panelTab;
   return `<div class="card panel${x.leads?' is-lead':''}">
-   <div class="top"><span><span class="dot ${x.busy?'busy':''}"></span><span class="name">${esc(x.name)}</span>${x.remote?` <span class="mut small">@${esc(x.host)}</span>`:''}</span><button class="ghost x" data-close title="Close">✕</button></div>
-   <div class="mono mut" style="margin-top:4px">${esc(tilde(x.cwd))}${x.branch?' · '+esc(x.branch):''} <button class="ghost small copy" data-copy="${esc(x.cwd)}" title="Copy the folder path">Copy</button></div>
+   <div class="top"><span class="phead"><span class="plogo" style="background:${x.leads?'var(--acc)':'var(--mut)'}"><b style="color:#fff">${initial(x.name)}</b></span>
+     <span class="ptitle"><span><span class="name">${esc(x.name)}</span>${x.remote?` <span class="mut small">@${esc(x.host)}</span>`:''}</span>
+     <span class="psub"><span class="dot ${x.busy?'busy':''}"></span>${x.busy?'working':'idle'}${x.busy_since?' '+ago(x.busy_since):''} · <span class="pill">${esc(x.space||'default')}</span>${x.leads?' <span class="pill acc">lead</span>':''}</span></span></span><button class="ghost x" data-close title="Close">✕</button></div>
+   <div class="pwhere"><span class="mono">${esc(tilde(x.cwd))}${x.branch?' · ⎇ '+esc(x.branch):''}</span><button class="ghost small copy" data-copy="${esc(x.cwd)}" title="Copy the folder path">Copy</button></div>
    ${x.role?`<div class="role"><span class="k">Role</span> ${esc(x.role)}</div>`:''}
-   <div style="margin-top:8px">${esc(x.summary)||'<span class="mut">no summary yet</span>'}</div>
+   <div class="pnow"><div class="k small">Now</div>${esc(x.summary)||'<span class="mut">no summary yet</span>'}</div>
+   ${x.remote?'':`<div class="ptiles"><div><span class="k small">Context</span><b>${x.context??'?'}%</b>${x.context!=null?`<span class="cmeter${x.context>=80?' hi':x.context>=50?' mid':''}"><i style="width:${Math.min(100,x.context)}%"></i></span>`:''}</div>
+     <div><span class="k small">Sent / hour</span><b${x.sent_hour>=20?' style="color:var(--warn)"':''}>${x.sent_hour||0}</b></div><div><span class="k small">Open tasks</span><b>${x.open_tasks||0}</b></div></div>`}
    ${x.remote?'':`<div class="ptabs">${[['about','Agent'],['tasks','Tasks'+(x.open_tasks?' · '+x.open_tasks:'')],['details','Details'],['controls','Controls']].map(([k,t])=>`<button class="${tab===k?'on':''}" data-ptab="${k}">${t}</button>`).join('')}</div>`}
    ${tab==='tasks'?panelTasks(x):tab==='details'?`<form id="agentform" data-id="${esc(x.id)}" data-nick="${esc(sc.nickname||'')}" data-space="${esc(setSpace)}" data-role="${esc(sc.role||'')}" data-cwd="${esc(x.cwd)}" data-also="${esc((x.also||[]).join(', '))}">
     <label>Name<input name="nickname" type="text" value="${esc(sc.nickname||'')}" placeholder="${esc(x.name)}"><span class="hint">What other agents call it. Kept for this folder.</span></label>
@@ -4928,11 +5032,11 @@ function agentPanel(x,others=[]){const sc=cfg.sessions?.[x.id]||{};const setSpac
     <div class="threads"><div class="k small">Clear its context</div><div class="small mut">Runs /clear once its current turn ends: a fresh conversation in the same folder, keeping its name, space and role. What it still owes peers is given back to it.</div>
     <div><button class="ghost small" data-clearctx="${esc(x.id)}">Clear context</button> <span class="small ok" id="clearmsg"></span></div></div>
     <div class="threads"><div class="k small">End this agent</div><div class="small mut">It finishes its current turn, then closes. If it's still running a minute later, it's stopped.</div>
-    <div><button class="ghost small danger" data-terminate="${esc(x.id)}" ${x.terminating?'disabled':''}>${x.terminating?'Ending…':'Terminate'}</button></div></div>`:`<div class="facts"><span class="k">Status</span><span>${x.busy?'working':'idle'}${x.busy_since?' for '+ago(x.busy_since):''}${x.muted?' · muted':''}</span>
+    <div><button class="ghost small danger" data-terminate="${esc(x.id)}" ${x.terminating?'disabled':''}>${x.terminating?'Ending…':'Terminate'}</button></div></div>`:`<div class="facts">${x.muted?'<span class="k">Status</span><span>muted</span>':''}
     <span class="k">Space</span><span><span class="pill">${esc(x.space||'default')}</span> <span class="mut">${esc(why)}</span>${(x.also||[]).length?` <span class="mut">· also in</span> ${x.also.map(n=>`<span class="pill">${esc(n)}</span>`).join(' ')}`:''}</span>
     <span class="k">Role</span><span>${role}</span>
-    <span class="k">Messages</span><span>${x.sent_hour||0} sent in the last hour${x.sent_hour>=20?' · <span style="color:var(--warn)">chatty: each one can cost its recipient a turn</span>':''}</span>
-    ${x.context!=null?`<span class="k">Context</span><span>${x.context}% of its window in use${x.context>=80?' · <span style="color:var(--warn)">close to compacting</span>':''}</span>`:''}
+    ${x.sent_hour>=20?'<span class="k">Messages</span><span style="color:var(--warn)">chatty: each one can cost its recipient a turn</span>':''}
+    ${x.context>=80?'<span class="k">Context</span><span style="color:var(--warn)">close to compacting</span>':''}
     <span class="k">Plugin</span><span>${esc(x.plugin||'older than 0.6.6')}${x.stale&&!x.remote?` · <span style="color:var(--warn)">${x.reload_queued?`reload queued ${ago(x.reload_queued)} ago and not run yet: `:''}run /reload-plugins in this agent</span>`:''}</span></div>
    ${others.length?`<div class="threads"><div class="k small">Other sessions in this folder</div>${others.map(o=>`<button class="ghost small" data-sel="${esc(o.id)}" style="text-align:left">${esc(o.name)} · ${o.busy?'working':'idle'}${o.summary?' · '+esc(o.summary.slice(0,60)):''}</button>`).join('')}</div>`:''}
    ${(x.threads&&(x.threads.owes.length||x.threads.waiting.length))?`<div class="threads"><div class="k small">Open requests</div>
@@ -4951,24 +5055,50 @@ function renderMessages(list){
   const inSpace=list.filter(x=>!spaceFilter||spacesOf(x).includes(spaceFilter));
   opts($('#msgagent'),'Everyone',[...new Set(inSpace.flatMap(x=>[x.from_name,x.to_name]))].sort());
   const q=($('#msgq').value||'').trim().toLowerCase();
-  const shown=inSpace.filter(x=>(!msgFilter||x.from_name===msgFilter||x.to_name===msgFilter)&&(!q||[x.text,x.from_name,x.to_name,x.id].join(' ').toLowerCase().includes(q)));
-  const byId=Object.fromEntries(shown.map(x=>[x.id,x]));const kids={};
-  for(const x of shown)if(x.reply_to&&byId[x.reply_to])(kids[x.reply_to]??=[]).push(x);
-  const card=(x,inthread)=>{const st=x.status==='delivered'?'':`<span class="chip ${esc(x.status)}">${esc(x.status)}</span>`;
-    return `<div class="msg${inthread?' inthread':''}" data-msg="${esc(x.id)}"><div class="mh"><b>${esc(x.from_name)}</b><span class="mut">→</span><b>${esc(x.to_name)}</b>
-      ${x.kind==='announcement'?`<span class="chip reply">announcement · ${(x.recipients||[]).length} agents</span>`:''}${x.task?`<span class="chip reply">task ${esc(x.task)}</span>`:x.expects_reply?'<span class="chip">reply expected</span>':''}${x.reply_to?`<span class="chip reply">re ${esc(x.reply_to)}</span>`:''}${st}
-      <span class="when">${new Date(x.ts*1000).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})} · ${esc(x.id)}</span></div>
-      <div class="mt">${esc(x.text)}</div></div>`};
-  const thread=(x,depth)=>card(x,depth>0)+(kids[x.id]||[]).sort((a,b)=>a.ts-b.ts).map(k=>thread(k,depth+1)).join('');
-  const tops=shown.filter(x=>!(x.reply_to&&byId[x.reply_to])).sort((a,b)=>b.ts-a.ts);
-  $('#msgs').innerHTML=tops.map(x=>thread(x,0)).join('')||'<div class="empty">No messages yet.</div>';
-  for(const id of openMsgs)document.querySelector(`[data-msg="${CSS.escape(id)}"]`)?.classList.add('open');
+  const noSched=$('#msgnosched').checked;
+  const shown=inSpace.filter(x=>!(noSched&&x.from==='peerlink'&&/^schedule /.test(x.from_name||''))&&(!msgFilter||x.from_name===msgFilter||x.to_name===msgFilter)&&(!q||[x.text,x.from_name,x.to_name,x.id].join(' ').toLowerCase().includes(q)));
+  // One panel per conversation: the two ends of each message, newest activity first. Opened, it shows the pair's whole
+  // history from the log, oldest first, as a chat reads.
+  const convs=new Map();
+  for(const x of shown){const a=partyOf(x,'from'),b=partyOf(x,'to'),key=[a,b].sort().join('|');
+    const c=convs.get(key)||{key,a:a<b?a:b,b:a<b?b:a,names:{},list:[]};c.names[a]=x.from_name;c.names[b]=x.to_name;c.list.push(x);convs.set(key,c)}
+  const rows=[...convs.values()].map(c=>({...c,last:c.list.reduce((m,x)=>x.ts>m.ts?x:m)})).sort((p,q)=>q.last.ts-p.last.ts);
+  const html=rows.map(c=>{const open=openConvs.has(c.key),hist=convHist[c.key];
+    const pending=c.list.filter(x=>x.status==='queued').length,waiting=c.list.some(x=>x.expects_reply&&!c.list.some(y=>y.reply_to===x.id));
+    const body=!open?'':hist?hist.list.map(x=>convLine(x,c)).join('')+(hist.list.length>=500?'<div class="small mut">Older messages are in ~/.peerlink/messages.jsonl.</div>':''):'<div class="small mut">Loading…</div>';
+    return `<details class="plat conv" data-conv="${esc(c.key)}" data-a="${esc(c.a)}" data-b="${esc(c.b)}" data-last="${esc(c.last.id)}" ${open?'open':''}><summary>
+      <span class="ptitle"><span class="cnames">${partyLabel(c.a,c.names[c.a])}<span class="mut">↔</span>${partyLabel(c.b,c.names[c.b])}</span>
+      <span class="psub">${esc(c.last.from_name)}: ${esc(c.last.text.replace(/\s+/g,' ').slice(0,140))}</span></span>
+      <span class="pstate">${pending?`<span class="pill warn">${pending} queued</span>`:''}${waiting?'<span class="pill">reply expected</span>':''}<span class="small mut">${when(c.last.ts)}</span></span><span class="chev" aria-hidden="true"></span></summary>
+      <div class="pbody convbody">${body}</div></details>`}).join('');
+  $('#msgs').innerHTML=html||'<div class="empty">No messages yet.</div>';
+  document.querySelectorAll('#msgs .convbody').forEach(el=>el.scrollTop=el.scrollHeight);
+  for(const c of rows)if(openConvs.has(c.key)&&(!convHist[c.key]||convHist[c.key].last!==c.last.id))loadConv(c.key,c.a,c.b,c.last.id);
 }
-const openMsgs=new Set();let lastMsgs=[];
-document.addEventListener('click',e=>{const m=e.target.closest('.msg');if(!m)return;m.classList.toggle('open');
-  m.classList.contains('open')?openMsgs.add(m.dataset.msg):openMsgs.delete(m.dataset.msg)});
+const when=ts=>new Date(ts*1000).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
+const partyOf=(x,side)=>{const who=String(x[side]||'');return who.startsWith('discord:')?who:'n:'+String(x[side+'_name']||who).toLowerCase()};
+// A chat channel shows its platform's logo, and its name without "#… on Telegram".
+const partyLabel=(key,name)=>{if(!key.startsWith('discord:'))return `<b>${esc(name)}</b>`;const tg=key.startsWith('discord:tg:');
+  return `<span class="mlogo" style="background:${tg?'#26A5E4':'#5865F2'}">${tg?TG_LOGO:DISCORD_LOGO}</span><b>${esc(String(name).replace(/^#/,'').replace(/ on (Discord|Telegram|Slack)$/,''))}</b>`};
+function convLine(x,c){const st=x.status==='delivered'?'':`<span class="chip ${esc(x.status)}">${esc(x.status)}</span>`;
+  return `<div class="cline${partyOf(x,'from')===c.a?'':' other'}${openLines.has(x.id)?' open':''}" data-line="${esc(x.id)}"><div class="mh"><b>${esc(x.from_name)}</b>
+    ${x.kind==='announcement'?`<span class="chip reply">announcement · ${(x.recipients||[]).length} agents</span>`:''}${x.task?`<span class="chip reply">task ${esc(x.task)}</span>`:x.expects_reply?'<span class="chip">reply expected</span>':''}${x.reply_to?`<span class="chip reply">re ${esc(x.reply_to)}</span>`:''}${st}
+    <span class="when">${when(x.ts)} · ${esc(x.id)}</span></div><div class="mt">${esc(x.text)}</div></div>`}
+const openConvs=new Set(),convHist={},openLines=new Set();
+// Schedule runs are hidden unless you've asked to see them.
+try{$('#msgnosched').checked=localStorage.getItem('pl.msg.nosched')!=='0'}catch(e){$('#msgnosched').checked=true}
+document.addEventListener('click',e=>{const l=e.target.closest('.cline');if(!l||getSelection().toString())return;l.classList.toggle('open');
+  l.classList.contains('open')?openLines.add(l.dataset.line):openLines.delete(l.dataset.line)});let lastMsgs=[];
+async function loadConv(key,a,b,last){convHist[key]=convHist[key]||null;
+  const r=await api(`/api/conversation?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`);convHist[key]={last,list:r.messages||[]};
+  const el=document.querySelector(`details.conv[data-conv="${CSS.escape(key)}"] .convbody`);if(!el)return;
+  const c={a};el.innerHTML=convHist[key].list.map(x=>convLine(x,c)).join('')||'<div class="small mut">Nothing in the log.</div>';el.scrollTop=el.scrollHeight}
+// <details> toggles don't bubble: listened for on the way down.
+document.addEventListener('toggle',e=>{const d=e.target;if(!d.matches?.('details.conv'))return;const k=d.dataset.conv;
+  if(d.open){openConvs.add(k);if(!convHist[k]||convHist[k].last!==d.dataset.last)loadConv(k,d.dataset.a,d.dataset.b,d.dataset.last)}else openConvs.delete(k)},true);
 document.addEventListener('change',e=>{
   if(e.target.id==='msgagent'){msgFilter=e.target.value;renderMessages(lastMsgs)}
+  if(e.target.id==='msgnosched'){try{localStorage.setItem('pl.msg.nosched',e.target.checked?'1':'0')}catch(err){}renderMessages(lastMsgs)}
   if(e.target.id==='msgspace'){spaceFilter=e.target.value;msgFilter='';$('#msgagent').value='';renderMessages(lastMsgs)}});
 // What a render shows; the page is redrawn only when this changes, so it never flickers or loses your place.
 let lastView='',lastPanel='';
@@ -5015,7 +5145,8 @@ async function refresh(force,snap){
   const state=x=>(x.busy?'working':'idle')+(x.busy_since?' '+ago(x.busy_since):'');
   // Messages sent in the last hour, flagged from 20: each one can cost its recipient a turn.
   const rate=x=>x.sent_hour?`<span class="${x.sent_hour>=20?'hot':'mut'}" title="messages sent in the last hour">${x.sent_hour}/h</span>`:'';
-  const ctx=x=>x.context==null?'':`<span class="ctx${x.context>=80?' hi':''}" title="context window in use">${x.context}%</span>`;
+  // Context as a small meter: how full the agent's window is, its number on hover.
+  const ctx=x=>x.context==null?'':`<span class="cmeter${x.context>=80?' hi':x.context>=50?' mid':''}" title="${x.context}% of its context window in use"><i style="width:${Math.min(100,x.context)}%"></i></span>`;
   // A lead is told apart by its outline (and says which team on hover), so every card keeps its context in one place.
   // The badge sits in the name row, left of the context; an offline lead's clear link goes beneath.
   // An implicit lead (it was alone in the space) has a dashed badge, and says so on hover, so the name keeps its room.
@@ -5056,9 +5187,9 @@ async function refresh(force,snap){
   // The list view: the same tree as the chart, one row per agent, each space indented under the lead that speaks for it.
   const lrow=x=>{const where=[short(x.cwd),x.branch?'⎇ '+x.branch:''].filter(Boolean).map(esc).join(' · ');
     return `<${x.offline?'div':'button'} class="lrow${x.leads?' is-lead':''}${x.offline?' off':''}${x.id&&x.id===sel?' sel':''}"${x.offline?'':` data-sel="${esc(x.id)}"`}>
-      <span class="ln"><span title="${esc(x.name)}">${x.offline?'':`<span class="dot ${x.busy?'busy':''}"></span>`}${esc(x.name)}</span>${badge(x)}</span>
-      <span class="lw"${x.role?` title="Role: ${esc(x.role)}"`:''}><span class="mono">${where}</span>${x.summary||x.role?' — '+esc(x.summary||x.role):x.offline?' — offline':''}</span>
-      <span class="lr">${rate(x)}${x.open_tasks?`<span style="color:var(--acc)">${x.open_tasks} task${x.open_tasks>1?'s':''}</span>`:''}${x.offline?'':`<span class="mut">${state(x)}</span>`}${ctx(x)}</span></${x.offline?'div':'button'}>`};
+      <span class="lid"><span class="ln"><span title="${esc(x.name)}">${x.offline?'':`<span class="dot ${x.busy?'busy':''}"></span>`}${esc(x.name)}</span>${badge(x)}</span><span class="lwhere mono" title="${esc(tilde(x.cwd))}">${where}</span></span>
+      <span class="lw"${x.role?` title="Role: ${esc(x.role)}"`:''}>${esc(x.summary||x.role||(x.offline?'offline':''))}</span>
+      <span class="lr">${x.busy&&!x.offline?`<span class="lbusy">${state(x)}</span>`:''}${x.sent_hour>=20?rate(x):''}${x.open_tasks?`<span class="pill acc">${x.open_tasks} task${x.open_tasks>1?'s':''}</span>`:''}${ctx(x)}</span></${x.offline?'div':'button'}>`};
   const lspace=(n,seen)=>{if(seen.has(n))return '';seen.add(n);
     const nested=inside[n]&&inside[n].parent!==n;
     const head=nested?(leads[n]||[]):tops(n);
@@ -5083,8 +5214,13 @@ async function refresh(force,snap){
   // whose queued reload hasn't run in 5 minutes is stuck (a dialog open in its terminal, or no turn ever ending).
   const behind=p.peers.filter(x=>x.stale&&!x.remote);
   const stuck=behind.filter(x=>!x.reload_queued||Date.now()/1000-x.reload_queued>300);
-  $('#stalebar').style.display=stuck.length?'block':'none';
-  $('#stalebar').innerHTML=stuck.length?`<b>${stuck.length} agent${stuck.length>1?'s':''} on an older peerlink plugin</b> (${stuck.map(x=>esc(x.name)+(x.reload_queued?` · reload waiting ${ago(x.reload_queued)}`:'')).join(', ')}). The newer one is installed: run <span class="mono">/reload-plugins</span> in ${stuck.length>1?'each':'it'}, or terminate it.`:'';
+  // One line, the names behind a click. Dismissed, it stays away until the set of agents on an old plugin changes.
+  const staleKey=stuck.map(x=>x.name).sort().join(','),bar=$('#stalebar');let gone='';try{gone=localStorage.getItem('pl.stale.dismissed')||''}catch(e){}
+  bar.style.display=stuck.length&&gone!==staleKey?'flex':'none';bar.dataset.key=staleKey;
+  if(stuck.length&&bar.dataset.shown!==staleKey){bar.dataset.shown=staleKey;
+    bar.innerHTML=`<details><summary><b>${stuck.length} agent${stuck.length>1?'s':''} need${stuck.length>1?'':'s'} <span class="mono">/reload-plugins</span></b> <span class="mut">for the newer peerlink plugin · show which</span></summary>
+      <div class="small">${stuck.map(x=>esc(x.name)+(x.reload_queued?` <span class="mut">(reload waiting ${ago(x.reload_queued)})</span>`:'')).join(', ')}. Run <span class="mono">/reload-plugins</span> in ${stuck.length>1?'each':'it'}, or terminate it.</div></details>
+      <button class="ghost small" data-stalehide title="Hide until another agent needs it">Dismiss</button>`}
   const picked=p.peers.find(x=>x.id===sel);
   const panel=picked?agentPanel(picked,p.peers.filter(y=>y.id!==picked.id&&y.cwd===picked.cwd&&y.space===picked.space)):'';
   // Never redraw the panel under someone editing it.
@@ -5098,6 +5234,8 @@ async function refresh(force,snap){
 }
 // Schedules: what's active or waiting first; the ones that ended fold away. Each says who'd get it now.
 let allSched=[],schedEdit='';
+const openSched=new Set(),SCHED_ICON='<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 6v6l4 2"/></svg>';
+document.addEventListener('toggle',e=>{const d=e.target;if(!d.matches?.('details.sched'))return;d.open?openSched.add(d.dataset.sched):openSched.delete(d.dataset.sched)},true);
 function renderSchedules(force){
   const live=c=>c.status==='active'||c.status==='pending';
   $('#n-sched').textContent=allSched.filter(live).length||'';
@@ -5122,10 +5260,13 @@ function renderSchedules(force){
     <textarea name="prompt" rows="4" style="margin-top:8px;width:100%">${esc(c.prompt)}</textarea>
     <div class="addline" style="margin-top:8px"><label class="check small"><input type="checkbox" name="start" ${c.start?'checked':''}> Start it when it isn&#39;t running</label>
       <button type="submit">Save</button><button type="button" class="ghost" data-schededit="">Cancel</button><span class="small err" data-schedmsg></span></div></form>`
-    :`<div class="card"><div class="addline"><b>${esc(c.id)}</b><span class="chip">${esc(c.status)}</span><span>${esc(c.when_text)}</span><b>${esc(c.agent||tilde(c.folder))}</b>${c.agent?`<span class="mono mut">${esc(tilde(c.folder))}</span>`:''}
-      <span style="margin-left:auto" class="small mut">${c.next_run&&live(c)?'next '+when(c.next_run):''}</span>${actions(c)}</div>
-    <div style="margin-top:6px;white-space:pre-wrap">${esc(c.prompt)}</div>
-    <div class="small mut" style="margin-top:4px">${live(c)?route(c)+' · ':''}by ${esc(c.requester?.name||'you')}${c.runs?` · ran ${c.runs}×, last ${when(c.last_run)}${c.note?': '+esc(c.note):''}`:''}${c.status==='pending'?' · waiting for your approval':''}</div></div>`;
+    :`<details class="plat sched" data-sched="${esc(c.id)}" ${openSched.has(c.id)||c.status==='pending'?'open':''}><summary>
+      <span class="plogo" style="background:${c.status==='active'?'var(--acc)':c.status==='pending'?'var(--warn)':'var(--mut)'}">${SCHED_ICON}</span>
+      <span class="ptitle"><b>${esc(c.agent||tilde(c.folder))} <span class="mut" style="font-weight:400">· ${esc(c.when_text)}</span></b><span class="psub">${esc(c.prompt.replace(/\s+/g,' ').slice(0,160))}</span></span>
+      <span class="pstate">${c.status==='active'?'':`<span class="pill${c.status==='pending'?' warn':''}">${esc(c.status==='pending'?'needs approval':c.status)}</span>`}<span class="small mut">${c.next_run&&live(c)?'next '+when(c.next_run):c.runs?'last '+when(c.last_run):''}</span></span><span class="chev" aria-hidden="true"></span></summary>
+    <div class="pbody" style="padding-top:12px"><div style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(c.prompt)}</div>
+    <div class="small mut" style="margin-top:8px">${esc(c.id)} · ${live(c)?route(c)+' · ':''}by ${esc(c.requester?.name||'you')}${c.agent?` · in <span class="mono">${esc(tilde(c.folder))}</span>`:''}${c.runs?` · ran ${c.runs}×, last ${when(c.last_run)}${c.note?': '+esc(c.note):''}`:''}${c.status==='pending'?' · waiting for your approval':''}</div>
+    <div class="addline" style="margin-top:10px">${actions(c)}</div></div></details>`;
   const on=allSched.filter(live),ended=allSched.filter(c=>!live(c));
   $('#schedlist').innerHTML=(on.map(card).join('')||'<div class="empty">No schedules running.</div>')
     +(ended.length?`<details ${ended.some(c=>c.id===schedEdit)?'open':''}><summary class="small mut" style="cursor:pointer;margin-top:4px">Ended (${ended.length})</summary><div style="display:flex;flex-direction:column;gap:8px;margin-top:8px">${ended.map(card).join('')}</div></details>`:'')}
@@ -5149,6 +5290,13 @@ document.addEventListener('submit',async e=>{if(e.target.id!=='schedform')return
 // The Inbox: one row per thing waiting on you, with the action it needs.
 let inbox=[];
 let seenInbox=null;
+// A list split into panels (Inbox by agent, Feedback by status); one you open or close stays that way across redraws.
+const grpState={};
+document.addEventListener('toggle',e=>{const d=e.target;if(d.matches?.('details.grp'))grpState[d.dataset.grp]=d.open},true);
+const initial=n=>esc(String(n||'?').replace(/^[^a-z0-9]+/i,'').slice(0,1).toUpperCase()||'?');
+const grp=(key,{title,sub='',state='',bg='var(--mut)',icon,open=true},body)=>`<details class="plat grp" data-grp="${esc(key)}" ${(grpState[key]??open)?'open':''}><summary>
+  <span class="plogo" style="background:${bg}">${icon||`<b style="color:#fff">${initial(title)}</b>`}</span><span class="ptitle"><b>${esc(title)}</b><span class="psub">${sub}</span></span>
+  <span class="pstate">${state}</span><span class="chev" aria-hidden="true"></span></summary><div class="pbody grpbody">${body}</div></details>`;
 function renderInbox(){
   $('#n-inbox').textContent=inbox.length||'';
   document.title=inbox.length?`(${inbox.length}) Peerlink`:'Peerlink';
@@ -5162,12 +5310,17 @@ function renderInbox(){
   const sched=i=>i.kind==='approval'&&/^c\d+$/.test(i.id);
   const label={approval:'wants a new agent',task:'task for you',question:'waiting on your answer',feedback:'feedback'};
   const btn=(a,t)=>`<button class="ghost small" data-iact="${a}">${t}</button>`;
-  $('#inboxlist').innerHTML=inbox.map(i=>`<div class="task" data-ikind="${esc(i.kind)}" data-iid="${esc(i.id)}"><div class="mh"><span class="tchip ${i.kind==='task'||i.kind==='approval'?'open':i.kind==='question'?'new':esc(i.type)}">${sched(i)?'wants a schedule':label[i.kind]}</span><b>${esc(i.title)}</b><span class="when">${esc(i.id)} · waiting ${ago(i.since)}</span></div>
+  const item=i=>`<div class="task" data-ikind="${esc(i.kind)}" data-iid="${esc(i.id)}"><div class="mh"><span class="tchip ${i.kind==='task'||i.kind==='approval'?'open':i.kind==='question'?'new':esc(i.type)}">${sched(i)?'wants a schedule':label[i.kind]}</span><b>${esc(i.title)}</b><span class="when">${esc(i.id)} · waiting ${ago(i.since)}</span></div>
     <div class="small mut">from <b>${esc(i.who)}</b>${i.kind==='feedback'?' · '+esc(i.type):''}</div>
     ${(()=>{const more=i.text.trim().startsWith(i.title.trim())?i.text.trim().slice(i.title.trim().length).trim():i.text.trim();return more?`<div class="ftext">${esc(more)}</div>`:''})()}
     <div class="tact">${i.kind==='approval'?`${btn('approve',sched(i)?'Approve':'Approve and start it')}${btn('deny','Deny')}`:i.kind==='task'?`<input class="small" data-itext placeholder="Note for ${esc(i.who)} (optional)">${btn('done','Done')}${btn('failed',"Couldn't do it")}`
       :i.kind==='question'?`<input class="small" data-itext placeholder="Your answer">${btn('reply','Send')}${btn('dismiss','Dismiss')}`
-      :`${btn('accepted','Accept')}${btn('dismissed','Dismiss')}`}</div></div>`).join('')
+      :`${btn('accepted','Accept')}${btn('dismissed','Dismiss')}`}</div></div>`;
+  // By who's asking, the longest waiting first; a lone item still sits in its agent's panel.
+  const byWho=new Map();for(const i of inbox){const k=i.who||'an agent';if(!byWho.has(k))byWho.set(k,[]);byWho.get(k).push(i)}
+  const kinds=l=>[...new Set(l.map(i=>sched(i)?'schedule':i.kind==='approval'?'new agent':i.kind))].join(', ');
+  $('#inboxlist').innerHTML=[...byWho].sort((a,b)=>Math.min(...a[1].map(i=>i.since))-Math.min(...b[1].map(i=>i.since))).map(([who,l])=>grp('inbox:'+who,{title:who,sub:esc(kinds(l)),
+      state:`<span class="pill warn">${l.length}</span><span class="small mut">waiting ${ago(Math.min(...l.map(i=>i.since)))}</span>`,bg:'var(--acc)'},l.map(item).join(''))).join('')
     ||'<div class="empty">Nothing is waiting on you.</div>'}
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-iact]');if(!b)return;const row=b.closest('[data-iid]');
   const text=row.querySelector('[data-itext]')?.value||'';
@@ -5198,14 +5351,18 @@ function renderFeedback(){
   const st=$('#fstatus').value,ty=$('#ftype').value;
   const shown=allFeedback.filter(f=>(!st||f.status===st)&&(!ty||f.type===ty)).sort((a,b)=>b.ts-a.ts);
   const btn=(s,label)=>`<button class="ghost small" data-fact="${s}">${label}</button>`;
-  $('#fblist').innerHTML=shown.map(f=>{const task=allTasks.find(t=>t.id===f.task);let [head,...rest]=f.text.split('\n');
+  const fbRow=f=>{const task=allTasks.find(t=>t.id===f.task);let [head,...rest]=f.text.split('\n');
     // A long first line is cut to a headline; the rest of it reads below.
     if(head.length>120){const cut=head.lastIndexOf(' ',120)>60?head.lastIndexOf(' ',120):120;rest=[head.slice(cut).trim(),...rest];head=head.slice(0,cut)+'…'}
     return `<div class="task" data-fb="${esc(f.id)}"><div class="mh"><span class="tchip ${esc(f.type)}">${esc(f.type)}</span><span class="tchip ${esc(f.status)}">${esc(f.status)}</span><b>${esc(head)}</b><span class="when">${esc(f.id)} · ${ago(f.ts)} ago</span></div>
       <div class="small mut">${esc(f.from_name||'an agent')}${f.space?' · '+esc(f.space):''} · plugin ${esc(f.plugin||'?')}, daemon ${esc(f.daemon||'?')}${task?` · task ${esc(task.id)} ${esc(TSTATE[task.status]||task.status)} with <b>${esc(task.owner)}</b>`:''}</div>
       ${rest.join('\n').trim()?`<div class="ftext">${esc(rest.join('\n').trim())}</div>`:''}
       <div class="tact"><input class="small" data-fnote placeholder="Note (optional)" value="${esc(f.note||'')}">
-      ${f.status==='new'?btn('accepted','Accept')+btn('dismissed','Dismiss'):f.status==='accepted'?btn('done','Mark done')+btn('dismissed','Dismiss'):btn('new','Back to new')}</div></div>`}).join('')
+      ${f.status==='new'?btn('accepted','Accept')+btn('dismissed','Dismiss'):f.status==='accepted'?btn('done','Mark done')+btn('dismissed','Dismiss'):btn('new','Back to new')}</div></div>`};
+  // All statuses: a panel each, the ones that need you open. One status picked: just its list.
+  const FB={new:['New','Not looked at yet','var(--acc)',true],accepted:['Accepted','Handed to the peerlink agent as a task','var(--warn)',true],done:['Done','Fixed or built','var(--ok)',false],dismissed:['Dismissed','Not acted on','var(--mut)',false]};
+  $('#fblist').innerHTML=(st?shown.map(fbRow).join(''):Object.entries(FB).map(([k,[title,sub,bg,open]])=>{const l=shown.filter(f=>f.status===k);
+      return l.length?grp('fb:'+k,{title,sub,bg,open,state:`<span class="pill">${l.length}</span>`},l.map(fbRow).join('')):''}).join(''))
     ||`<div class="empty">${allFeedback.length?'Nothing here.':'No feedback yet.'}</div>`}
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-fact]');if(!b)return;const row=b.closest('[data-fb]');
   const r=await post('/api/issues/'+encodeURIComponent(row.dataset.fb),{status:b.dataset.fact,note:row.querySelector('[data-fnote]').value});
@@ -5361,6 +5518,10 @@ document.addEventListener('click',async e=>{const t=e.target.closest('button');i
 let dState=null,dGuilds=null,dDraft=null,dBusy=false;
 const agentFolders=()=>{const m=new Map();for(const p of livePeers)if(!p.remote&&!m.has(p.cwd))m.set(p.cwd,{cwd:p.cwd,name:p.name,space:p.space});return [...m.values()].sort((a,b)=>a.name.localeCompare(b.name))};
 const folderLabel=cwd=>{const a=agentFolders().find(x=>x.cwd===cwd);return a?`${a.name} · ${a.space}`:`${(cfg.folder_names||{})[cwd]||cwd.split('/').filter(Boolean).pop()||cwd} (not running)`};
+// A channel maps agents by folder and name, so where several share a folder each is its own pick.
+const liveAgents=()=>{const m=new Map();for(const p of livePeers)if(!p.remote&&!m.has(p.cwd+'\t'+p.name))m.set(p.cwd+'\t'+p.name,{cwd:p.cwd,name:p.name,space:p.space});return [...m.values()].sort((a,b)=>a.name.localeCompare(b.name))};
+const entryLabel=e=>{if(!e.name)return folderLabel(e.cwd);const a=liveAgents().find(x=>x.cwd===e.cwd&&x.name.toLowerCase()===e.name.toLowerCase());return a?`${a.name} · ${a.space}`:`${e.name} (not running)`};
+function entrySelect(attrs,placeholder){return `<select ${attrs}><option value="">${placeholder}</option>${liveAgents().map(o=>`<option value="${esc(o.cwd+'\t'+o.name)}">${esc(o.name+' · '+o.space)}</option>`).join('')}</select>`}
 function agentSelect(val,attrs,placeholder){const opts=agentFolders();const extra=val&&!opts.some(o=>o.cwd===val)?[{cwd:val}]:[];
   return `<select ${attrs}><option value="">${placeholder}</option>${[...opts,...extra].map(o=>`<option value="${esc(o.cwd)}" ${o.cwd===val?'selected':''}>${esc(folderLabel(o.cwd))}</option>`).join('')}</select>`}
 function channelSelect(val,attrs){const gs=dGuilds||[];
@@ -5371,26 +5532,36 @@ async function loadDiscord(check){
   if(dGuilds===null){const r=await api('/api/discord/channels');dGuilds=r.guilds||[]}
   if(!dDraft)dDraft={routes:JSON.parse(JSON.stringify(dState.routes||[])),dm:dState.dm||''};
   renderDiscord()}
+const DISCORD_LOGO='<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#fff" d="M20.317 4.37a19.79 19.79 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.865-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.74 19.74 0 0 0 3.677 4.37a.07.07 0 0 0-.032.028C.533 9.046-.32 13.58.099 18.058a.082.082 0 0 0 .031.056 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.1 13.1 0 0 1-1.872-.892.077.077 0 0 1-.008-.128c.126-.094.252-.192.372-.291a.074.074 0 0 1 .078-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.009c.12.099.246.198.373.292a.077.077 0 0 1-.007.128 12.3 12.3 0 0 1-1.873.891.077.077 0 0 0-.041.107c.36.698.772 1.363 1.225 1.993a.076.076 0 0 0 .084.029 19.84 19.84 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.331c-1.183 0-2.157-1.086-2.157-2.42 0-1.333.956-2.418 2.157-2.418 1.21 0 2.176 1.095 2.157 2.419 0 1.333-.956 2.419-2.157 2.419zm7.975 0c-1.183 0-2.157-1.086-2.157-2.42 0-1.333.955-2.418 2.157-2.418 1.21 0 2.176 1.095 2.157 2.419 0 1.333-.946 2.419-2.157 2.419z"/></svg>',TG_LOGO='<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#fff" d="M4.6 11.6l13.1-5.05c.6-.22 1.13.15.93 1.06l-2.23 10.5c-.17.75-.6.93-1.23.58l-3.4-2.5-1.64 1.58c-.18.18-.33.33-.68.33l.24-3.46 6.3-5.69c.27-.24-.06-.38-.43-.14l-7.78 4.9-3.35-1.05c-.73-.23-.74-.73.15-1.07z"/></svg>';
+// The Channels page's panels: open by default when there's something to do; your own opening or closing one sticks.
+const panelSet=new Set();
+function panels(want){for(const [id,open] of Object.entries(want)){const el=document.getElementById(id);if(!el||panelSet.has(id))continue;panelSet.add(id);
+  let saved=null;try{saved=localStorage.getItem('pl.panel.'+id)}catch(e){}
+  el.open=saved===null?open:saved==='1';el.addEventListener('toggle',()=>{try{localStorage.setItem('pl.panel.'+id,el.open?'1':'0')}catch(e){}})}}
+const platState=(configured,state,label,user,error)=>!configured?'<span class="pill">Not set up</span>'
+  :`<span class="dstate"><span class="dot ${state==='online'?'':'busy'}"></span><b>${esc(label)}</b>${user?` <span class="mut">as ${esc(user)}</span>`:''}${error?` · <span class="err">${esc(error)}</span>`:''}</span>`;
 function renderDiscord(){if(!dState)return;const d=dState,invited=(dGuilds||[]).some(g=>g.id!=='telegram'),mapped=(d.routes||[]).some(r=>(r.agents||[]).length);
   const tgChats=(dGuilds||[]).some(g=>g.id==='telegram'&&g.channels.length);
   $('#n-discord').textContent=d.state==='online'?'on':'';
   const label={online:'Online',connecting:'Connecting…',error:'Error',off:'Turned off',unconfigured:'Not set up'}[d.state]||d.state;
-  $('#dstatus').innerHTML=d.configured?`<div class="dstate"><span class="dot ${d.state==='online'?'':'busy'}"></span><b>${esc(label)}</b>${d.user?` as ${esc(d.user)}`:''}${d.error?` · <span class="err">${esc(d.error)}</span>`:''}</div>`:'';
+  $('#dstatus').innerHTML=platState(d.configured,d.state,label,d.user,d.error);
+  const nmap=(d.routes||[]).filter(r=>(r.agents||[]).length).length;$('#mapstatus').innerHTML=nmap?`<span class="pill">${nmap} mapped</span>`:'';
+  panels({pdiscord:!d.configured||d.state==='error',pmap:true,popts:false});
   $('#dstep1').classList.toggle('done',d.configured);$('#dstep2').classList.toggle('done',d.configured&&invited);$('#dstep3').classList.toggle('done',(d.routes||[]).some(r=>!r.channel_id.startsWith('tg:')&&(r.agents||[]).length));
   $('#tstep3').classList.toggle('done',(d.routes||[]).some(r=>r.channel_id.startsWith('tg:')&&(r.agents||[]).length));
   $('#dstep1b').innerHTML=d.configured?`<p class="meta">Token <span class="mono">${esc(d.token_hint)}</span> saved. <button class="ghost small" data-dact="forget">Disconnect</button></p>`
    :`<p class="meta">On the <a href="https://discord.com/developers/applications" target="_blank" rel="noreferrer">Developer Portal ↗</a>, click <b>New Application</b> and give it a name. Open <b>Bot</b>, click <b>Reset Token</b>, and copy it. Optional: on the same page, turn on <b>Message Content Intent</b> so you can talk to it without @mentioning it every time.</p>
      <form class="addline" id="dtoken"><input type="password" class="mono grow" autocomplete="off" spellcheck="false" placeholder="Bot token" name="token"><button type="submit" ${dBusy?'disabled':''}>${dBusy?'Checking…':'Connect'}</button></form><p class="small err" id="dtokerr"></p>`;
-  $('#dstep2b').innerHTML=!d.configured?'':`<p class="meta">${invited?`In ${dGuilds.map(g=>esc(g.name)).join(', ')}. `:`Pick your server on Discord's page, then come back here. This step completes on its own. `}
+  $('#dstep2b').innerHTML=!d.configured?'':`<p class="meta">${invited?`In ${dGuilds.filter(g=>g.id!=='telegram').map(g=>esc(g.name)).join(', ')}. `:`Pick your server on Discord's page, then come back here. This step completes on its own. `}
     ${d.invite_url?`<a href="${esc(d.invite_url)}" target="_blank" rel="noreferrer">${invited?'Invite to another server ↗':'<button>Invite the bot ↗</button>'}</a>`:''}</p>`;
   if(!(d.configured&&invited)&&!tgChats){$('#dstep3b').innerHTML='<p class="meta">Set up Discord or Telegram above; the channels and chats its bot can see are mapped to agents here.</p>';$('#dmore').innerHTML='';return}
   const rows=dDraft.routes.map((r,i)=>`<tr>
-    <td>${channelSelect(r.channel_id,`data-droute="${i}" data-dfield="channel_id"`)}</td>
-    <td><div class="kinds">${(r.agents||[]).map((a,j)=>`<div class="addline small"><b>${esc(folderLabel(a.cwd))}</b>
+    <td><div class="addline" style="flex-wrap:nowrap">${r.channel_id?`<span class="mlogo" title="${r.channel_id.startsWith('tg:')?'Telegram':'Discord'}" style="background:${r.channel_id.startsWith('tg:')?'#26A5E4':'#5865F2'}">${r.channel_id.startsWith('tg:')?TG_LOGO:DISCORD_LOGO}</span>`:''}${channelSelect(r.channel_id,`data-droute="${i}" data-dfield="channel_id"`)}</div></td>
+    <td><div class="kinds">${(r.agents||[]).map((a,j)=>`<div class="addline small"><b>${esc(entryLabel(a))}</b>
         <label class="small"><input type="checkbox" data-dflag="${i}:${j}:receives" ${a.receives?'checked':''}> Receives</label>
         <label class="small"><input type="checkbox" data-dflag="${i}:${j}:sends" ${a.sends?'checked':''}> Sends</label>
         <button class="ghost small" title="Remove" data-dunagent="${i}:${j}">✕</button></div>`).join('')}
-      ${agentSelect('',`data-daddagent="${i}"`,'+ add agent')}</div></td>
+      ${entrySelect(`data-daddagent="${i}"`,'+ add agent')}</div></td>
     <td style="white-space:nowrap"><button class="ghost small" data-dtest="${esc(r.channel_id)}" ${r.channel_id&&(r.channel_id.startsWith('tg:')?tState?.state:d.state)==='online'?'':'disabled'}>Send a test</button> <button class="ghost small" data-dremove="${i}" title="Remove this channel">✕</button></td></tr>`).join('');
   $('#dstep3b').innerHTML=`<p class="meta">Your messages go to the first agent that receives. To reach another that receives, start with its name and a colon: <span class="mono">storefront: how's the build?</span> An agent that sends posts its messages and updates there; any agent answers you where you asked.</p>
     <table class="dmap"><thead><tr><th>Channel</th><th>Agents</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="3" class="mut small">No channels mapped yet.</td></tr>'}</tbody></table>
@@ -5418,6 +5589,8 @@ function renderDiscord(){if(!dState)return;const d=dState,invited=(dGuilds||[]).
     <div class="addline"><input id="dbots" class="mono" placeholder="e.g. 1562000000000000000" value="${esc((d.trusted_bots||[]).join(', '))}" data-dbots style="flex:1;min-width:0"></div>
     <h2>Discord bot</h2>
     <label class="check"><input type="checkbox" data-dact="enabled" ${d.enabled?'checked':''}> Bot running</label>`:''}`}
+document.addEventListener('click',e=>{if(!e.target.closest('[data-stalehide]'))return;const bar=$('#stalebar');
+  try{localStorage.setItem('pl.stale.dismissed',bar.dataset.key)}catch(e){}bar.style.display='none'});
 document.addEventListener('click',e=>{if(e.target.closest('[data-limresume]'))post('/api/limit/resume',{}).then(()=>refresh(true))});
 document.addEventListener('submit',async e=>{if(e.target.id!=='dtoken')return;e.preventDefault();const t=e.target.token.value.trim();if(!t)return;
   dBusy=true;renderDiscord();const r=await api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({token:t})});dBusy=false;
@@ -5426,7 +5599,8 @@ document.addEventListener('change',e=>{const t=e.target;if(!dDraft)return;
   if(t.dataset.droute!==undefined){dDraft.routes[+t.dataset.droute][t.dataset.dfield]=t.value;renderDiscord()}
   if(t.dataset.daddagent!==undefined&&t.value){const r=dDraft.routes[+t.dataset.daddagent];r.agents=r.agents||[];
     // The first agent added receives and sends; after that, one that only posts here is the likelier want.
-    if(!r.agents.some(a=>a.cwd===t.value))r.agents.push({cwd:t.value,receives:!r.agents.some(a=>a.receives),sends:true});renderDiscord()}
+    const [cwd,name]=t.value.split('\t');
+    if(!r.agents.some(a=>a.cwd===cwd&&(a.name||'').toLowerCase()===name.toLowerCase()))r.agents.push({cwd,name,receives:!r.agents.some(a=>a.receives),sends:true});renderDiscord()}
   if(t.dataset.dflag){const [i,j,f]=t.dataset.dflag.split(':');dDraft.routes[+i].agents[+j][f]=t.checked;renderDiscord()}
   if(t.dataset.ddm!==undefined){dDraft.dm=t.value}
   if(t.dataset.dopt){const v=t.type==='checkbox'?t.checked:Number(t.value);api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({[t.dataset.dopt]:v})}).then(()=>loadDiscord())}
@@ -5451,9 +5625,13 @@ let tState=null,tBusy=false;
 async function loadTelegram(){const before=JSON.stringify(Object.keys(tState?.chats||{}));tState=await api('/api/telegram');renderTelegram();
   // A chat the bot heard from for the first time joins the mapping's picker.
   if(before!==JSON.stringify(Object.keys(tState.chats||{}))&&dState){dGuilds=null;loadDiscord()}}
+let tShown=null;
 function renderTelegram(){const t=tState;if(!t)return;
   const label={online:'Online',connecting:'Connecting…',error:'Error',off:'Turned off',unconfigured:'Not set up'}[t.state]||t.state;
-  $('#tstatus').innerHTML=t.configured?`<div class="dstate"><span class="dot ${t.state==='online'?'':'busy'}"></span><b>${esc(label)}</b>${t.user?` as @${esc(t.user)}`:''}${t.error?` · <span class="err">${esc(t.error)}</span>`:''}</div>`:'';
+  $('#tgstatus').innerHTML=platState(t.configured,t.state,label,t.user&&'@'+t.user,t.error)+((t.strangers||[]).length?` <span class="pill warn">${t.strangers.length} waiting</span>`:'');
+  // The mapping's test buttons follow the bot's state; redrawn only when it changes, not on every poll mid-edit.
+  if(dState&&t.state!==tShown){tShown=t.state;renderDiscord()}
+  panels({ptelegram:!t.configured||t.state==='error'||(t.strangers||[]).length>0});
   $('#tstep1').classList.toggle('done',t.configured);$('#tstep2').classList.toggle('done',t.configured&&(t.allowed_users||[]).length>0);
   $('#tstep1b').innerHTML=t.configured?`<p class="meta">Token <span class="mono">${esc(t.token_hint)}</span> saved. <label class="small"><input type="checkbox" data-tact="enabled" ${t.enabled?'checked':''}> Bot running</label> <button class="ghost small" data-tact="forget">Disconnect</button></p>`
    :`<p class="meta">In Telegram, message <a href="https://t.me/BotFather" target="_blank" rel="noreferrer">@BotFather ↗</a>, send <span class="mono">/newbot</span>, and pick a name and a username. It answers with a token: paste it here.</p>
@@ -5484,6 +5662,7 @@ window.addEventListener('focus',()=>{if(location.hash==='#channels'&&dState?.con
 window.addEventListener('hashchange',()=>{if(location.hash==='#discord')location.hash='#channels';if(location.hash==='#channels'){loadDiscord();loadTelegram()}});
 
 async function loadCfg(){cfg=await api('/api/config');const f=$('#cfg');
+  panels({swake:true,sctx:true,sapprove:true,ssee:false,sguide:false,slimits:false,sremote:!!(cfg.remotes||[]).length});
   for(const el of f.elements){if(!el.name)continue;const v=cfg[el.name];
     if(el.type==='checkbox')el.checked=!!v;else if(el.name==='remotes')el.value=(v||[]).join('\n');else el.value=v??''}
   $('#guidance').placeholder=cfg.default_guidance||'';
