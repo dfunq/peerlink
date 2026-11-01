@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.64'
+const DAEMON_VERSION = '0.8.65'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -65,7 +65,7 @@ type ClientConfig = {
 type Previous = { summary: string; name: string; ts: number } | null
 
 const SUMMARY_SYSTEM =
-  'You keep the one-line status other Claude agents see for this agent. In at most 200 characters say what it is working on, in which repo or service, and what it could answer questions about. Plain text, no preamble, no quotes. If the current status is still accurate, reply exactly UNCHANGED.'
+  'You keep the status other Claude agents see for this agent. Reply with two lines. Line 1: a headline of at most 6 words saying what it is doing now, like "Releasing PixelGrid v1.6.21". Line 2: in at most 200 characters, what it is working on, in which repo or service, and what it could answer questions about. Plain text, no preamble, no quotes, no labels. If the current status is still accurate, reply exactly UNCHANGED.'
 
 // Summaries cost a model call, and every change is resent to each peer: refresh only this often.
 const SUMMARY_EVERY_TURNS = 8
@@ -776,9 +776,9 @@ async function rosterContext($: EngineInterface) {
     : 'peerlink: no other agents are live in your space now.'
 }
 
-async function postSummary($: EngineInterface, next: string, kind: 'seed' | 'model' | 'manual') {
+async function postSummary($: EngineInterface, next: string, kind: 'seed' | 'model' | 'manual', headline = '') {
   summary = next.slice(0, 300)
-  await call($, 'POST', `/api/sessions/${sessionId}/heartbeat`, { summary, summary_kind: kind })
+  await call($, 'POST', `/api/sessions/${sessionId}/heartbeat`, { summary, headline: headline.slice(0, 80), summary_kind: kind })
 }
 
 function clip(text: string, n: number) {
@@ -871,7 +871,7 @@ async function summarize($: EngineInterface) {
       model: cfg.summary_model || 'haiku',
       system: SUMMARY_SYSTEM,
       prompt: `Directory: ${await $.session.cwd()}\nCurrent status: ${summary || '(none)'}\n\nRecent conversation:\n${transcript}`,
-      maxTokens: 100,
+      maxTokens: 140,
       effort: 'low',
       timeoutMs: 20000,
     })
@@ -879,8 +879,11 @@ async function summarize($: EngineInterface) {
     lastSummaryAt = now
     turnsSinceSummary = 0
     hasSummarizedTalk = true
-    const next = done.text.trim()
-    if (next && next !== 'UNCHANGED' && next !== summary) await postSummary($, next, 'model')
+    // The headline, then the summary; a model that answers in one line gives a summary alone.
+    const lines = done.text.trim().split('\n').map(l => l.trim()).filter(Boolean)
+    const next = lines.length > 1 ? lines.slice(1).join(' ') : (lines[0] ?? '')
+    const headline = lines.length > 1 ? lines[0] : ''
+    if (next && next !== 'UNCHANGED' && next !== summary) await postSummary($, next, 'model', headline)
   } catch {
   } finally {
     summarizing = false
