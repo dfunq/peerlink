@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.67"
+VERSION = "0.8.68"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -4720,7 +4720,11 @@ details.plat[open] .chev{transform:rotate(45deg)}details.plat .pbody{padding:0 1
 details.conv{max-width:none;margin:0}details.conv .cnames{display:flex;align-items:center;gap:6px;flex-wrap:wrap}details.conv .psub{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 details.conv .pstate{flex-wrap:nowrap}.convbody{display:flex;flex-direction:column;gap:8px;padding-top:12px!important;max-height:70vh;overflow:auto}
 .cline{border-left:3px solid var(--acc);padding:4px 0 4px 10px}.cline.other{border-left-color:var(--line)}.cline .mh{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;font-size:13px}
-.cline .mh .when{margin-left:auto;color:var(--mut);font-size:12px}.cline .mt{margin-top:4px;white-space:pre-wrap;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:5;-webkit-box-orient:vertical;overflow:hidden;cursor:pointer}.cline.open .mt{display:block;cursor:auto}.cline .chip{font-size:11px;border-radius:999px;padding:1px 8px;border:1px solid var(--line);color:var(--mut)}
+.cline .mh .when{margin-left:auto;color:var(--mut);font-size:12px}.cline .mt{margin-top:4px;overflow-wrap:anywhere;max-height:7.4em;overflow:hidden;cursor:pointer;-webkit-mask-image:linear-gradient(#000 70%,transparent);mask-image:linear-gradient(#000 70%,transparent)}.cline.open .mt{max-height:none;cursor:auto;-webkit-mask-image:none;mask-image:none}
+.md{overflow-wrap:anywhere;line-height:1.45}.md p{margin:0 0 6px}.md>:last-child{margin-bottom:0}.md ul,.md ol{margin:0 0 6px;padding-left:20px}.md li{margin:1px 0}
+.md code{font-family:ui-monospace,Menlo,monospace;font-size:.88em;background:var(--well);border:1px solid var(--line);border-radius:4px;padding:0 4px}
+.md pre{margin:0 0 6px;background:var(--well);border:1px solid var(--line);border-radius:6px;padding:8px 10px;overflow:auto;max-height:20em}.md pre code{border:0;padding:0;background:none}
+.md blockquote{margin:0 0 6px;padding-left:10px;border-left:3px solid var(--line);color:var(--mut)}.md .mdh{font-weight:600}.md a{color:var(--acc)}.cline .chip{font-size:11px;border-radius:999px;padding:1px 8px;border:1px solid var(--line);color:var(--mut)}
 details.plat .pbody h2{font-size:14px;margin:16px 0 6px}.pill.warn{color:var(--warn);border-color:var(--warn)}
 .steps{list-style:none;padding:0;margin:8px 0 16px;display:flex;flex-direction:column;gap:12px;max-width:820px}
 .step{display:flex;gap:12px;align-items:flex-start;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
@@ -4759,8 +4763,8 @@ details.plat .pbody h2{font-size:14px;margin:16px 0 6px}.pill.warn{color:var(--w
 .mlist{display:flex;flex-direction:column;gap:8px}
 .task{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px}
 .task .mh{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;font-size:13px}.task .mh .when{margin-left:auto;color:var(--mut);font-size:12px}
-.task .note{margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}.task .tact{margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}.task .tact select{width:auto}
-.task.sub{margin-left:24px}button.danger{color:var(--bad);border-color:var(--bad)}nav .count.hot:not(:empty){background:var(--acc);color:#fff;border-radius:999px;padding:1px 7px;font-weight:600}.task .ftext{margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;max-height:9em;overflow:auto}
+.task .note{margin-top:6px;overflow-wrap:anywhere;font-size:13px}.task .tact{margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}.task .tact select{width:auto}
+.task.sub{margin-left:24px}button.danger{color:var(--bad);border-color:var(--bad)}nav .count.hot:not(:empty){background:var(--acc);color:#fff;border-radius:999px;padding:1px 7px;font-weight:600}.ititle{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}.task .ftext{margin-top:6px;overflow-wrap:anywhere;font-size:13px;max-height:16em;overflow:auto}
 .task .tact input{flex:1;min-width:160px}.tchip.new,.tchip.bug{color:var(--warn);border-color:var(--warn)}.tchip.accepted,.tchip.idea{color:var(--acc);border-color:var(--acc)}.tchip{font-size:11px;border-radius:999px;padding:1px 8px;border:1px solid var(--line);color:var(--mut)}
 .fl[hidden]{display:none}.seg{display:inline-flex}.seg button{border-radius:0}.seg button:first-child{border-radius:8px 0 0 8px}.seg button:last-child{border-radius:0 8px 8px 0;margin-left:-1px}.seg button.on{background:var(--acc);color:#fff;border-color:var(--acc)}
 .board{display:grid;grid-template-columns:repeat(4,minmax(0,1fr)) auto;gap:10px;align-items:start;margin-bottom:14px}
@@ -4990,6 +4994,29 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <script>
 const $=s=>document.querySelector(s);let cfg={},editing=false,sel='';
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// Markdown as agents write it, made safe: everything is escaped first, then a small set of marks become tags.
+// Links open only http(s) URLs. plain() drops the marks, for one-line previews and titles.
+const md=src=>{const keep=[];const hold=h=>{keep.push(h);return `\u0001${keep.length-1}\u0001`};
+  const inline=s=>{s=s.replace(/`([^`\n]+)`/g,(_,c)=>hold(`<code>${esc(c)}</code>`))
+      .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g,(_,l,u)=>hold(`<a href="${esc(u)}" target="_blank" rel="noreferrer">${esc(l)}</a>`))
+      .replace(/https?:\/\/[^\s<>"'`]+[^\s<>"'`.,;:!?)\]]/g,u=>hold(`<a href="${esc(u)}" target="_blank" rel="noreferrer">${esc(u)}</a>`));
+    return esc(s).replace(/\*\*(?=\S)([^*\n]+?)\*\*/g,'<b>$1</b>').replace(/__(?=\S)([^_\n]+?)__/g,'<b>$1</b>')
+      .replace(/(^|[^\w*])\*(?=\S)([^*\n]+?)\*(?!\w)/g,'$1<i>$2</i>').replace(/(^|[^\w_])_(?=\S)([^_\n]+?)_(?!\w)/g,'$1<i>$2</i>')
+      .replace(/~~(?=\S)([^~\n]+?)~~/g,'<s>$1</s>')};
+  let t=String(src??'').replace(/\r/g,'').replace(/```[^\n]*\n?([\s\S]*?)(```|$)/g,(_,c)=>`\n${hold(`<pre><code>${esc(c.replace(/\n$/,''))}</code></pre>`)}\n`);
+  const out=[];let list=null,para=[];
+  const flush=()=>{if(para.length){out.push(`<p>${para.join('<br>')}</p>`);para=[]}if(list){out.push(`<${list.tag}${list.start>1?` start="${list.start}"`:''}>${list.items.map(i=>`<li>${i}</li>`).join('')}</${list.tag}>`);list=null}};
+  for(const line of t.split('\n')){let m;
+    if(!line.trim()){flush();continue}
+    if(/^\u0001\d+\u0001$/.test(line.trim())){flush();out.push(line.trim());continue}
+    if((m=line.match(/^\s{0,3}#{1,6}\s+(.*)$/))){flush();out.push(`<p class="mdh">${inline(m[1])}</p>`);continue}
+    if((m=line.match(/^\s*(?:[-*+]|(\d+)[.)])\s+(.*)$/))){const tag=m[1]?'ol':'ul';if(para.length||list&&list.tag!==tag)flush();
+      list=list||{tag,items:[],start:+m[1]||1};list.items.push(inline(m[2]));continue}
+    if((m=line.match(/^\s*>\s?(.*)$/))){flush();out.push(`<blockquote>${inline(m[1])}</blockquote>`);continue}
+    if(list&&/^\s{2,}\S/.test(line)){list.items[list.items.length-1]+='<br>'+inline(line.trim());continue}
+    if(list)flush();para.push(inline(line))}
+  flush();return out.join('').replace(/\u0001(\d+)\u0001/g,(_,i)=>keep[+i])};
+const plain=s=>String(s??'').replace(/```[^\n]*\n?/g,'').replace(/\[([^\]\n]+)\]\([^)\s]+\)/g,'$1').replace(/(\*\*|__|~~|`)/g,'').replace(/^\s{0,3}#{1,6}\s+/gm,'').replace(/\s+/g,' ').trim();
 const J={'Content-Type':'application/json'};
 const tilde=p=>String(p||'').replace(/^\/Users\/[^/]+/,'~');
 // Signed out (the cookie expired, or every browser was signed out): say so and stop polling, rather than reload.
@@ -5077,7 +5104,7 @@ function renderMessages(list){
     const body=!open?'':hist?hist.list.map(x=>convLine(x,c)).join('')+(hist.list.length>=500?'<div class="small mut">Older messages are in ~/.peerlink/messages.jsonl.</div>':''):'<div class="small mut">Loading…</div>';
     return `<details class="plat conv" data-conv="${esc(c.key)}" data-a="${esc(c.a)}" data-b="${esc(c.b)}" data-last="${esc(c.last.id)}" ${open?'open':''}><summary>
       <span class="ptitle"><span class="cnames">${partyLabel(c.a,c.names[c.a])}<span class="mut">↔</span>${partyLabel(c.b,c.names[c.b])}</span>
-      <span class="psub">${esc(c.last.from_name)}: ${esc(c.last.text.replace(/\s+/g,' ').slice(0,140))}</span></span>
+      <span class="psub">${esc(c.last.from_name)}: ${esc(plain(c.last.text).slice(0,140))}</span></span>
       <span class="pstate">${pending?`<span class="pill warn">${pending} queued</span>`:''}${waiting?'<span class="pill">reply expected</span>':''}<span class="small mut">${when(c.last.ts)}</span></span><span class="chev" aria-hidden="true"></span></summary>
       <div class="pbody convbody">${body}</div></details>`}).join('');
   $('#msgs').innerHTML=html||'<div class="empty">No messages yet.</div>';
@@ -5092,11 +5119,11 @@ const partyLabel=(key,name)=>{if(!key.startsWith('discord:'))return `<b>${esc(na
 function convLine(x,c){const st=x.status==='delivered'?'':`<span class="chip ${esc(x.status)}">${esc(x.status)}</span>`;
   return `<div class="cline${partyOf(x,'from')===c.a?'':' other'}${openLines.has(x.id)?' open':''}" data-line="${esc(x.id)}"><div class="mh"><b>${esc(x.from_name)}</b>
     ${x.kind==='announcement'?`<span class="chip reply">announcement · ${(x.recipients||[]).length} agents</span>`:''}${x.task?`<span class="chip reply">task ${esc(x.task)}</span>`:x.expects_reply?'<span class="chip">reply expected</span>':''}${x.reply_to?`<span class="chip reply">re ${esc(x.reply_to)}</span>`:''}${st}
-    <span class="when">${when(x.ts)} · ${esc(x.id)}</span></div><div class="mt">${esc(x.text)}</div></div>`}
+    <span class="when">${when(x.ts)} · ${esc(x.id)}</span></div><div class="mt md">${md(x.text)}</div></div>`}
 const openConvs=new Set(),convHist={},openLines=new Set();
 // Schedule runs are hidden unless you've asked to see them.
 try{$('#msgnosched').checked=localStorage.getItem('pl.msg.nosched')!=='0'}catch(e){$('#msgnosched').checked=true}
-document.addEventListener('click',e=>{const l=e.target.closest('.cline');if(!l||getSelection().toString())return;l.classList.toggle('open');
+document.addEventListener('click',e=>{const l=e.target.closest('.cline');if(!l||e.target.closest('a')||getSelection().toString())return;l.classList.toggle('open');
   l.classList.contains('open')?openLines.add(l.dataset.line):openLines.delete(l.dataset.line)});let lastMsgs=[];
 async function loadConv(key,a,b,last){convHist[key]=convHist[key]||null;
   const r=await api(`/api/conversation?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`);convHist[key]={last,list:r.messages||[]};
@@ -5276,7 +5303,7 @@ function renderSchedules(force){
       <span class="plogo" style="background:${c.status==='active'?'var(--acc)':c.status==='pending'?'var(--warn)':'var(--mut)'}">${SCHED_ICON}</span>
       <span class="ptitle"><b>${esc(c.agent||tilde(c.folder))} <span class="mut" style="font-weight:400">· ${esc(c.when_text)}</span></b><span class="psub">${esc(c.prompt.replace(/\s+/g,' ').slice(0,160))}</span></span>
       <span class="pstate">${c.status==='active'?'':`<span class="pill${c.status==='pending'?' warn':''}">${esc(c.status==='pending'?'needs approval':c.status)}</span>`}<span class="small mut">${c.next_run&&live(c)?'next '+when(c.next_run):c.runs?'last '+when(c.last_run):''}</span></span><span class="chev" aria-hidden="true"></span></summary>
-    <div class="pbody" style="padding-top:12px"><div style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(c.prompt)}</div>
+    <div class="pbody" style="padding-top:12px"><div class="md">${md(c.prompt)}</div>
     <div class="small mut" style="margin-top:8px">${esc(c.id)} · ${live(c)?route(c)+' · ':''}by ${esc(c.requester?.name||'you')}${c.agent?` · in <span class="mono">${esc(tilde(c.folder))}</span>`:''}${c.runs?` · ran ${c.runs}×, last ${when(c.last_run)}${c.note?': '+esc(c.note):''}`:''}${c.status==='pending'?' · waiting for your approval':''}</div>
     <div class="addline" style="margin-top:10px">${actions(c)}</div></div></details>`;
   const on=allSched.filter(live),ended=allSched.filter(c=>!live(c));
@@ -5322,9 +5349,10 @@ function renderInbox(){
   const sched=i=>i.kind==='approval'&&/^c\d+$/.test(i.id);
   const label={approval:'wants a new agent',task:'task for you',question:'waiting on your answer',feedback:'feedback'};
   const btn=(a,t)=>`<button class="ghost small" data-iact="${a}">${t}</button>`;
-  const item=i=>`<div class="task" data-ikind="${esc(i.kind)}" data-iid="${esc(i.id)}"><div class="mh"><span class="tchip ${i.kind==='task'||i.kind==='approval'?'open':i.kind==='question'?'new':esc(i.type)}">${sched(i)?'wants a schedule':label[i.kind]}</span><b>${esc(i.title)}</b><span class="when">${esc(i.id)} · waiting ${ago(i.since)}</span></div>
+  const item=i=>`<div class="task" data-ikind="${esc(i.kind)}" data-iid="${esc(i.id)}"><div class="mh"><span class="tchip ${i.kind==='task'||i.kind==='approval'?'open':i.kind==='question'?'new':esc(i.type)}">${sched(i)?'wants a schedule':label[i.kind]}</span><b class="ititle">${esc(plain(i.title))}</b><span class="when">${esc(i.id)} · waiting ${ago(i.since)}</span></div>
     <div class="small mut">from <b>${esc(i.who)}</b>${i.kind==='feedback'?' · '+esc(i.type):''}</div>
-    ${(()=>{const more=i.text.trim().startsWith(i.title.trim())?i.text.trim().slice(i.title.trim().length).trim():i.text.trim();return more?`<div class="ftext">${esc(more)}</div>`:''})()}
+    ${(()=>{// The title is the first line, cut: when it was cut, the body keeps the whole text so nothing is lost mid-word.
+      const t=i.text.trim(),[first,...rest]=t.split('\n'),more=first.trim()===i.title.trim()?rest.join('\n').trim():t;return more?`<div class="ftext md">${md(more)}</div>`:''})()}
     <div class="tact">${i.kind==='approval'?`${btn('approve',sched(i)?'Approve':'Approve and start it')}${btn('deny','Deny')}`:i.kind==='task'?`<input class="small" data-itext placeholder="Note for ${esc(i.who)} (optional)">${btn('done','Done')}${btn('failed',"Couldn't do it")}`
       :i.kind==='question'?`<input class="small" data-itext placeholder="Your answer">${btn('reply','Send')}${btn('dismiss','Dismiss')}`
       :`${btn('accepted','Accept')}${btn('dismissed','Dismiss')}`}</div></div>`;
@@ -5368,7 +5396,7 @@ function renderFeedback(){
     if(head.length>120){const cut=head.lastIndexOf(' ',120)>60?head.lastIndexOf(' ',120):120;rest=[head.slice(cut).trim(),...rest];head=head.slice(0,cut)+'…'}
     return `<div class="task" data-fb="${esc(f.id)}"><div class="mh"><span class="tchip ${esc(f.type)}">${esc(f.type)}</span><span class="tchip ${esc(f.status)}">${esc(f.status)}</span><b>${esc(head)}</b><span class="when">${esc(f.id)} · ${ago(f.ts)} ago</span></div>
       <div class="small mut">${esc(f.from_name||'an agent')}${f.space?' · '+esc(f.space):''} · plugin ${esc(f.plugin||'?')}, daemon ${esc(f.daemon||'?')}${task?` · task ${esc(task.id)} ${esc(TSTATE[task.status]||task.status)} with <b>${esc(task.owner)}</b>`:''}</div>
-      ${rest.join('\n').trim()?`<div class="ftext">${esc(rest.join('\n').trim())}</div>`:''}
+      ${rest.join('\n').trim()?`<div class="ftext md">${md(rest.join('\n').trim())}</div>`:''}
       <div class="tact"><input class="small" data-fnote placeholder="Note (optional)" value="${esc(f.note||'')}">
       ${f.status==='new'?btn('accepted','Accept')+btn('dismissed','Dismiss'):f.status==='accepted'?btn('done','Mark done')+btn('dismissed','Dismiss'):btn('new','Back to new')}</div></div>`};
   // All statuses: a panel each, the ones that need you open. One status picked: just its list.
@@ -5390,7 +5418,7 @@ const ago=ts=>{const d=Date.now()/1000-ts;return d<90?Math.round(d)+'s':d<5400?M
 function taskRow(t,sub){const kids=allTasks.filter(x=>x.parent===t.id);
   return `<div class="task${sub?' sub':''}" data-task="${esc(t.id)}"><div class="mh"><span class="tchip ${esc(t.status)}">${TSTATE[t.status]||esc(t.status)}</span><b>${esc(t.title)}</b><span class="when">${esc(t.id)} · ${ago(t.created)} ago</span></div>
     <div class="small mut">${esc(t.requester?.name||'?')} → <b>${esc(t.owner)}</b>${t.space?' · '+esc(t.space):''}${kids.length?` · ${kids.filter(k=>k.status==='done').length} of ${kids.length} subtasks done`:''}${!isLive(t)?' · closed '+ago(t.updated)+' ago':''}</div>
-    ${t.note?`<div class="note">${esc(t.note)}</div>`:''}
+    ${t.note?`<div class="note md">${md(t.note)}</div>`:''}
     <div class="tact">${isLive(t)?'<button class="ghost small" data-tact="cancelled">Cancel</button>':'<button class="ghost small" data-tact="open">Reopen</button>'}${agentSelect('','data-treassign','Reassign to…')}</div></div>`}
 // Open and in-progress first, then the rest, newest first within each.
 const byLive=list=>list.slice().sort((a,b)=>(isLive(b)-isLive(a))||(b.created-a.created));
@@ -5419,7 +5447,7 @@ function taskCard(t){const kids=allTasks.filter(x=>x.parent===t.id),done=kids.fi
     <div class="meta by"><span><b>${esc(t.owner)}</b> · asked by ${esc(reqName(t))}</span><span class="age" title="${new Date(t.created*1000).toLocaleString()}">${ago(t.created)}</span></div>
     ${t.parent?`<div class="meta">↳ part of ${esc(t.parent)}</div>`:''}
     ${kids.length?`<div class="meta">${done} of ${kids.length} subtasks done</div><div class="bar"><i style="width:${Math.round(100*done/kids.length)}%"></i></div>`:''}
-    <div class="more">${t.space?`<div class="meta">${esc(t.id)} · ${esc(t.space)}</div>`:`<div class="meta">${esc(t.id)}</div>`}${t.note?`<div class="note">${esc(t.note)}</div>`:''}
+    <div class="more">${t.space?`<div class="meta">${esc(t.id)} · ${esc(t.space)}</div>`:`<div class="meta">${esc(t.id)}</div>`}${t.note?`<div class="note md">${md(t.note)}</div>`:''}
     <div class="tact">${isLive(t)?'<button class="ghost small" data-tact="cancelled">Cancel</button>':'<button class="ghost small" data-tact="open">Reopen</button>'}${agentSelect('','data-treassign','Reassign to…')}</div></div></div>`}
 function board(list){const shut=!openCards.has('col:cancelled');
   return `<div class="board">${COLS.map(([k,label])=>{const cards=list.filter(t=>t.status===k).sort((a,b)=>b.created-a.created);
