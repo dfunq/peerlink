@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.68'
+const DAEMON_VERSION = '0.8.69'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -137,8 +137,13 @@ let lastGiven: string[] = []
 let failure = ''
 let pid: number | undefined
 
-// This Claude Code process, so the daemon can end it if a requested exit doesn't happen.
+// Whether this runs on Windows, as the plugin's own path says: C:\\… or C:/….
+const onWindows = ($: EngineInterface) => /^[A-Za-z]:[\\/]/.test($.plugin.root)
+
+// This Claude Code process, so the daemon can end it if a requested exit doesn't happen. Not on Windows, where
+// Git Bash's sh would give its own process numbers, not Windows'.
 async function processId($: EngineInterface) {
+  if (pid === undefined && onWindows($)) pid = 0
   if (pid === undefined) {
     const run = await $.process.run(['sh', '-c', 'echo $PPID'], { timeoutMs: 3000 }).catch(() => undefined)
     pid = Number(run?.stdout.trim()) || 0
@@ -166,8 +171,13 @@ let previous: Previous = null
 let home = ''
 let key = ''
 
+// The user's home folder: HOME, or on Windows, where HOME is seldom set, USERPROFILE, as Python's expanduser reads it.
+async function userHome($: EngineInterface) {
+  return (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE')) ?? ''
+}
+
 async function peerlinkHome($: EngineInterface) {
-  if (!home) home = (await $.env.get('PEERLINK_HOME')) ?? `${(await $.env.get('HOME')) ?? ''}/.peerlink`
+  if (!home) home = (await $.env.get('PEERLINK_HOME')) ?? `${await userHome($)}/.peerlink`
   return home
 }
 
@@ -175,7 +185,7 @@ async function peerlinkHome($: EngineInterface) {
 // (a --plugin-dir checkout has none).
 async function installedVersion($: EngineInterface) {
   try {
-    const record = JSON.parse(String(await $.fs.read(`${(await $.env.get('HOME')) ?? ''}/.claude/plugins/installed_plugins.json`)))
+    const record = JSON.parse(String(await $.fs.read(`${await userHome($)}/.claude/plugins/installed_plugins.json`)))
     const entry = Object.entries(record.plugins ?? record).find(([k]) => k.startsWith('peerlink@'))?.[1] as any
     return String((Array.isArray(entry) ? entry[0] : entry)?.version ?? '')
   } catch {
@@ -255,9 +265,23 @@ async function daemonHealth($: EngineInterface) {
   }
 }
 
+// The command that runs Python 3 here: python3 on macOS and most Linux, often only python, or py -3, on Windows,
+// where python3 may be the Store's stub that only says to install it. [] when none is found; looked for once.
+let python: string[] | undefined
+async function pythonCmd($: EngineInterface) {
+  if (python?.length) return python
+  for (const cmd of [['python3'], ['python'], ['py', '-3']]) {
+    const run = await $.process.run([...cmd, '-c', 'import sys; sys.exit(sys.version_info[0] != 3)'], { timeoutMs: 5000 }).catch(() => undefined)
+    if (run?.exitCode === 0) return (python = cmd)
+  }
+  return (python = [])
+}
+
 // The fingerprint of the daemon this plugin ships, from the daemon itself; '' when it can't say.
 async function shippedCode($: EngineInterface) {
-  const run = await $.process.run(['python3', `${$.plugin.root}/daemon/peerlinkd.py`, 'fingerprint'], { timeoutMs: 5000 })
+  const py = await pythonCmd($)
+  if (!py.length) return ''
+  const run = await $.process.run([...py, `${$.plugin.root}/daemon/peerlinkd.py`, 'fingerprint'], { timeoutMs: 5000 })
   return run.exitCode === 0 ? run.stdout.trim() : ''
 }
 
@@ -288,7 +312,9 @@ async function ensureDaemon($: EngineInterface, fresh = false) {
       await call($, 'POST', '/api/shutdown', {}).catch(() => {})
       await $.clock.sleep(300)
     }
-    await $.process.run(['python3', `${$.plugin.root}/daemon/peerlinkd.py`, 'start'], { timeoutMs: 15000 })
+    const py = await pythonCmd($)
+    if (!py.length) return false
+    await $.process.run([...py, `${$.plugin.root}/daemon/peerlinkd.py`, 'start'], { timeoutMs: 15000 })
     key = ''
   }
   return (await daemonHealth($)) !== undefined
@@ -807,7 +833,7 @@ async function projectDescription($: EngineInterface, root: string) {
 
 // What the most recent earlier Claude Code session in this folder was about: its own title, kept in its transcript.
 async function lastSessionTitle($: EngineInterface, cwd: string) {
-  const dir = `${(await $.env.get('HOME')) ?? ''}/.claude/projects/${cwd.replace(/[^A-Za-z0-9]/g, '-')}`
+  const dir = `${await userHome($)}/.claude/projects/${cwd.replace(/[^A-Za-z0-9]/g, '-')}`
   let entries: any[] = []
   try {
     entries = (await $.fs.list(dir)) as any[]
@@ -820,8 +846,10 @@ async function lastSessionTitle($: EngineInterface, cwd: string) {
     .sort((a, b) => b.mtimeMs - a.mtimeMs)
     .slice(0, 3)
   for (const f of recent) {
-    const found = await $.process.run(['grep', '-h', '"type":"ai-title"', `${dir}/${f.name}`], { timeoutMs: 5000 })
-    const line = found.stdout.trim().split('\n').at(-1)
+    // grep reads a long transcript fastest; Windows may not have it, so read the file there.
+    const found = await $.process.run(['grep', '-h', '"type":"ai-title"', `${dir}/${f.name}`], { timeoutMs: 5000 }).catch(() => undefined)
+    const text = found && found.exitCode < 2 ? found.stdout : await $.fs.read(`${dir}/${f.name}`).catch(() => '')
+    const line = text.split('\n').filter(l => l.includes('"type":"ai-title"')).at(-1)
     if (!line) continue
     try {
       const title = JSON.parse(line).aiTitle
@@ -1204,12 +1232,13 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
   const [sub = 'help', ...rest] = args.trim().split(/\s+/).filter(Boolean)
   const arg = rest.join(' ')
   if (sub === 'help') return HELP
-  if (!(await ensureDaemon($))) return 'The peerlink daemon is not running and could not start (it needs python3).'
+  if (!(await ensureDaemon($))) return 'The peerlink daemon is not running and could not start (it needs Python 3, as python3, python or py -3 on the PATH).'
   switch (sub) {
     case 'web': {
       const res = await call($, 'POST', '/api/web/link', {})
       if (!res.ok || !res.data.url) return `Could not make a sign-in link: ${res.data.error ?? res.status}`
-      await $.process.run(['open', res.data.url])
+      // rundll32 hands the link to the default browser on Windows; cmd's start would split it at each &.
+      await $.process.run(onWindows($) ? ['rundll32', 'url.dll,FileProtocolHandler', res.data.url] : ['open', res.data.url])
       return `Opened the web UI with a one-time sign-in link (valid ${res.data.expires_in_s}s).`
     }
     case 'status': {
@@ -1502,7 +1531,8 @@ export const register: Register = on => {
           .catch(() => {})
       }
     } else {
-      $.ui.toast('peerlink: could not start the daemon (needs python3)')
+      // No Python 3 found, or one that found it but could not start the daemon: the command shows why.
+      $.ui.toast(python?.length ? `peerlink: could not start the daemon (run ${python.join(' ')} ${$.plugin.root}/daemon/peerlinkd.py start to see why)` : 'peerlink: could not start the daemon (needs Python 3: python3, python or py -3)')
     }
     return started
   })

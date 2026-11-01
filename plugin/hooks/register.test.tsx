@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.8.68', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.8.69', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (state.forget && path.endsWith('/heartbeat') && 'busy' in body) {
       state.forget = false
       return { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'unknown agent; register again' }) } }
@@ -45,7 +45,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
   return { posted, peers, summaries, state }
 }
 
-function engine(on: any, { turns = 0, percent = 85, readme = '', claudeMd = '', installed = '', commits = '', fingerprint = '', transcripts = [] as { name: string; title: string; ageMs: number }[] } = {}) {
+function engine(on: any, { turns = 0, percent = 85, readme = '', claudeMd = '', installed = '', commits = '', fingerprint = '', pythons = ['python3'], transcripts = [] as { name: string; title: string; ageMs: number }[] } = {}) {
   const clock = mock.clock(on, { now: 1_000_000 })
   const calls = { model: 0 }
   const ids = { current: 'me-session' }
@@ -82,7 +82,9 @@ function engine(on: any, { turns = 0, percent = 85, readme = '', claudeMd = '', 
     pinned.push(e)
     return { value: undefined }
   })
+  const ran: string[][] = []
   on('process.run', (_: any, e: any) => {
+    ran.push(e.argv)
     const [cmd, ...args] = e.argv
     let stdout = ''
     let exitCode = 0
@@ -93,7 +95,9 @@ function engine(on: any, { turns = 0, percent = 85, readme = '', claudeMd = '', 
       else if (args[0] === 'rev-parse') stdout = git.sha + '\n'
     }
     if (cmd === 'git' && args[0] === 'log') stdout = commits
-    if (cmd === 'python3' && args[1] === 'fingerprint') stdout = fingerprint
+    // The names this machine runs Python 3 by: python3 on a Mac, often only python or py -3 on Windows.
+    if (args.includes('import sys; sys.exit(sys.version_info[0] != 3)')) exitCode = pythons.includes(cmd) ? 0 : 1
+    if (pythons.includes(cmd) && args.at(-1) === 'fingerprint') stdout = fingerprint
     if (cmd === 'grep') {
       const t = transcripts.find(t => args.at(-1).endsWith(t.name))
       if (t) stdout = JSON.stringify({ type: 'ai-title', aiTitle: t.title }) + '\n'
@@ -131,7 +135,7 @@ function engine(on: any, { turns = 0, percent = 85, readme = '', claudeMd = '', 
       calls.model++
       return { value: { isAnswered: true, text, usage: {} } }
     })
-  return { clock, calls, answer, writes, ids, pinned, git, where, woke, submits, limits, tools }
+  return { clock, calls, answer, writes, ids, pinned, git, where, woke, submits, limits, tools, ran }
 }
 
 test('the model is told about peers beside the prompt, again only when who is there changes', async ($, on) => {
@@ -594,6 +598,14 @@ test('a load replaces a daemon of the same version running other code', async ($
   expect(daemon.posted.filter(p => p.path === '/api/shutdown').length).toBe(1)
 })
 
+test('on a machine whose Python 3 is py -3, as Windows often has, the daemon runs with that', async ($, on) => {
+  const { ran } = engine(on, { fingerprint: 'same', pythons: ['py'] })
+  const daemon = fakeDaemon(on, 1, null, [], {}, 'same')
+  await $.session.start(START)
+  expect(ran.find(a => a.at(-1) === 'fingerprint')?.slice(0, 2)).toEqual(['py', '-3'])
+  expect(daemon.posted.some(p => p.path === '/api/shutdown')).toBe(false)  // it read the fingerprint, and it matched
+})
+
 test('a load leaves a daemon running the same code alone', async ($, on) => {
   engine(on, { fingerprint: 'same' })
   const daemon = fakeDaemon(on, 1, null, [], {}, 'same')
@@ -852,7 +864,7 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.8.68 · daemon 0.8.68 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.8.69 · daemon 0.8.69 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the space is listed once', async ($, on) => {
@@ -885,7 +897,7 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.8.68')
+  expect(reg.plugin).toBe('0.8.69')
 })
 
 test('an agent registers again under the folder it started in, wherever the host has moved its root since', async ($, on) => {
@@ -987,7 +999,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.8.69', true], ['0.8.68', false]] as const)
+for (const [installed, reloads] of [['0.8.70', true], ['0.8.69', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     const daemon = fakeDaemon(on)
