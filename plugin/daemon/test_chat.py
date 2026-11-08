@@ -162,6 +162,18 @@ class ChatTest(unittest.TestCase):
         status, out = peerlinkd.send({"from": "s-work", "reply_to": "h12", "text": "status: once more"})
         self.assertIn("task t-hop hit its 9-reply limit", out["error"])
 
+    def test_an_agent_above_a_folder_can_cancel_its_schedules(self):
+        c = {"id": "c-orphan", "status": "active", "folder": "/x/auth/apps/loop", "agent": "", "cron": "40 10 * * *",
+             "requester": {"id": "s-gone", "name": "loop", "cwd": "/x/auth/apps/loop"}, "discord_out": {}}
+        peerlinkd.schedules["c-orphan"] = c
+        self.addCleanup(lambda: peerlinkd.schedules.pop("c-orphan", None))
+        status, out = peerlinkd.cancel_schedule("c-orphan", {"id": "s-side", "name": "side", "cwd": "/x/auth/apps/lo"})
+        self.assertEqual(status, 403)  # a folder whose name only starts the same isn't above it
+        self.assertIn("isn't your folder or inside it", out["error"])
+        status, _ = peerlinkd.cancel_schedule("c-orphan", {"id": "s-core", "name": "core", "cwd": "/x/auth"})
+        self.assertEqual(status, 200)
+        self.assertEqual(c["status"], "cancelled")
+
 
 if __name__ == "__main__":
     unittest.main()
