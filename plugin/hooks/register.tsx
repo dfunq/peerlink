@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.71'
+const DAEMON_VERSION = '0.8.72'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -964,7 +964,8 @@ function spaceLine() {
 // Where a peer sits relative to this agent: a lead speaks for its space; a peer in another space is the lead's parent.
 function spaceTag(p: any) {
   // `parent` alone: a peer on another machine whose daemon predates `leads`.
-  if (p.leads || p.parent) return ` [leads ${p.space}]`
+  // A space inside this agent's: its agents are out of reach, but running, and the lead names them.
+  if (p.leads || p.parent) return ` [leads ${p.space}${p.inside?.length ? `; inside it, reached through ${p.name}: ${p.inside.join(', ')}` : ''}]`
   // One from another space that's also a member of yours says so: it's in your space as much as its own.
   if (!cfg || !p.space || p.space === cfg.space) return ''
   return Array.isArray(p.also) && p.also.includes(cfg.space) ? ` [${p.space}, also in ${cfg.space}]` : ` [${p.space}]`

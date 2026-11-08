@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.71"
+VERSION = "0.8.72"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -4017,8 +4017,14 @@ class Handler(BaseHTTPRequestHandler):
                 me = sessions.get(exclude)
                 space = space_of(me)[0] if me else None
                 mine = reach(me) if me else None
-            peers = [p for p in peers if p["id"] != exclude and (mine is None or peer_reach(p) & mine)]
-            return self.reply(200, {"host": HOSTNAME, "space": space, "peers": peers, "leads": leads_view()})
+            seen = [p for p in peers if p["id"] != exclude and (mine is None or peer_reach(p) & mine)]
+            # A space inside the asker's shows only its lead; the lead lists who works under it, so an agent there that
+            # the asker can't reach doesn't pass for one that isn't running.
+            if mine is not None:
+                for p in seen:
+                    if p.get("leads") and p.get("space") not in mine:
+                        p["inside"] = [o["name"] for o in peers if o["id"] != p["id"] and o.get("space") == p["space"]]
+            return self.reply(200, {"host": HOSTNAME, "space": space, "peers": seen, "leads": leads_view()})
 
         if rest == ["sessions"] and method == "POST":
             b = self.body()
