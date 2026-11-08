@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.70"
+VERSION = "0.8.71"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -3208,14 +3208,22 @@ def decide_schedule(cid, approve, via):
     return 200, {"schedule": dict(c)}
 
 
+def within(folder, parent):
+    """Whether `folder` is `parent` or inside it."""
+    folder, parent = os.path.normpath(folder or ""), os.path.normpath(parent or "")
+    return bool(folder and parent) and (folder == parent or folder.startswith(parent.rstrip(os.sep) + os.sep))
+
+
 def cancel_schedule(cid, by=None):
-    """You cancel any schedule; an agent, one it made or one for its folder."""
+    """You cancel any schedule; an agent, one it made, or one for its folder or a folder inside it: a lead above a
+    folder no agent runs in any more can still stop what's scheduled there."""
     with lock:
         c = schedules.get(cid)
         if c is None:
             return 404, {"error": f"no schedule {cid}"}
-        if by and by["id"] != c["requester"].get("id") and by.get("cwd") not in (c["folder"], c["requester"].get("cwd")):
-            return 403, {"error": f"{cid} isn't yours or your folder's to cancel"}
+        if (by and by["id"] != c["requester"].get("id") and by.get("cwd") != c["requester"].get("cwd")
+                and not within(c["folder"], by.get("cwd"))):
+            return 403, {"error": f"{cid} isn't yours, and {tilde_path(c['folder'])} isn't your folder or inside it"}
         if c["status"] in ("cancelled", "done", "denied", "expired"):
             return 409, {"error": f"{cid} is already {c['status']}"}
         c["status"], c["updated"], c["next_run"] = "cancelled", time.time(), None
