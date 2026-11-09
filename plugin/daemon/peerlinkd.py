@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.72"
+VERSION = "0.8.73"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -2165,9 +2165,11 @@ def send(body):
 
 
 def hop_limit(parent):
-    """How many replies the thread `parent` is in may run to, and the open task it started from ('' for none). A loop
-    of acknowledgements is what max_hops stops; a lead and its worker trading instructions and reports under a task
-    still open pass ten replies doing real work, so a task's thread gets three times as many."""
+    """How many replies the thread `parent` is in may run to, and the open task it's about ('' for none). A loop of
+    acknowledgements is what max_hops stops; a lead and its worker trading instructions and reports under a task
+    still open pass ten replies doing real work, so a task's thread gets three times as many. A thread is a task's
+    when it started from the task, or runs between the task's requester and its owner (a lead often starts one
+    with a fresh message that names the task)."""
     by_id = {m["id"]: m for m in messages}
     m, seen = parent, 0
     while m and seen < 200:
@@ -2177,6 +2179,10 @@ def hop_limit(parent):
                 return config["max_hops"] * 3, m["task"]
             break
         m, seen = by_id.get(m.get("reply_to") or ""), seen + 1
+    pair = {parent.get("from_cwd"), parent.get("to_cwd")}
+    for t in tasks.values():
+        if t["status"] in TASK_OPEN and "" not in pair and len(pair) == 2 and {t.get("owner_cwd"), (t.get("requester") or {}).get("cwd")} == pair:
+            return config["max_hops"] * 3, t["id"]
     return config["max_hops"], ""
 
 

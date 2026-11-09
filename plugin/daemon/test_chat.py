@@ -157,7 +157,11 @@ class ChatTest(unittest.TestCase):
         status, out = peerlinkd.send({"from": "s-work", "reply_to": "h12", "text": "status: again"})
         self.assertEqual(status, 429)
         self.assertIn("max_hops=10", out["error"])
-        peerlinkd.tasks["t-hop"]["status"] = "open"
+        # A thread a lead began with a fresh message naming the task counts too: it runs between requester and owner.
+        peerlinkd.tasks["t-hop"].update({"status": "open", "owner_cwd": "/x/worker", "requester": {"id": "s-lead", "cwd": "/x/lead"}})
+        side = {"id": "h-side", "hops": 12, "from": "s-lead", "to": "s-work", "from_cwd": "/x/lead", "to_cwd": "/x/worker", "reply_to": None}
+        self.assertEqual(peerlinkd.hop_limit(side), (30, "t-hop"))
+        self.assertEqual(peerlinkd.hop_limit({**side, "to_cwd": "/x/other"}), (10, ""))
         peerlinkd.config["max_hops"] = 3
         status, out = peerlinkd.send({"from": "s-work", "reply_to": "h12", "text": "status: once more"})
         self.assertIn("task t-hop hit its 9-reply limit", out["error"])
