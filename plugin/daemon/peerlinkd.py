@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.74"
+VERSION = "0.8.75"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -3159,6 +3159,44 @@ def start_note(c):
     return f"it goes to {who}, and starts a new agent only if {who} isn't running ({'it is now' if running else 'it isn’t now'})"
 
 
+PLAYBOOK_MAX = 16000
+
+
+def playbook_path(raw, base):
+    """A schedule's playbook file as an absolute path, from what was given (~ and paths relative to `base` work);
+    '' when none was."""
+    raw = str(raw or "").strip()
+    if not raw:
+        return ""
+    path = os.path.expanduser(raw)
+    if not os.path.isabs(path):
+        if not base:
+            raise ValueError(f"prompt_file {raw}: give the whole path")
+        path = os.path.join(base, path)
+    path = os.path.normpath(path)
+    if not os.path.isfile(path):
+        raise ValueError(f"prompt_file {raw}: no such file")
+    return path
+
+
+def read_playbook(path):
+    """The playbook as it reads now, and why not ('') when it can't be read."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read(PLAYBOOK_MAX + 1)
+    except OSError as err:
+        return "", err.strerror or str(err)
+    if len(text) > PLAYBOOK_MAX:
+        text = text[:PLAYBOOK_MAX] + f"\n\n(cut at {PLAYBOOK_MAX} characters: read the rest in the file)"
+    return text.strip(), ""
+
+
+def schedule_shown(c):
+    """A schedule's prompt as your approval post shows it, naming the playbook it reads."""
+    pf = c.get("prompt_file")
+    return c["prompt"][:600] + (f"\nIt reads the playbook `{tilde_path(pf)}` fresh at each run." if pf else "")
+
+
 def create_schedule(body, by=None):
     """A schedule from an agent (`by`) or from you (None). An agent's that may start one waits for your approval.
     It goes to an agent: that one wherever it runs, else a new one started in the folder it was last in."""
@@ -3167,14 +3205,18 @@ def create_schedule(body, by=None):
     start = body.get("start") is not False
     try:
         folder, name = schedule_target(body, by)
+        # A playbook is read at each run, so rules edited in it reach the next run, as CLAUDE.md's do.
+        prompt_file = playbook_path(body.get("prompt_file"), (by or {}).get("cwd") or folder)
+        if prompt_file and not prompt:
+            prompt = f"Follow the playbook {tilde_path(prompt_file)}."
         if not prompt:
-            raise ValueError("prompt is required: what the agent should do when it runs")
+            raise ValueError("prompt or prompt_file is required: what the agent should do when it runs")
         cron, at, next_run = schedule_when(body, now)
     except ValueError as err:
         return 400, {"error": str(err)}
     with lock:
         n = max([int(i[1:]) for i in schedules] or [0]) + 1
-        c = {"id": f"c{n}", "folder": folder, "agent": name, "prompt": prompt[:8000], "cron": cron, "at": at,
+        c = {"id": f"c{n}", "folder": folder, "agent": name, "prompt": prompt[:8000], "prompt_file": prompt_file, "cron": cron, "at": at,
              "start": start, "next_run": next_run, "last_run": None, "runs": 0, "note": "",
              "requester": {"id": by["id"], "name": display_name(by), "cwd": by.get("cwd", "")} if by else {"name": USER_NAME, "cwd": ""},
              "status": "pending" if by and start and not auto_approved(by) else "active", "created": now, "updated": now}
@@ -3183,11 +3225,11 @@ def create_schedule(body, by=None):
         channel = approval_channel(by) if by else ""
     log("schedule", c["id"], c["status"], c["agent"] or tilde_path(folder), when_text(c))
     if by and start and c["status"] == "active" and channel and chat_ready(channel):
-        post_async([(channel, f"**{c['requester']['name']}** scheduled `{tilde_path(folder)}` ({when_text(c)}) without asking (auto-approve is on): {start_note(c)}.\n{prompt[:600]}", None)])
+        post_async([(channel, f"**{c['requester']['name']}** scheduled `{tilde_path(folder)}` ({when_text(c)}) without asking (auto-approve is on): {start_note(c)}.\n{schedule_shown(c)}", None)])
     if c["status"] == "pending" and channel and chat_ready(channel):
         try:
             sent = chat_post(channel,
-                             f"**{c['requester']['name']}** asks to schedule `{tilde_path(folder)}` ({when_text(c)}): {start_note(c)}.\n{prompt[:600]}",
+                             f"**{c['requester']['name']}** asks to schedule `{tilde_path(folder)}` ({when_text(c)}): {start_note(c)}.\n{schedule_shown(c)}",
                              None, choices(["Approve", "Deny"], f"pc:{c['id']}"))
             with lock:
                 c["discord_out"] = {"channel_id": channel, "message_id": sent}
@@ -3258,12 +3300,16 @@ def edit_schedule(cid, body):
             else:
                 folder, name = c["folder"], c.get("agent", "")
             prompt = str(body["prompt"]).strip() if "prompt" in body else c["prompt"]
+            prompt_file = (playbook_path(body["prompt_file"], c["requester"].get("cwd") or folder) if "prompt_file" in body
+                           else c.get("prompt_file", ""))
+            if prompt_file and not prompt:
+                prompt = f"Follow the playbook {tilde_path(prompt_file)}."
             if not prompt:
-                raise ValueError("prompt is required: what the agent should do when it runs")
+                raise ValueError("prompt or prompt_file is required: what the agent should do when it runs")
             cron, at, next_run = schedule_when(body, now) if "cron" in body or "at" in body else (c["cron"], c.get("at"), c.get("next_run"))
         except ValueError as err:
             return 400, {"error": str(err)}
-        c.update({"folder": folder, "agent": name, "prompt": prompt[:8000], "cron": cron, "at": at,
+        c.update({"folder": folder, "agent": name, "prompt": prompt[:8000], "prompt_file": prompt_file, "cron": cron, "at": at,
                   "start": body["start"] is not False if "start" in body else c["start"], "updated": now})
         if c["status"] in ("active", "pending"):
             c["next_run"] = next_run
@@ -3323,10 +3369,18 @@ def sched_view(c):
 def fire_schedule(c, now):
     """Send the prompt to the folder's agent, or hold it for one; the next run is set. Returns c when an agent
     has to be started for it. Called with the lock held."""
+    text = f"Scheduled ({when_text(c)}; cancel with the schedule tool, id {c['id']}): {c['prompt']}"
+    if c.get("prompt_file"):
+        book, err = read_playbook(c["prompt_file"])
+        text += (f"\n\nThe playbook {tilde_path(c['prompt_file'])}, as it reads now:\n\n{book}" if book
+                 else f"\n\nIts playbook {tilde_path(c['prompt_file'])} couldn't be read ({err or 'it is empty'}): tell whoever keeps it.")
+        # Said once: the same failure on every run is noise until it changes.
+        if (err or not book) and c.get("book_err") != (err or "empty"):
+            schedule_told(c, f"Schedule {c['id']} ran, but its playbook {tilde_path(c['prompt_file'])} couldn't be read ({err or 'it is empty'}).")
+        c["book_err"] = (err or "empty") if not book else ""
     msg = {"id": f"m{next_msg[0]}", "ts": now, "from": "peerlink", "from_name": f"schedule {c['id']}", "from_host": HOSTNAME,
            "from_cwd": "", "to_cwd": c["folder"], "from_space": "", "to_space": "",
-           "text": f"Scheduled ({when_text(c)}; cancel with the schedule tool, id {c['id']}): {c['prompt']}",
-           "expects_reply": False, "reply_to": None, "hops": 0, "status": "queued", "v": 2}
+           "text": text, "expects_reply": False, "reply_to": None, "hops": 0, "status": "queued", "v": 2}
     next_msg[0] += 1
     own = schedule_agent(c)
     if c.get("agent"):
@@ -4941,6 +4995,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <form id="schedform"><div class="addline"><select name="target" class="grow" id="schedagents" required></select>
 <input name="when" type="text" placeholder="0 9 * * 1-5, or in 2h" title="A cron (minute hour day month weekday) repeats; 'in 30m', 'in 2h', 'in 1d' or 2026-10-25 09:00 runs once" style="width:190px"></div>
 <textarea name="prompt" rows="2" placeholder="What the agent should do when it runs" style="margin-top:8px;width:100%"></textarea>
+<input name="prompt_file" type="text" placeholder="Playbook file, read fresh at each run (optional): ~/Repos/app/PLAYBOOK.md" style="margin-top:8px">
 <div class="addline" style="margin-top:8px"><label class="check small"><input type="checkbox" name="start" checked> Start it when it isn&#39;t running</label><button type="submit">Add schedule</button><span class="small" id="schedmsg"></span></div></form></div></details>
 <div id="schedlist" style="margin-top:12px;display:flex;flex-direction:column;gap:8px"></div></section>
 
@@ -5351,13 +5406,14 @@ function renderSchedules(force){
       <select name="target" class="grow">${opts(c.agent,c.agent&&!agents.some(x=>x.name===c.agent)?`<option value="${esc(c.agent)}" selected>${esc(c.agent)} (not running)</option>`:!c.agent?`<option value="" selected>Any agent in ${esc(tilde(c.folder))}</option>`:'')}</select>
       <input name="when" type="text" value="${esc(c.cron||local(c.at))}" placeholder="0 9 * * 1-5, or in 2h" style="width:190px"></div>
     <textarea name="prompt" rows="4" style="margin-top:8px;width:100%">${esc(c.prompt)}</textarea>
+    <input name="prompt_file" type="text" value="${esc(c.prompt_file?tilde(c.prompt_file):'')}" placeholder="Playbook file, read fresh at each run (optional)" style="margin-top:8px">
     <div class="addline" style="margin-top:8px"><label class="check small"><input type="checkbox" name="start" ${c.start?'checked':''}> Start it when it isn&#39;t running</label>
       <button type="submit">Save</button><button type="button" class="ghost" data-schededit="">Cancel</button><span class="small err" data-schedmsg></span></div></form>`
     :`<details class="plat sched" data-sched="${esc(c.id)}" ${openSched.has(c.id)||c.status==='pending'?'open':''}><summary>
       <span class="plogo" style="background:${c.status==='active'?'var(--acc)':c.status==='pending'?'var(--warn)':'var(--mut)'}">${SCHED_ICON}</span>
       <span class="ptitle"><b>${esc(c.agent||tilde(c.folder))} <span class="mut" style="font-weight:400">· ${esc(c.when_text)}</span></b><span class="psub">${esc(c.prompt.replace(/\s+/g,' ').slice(0,160))}</span></span>
       <span class="pstate">${c.status==='active'?'':`<span class="pill${c.status==='pending'?' warn':''}">${esc(c.status==='pending'?'needs approval':c.status)}</span>`}<span class="small mut">${c.next_run&&live(c)?'next '+when(c.next_run):c.runs?'last '+when(c.last_run):''}</span></span><span class="chev" aria-hidden="true"></span></summary>
-    <div class="pbody" style="padding-top:12px"><div class="md">${md(c.prompt)}</div>
+    <div class="pbody" style="padding-top:12px"><div class="md">${md(c.prompt)}</div>${c.prompt_file?`<div class="small" style="margin-top:6px">Playbook <span class="mono">${esc(tilde(c.prompt_file))}</span>, read fresh at each run${c.book_err?` · <span style="color:var(--warn)">couldn't be read last run</span>`:''}</div>`:''}
     <div class="small mut" style="margin-top:8px">${esc(c.id)} · ${live(c)?route(c)+' · ':''}by ${esc(c.requester?.name||'you')}${c.agent?` · in <span class="mono">${esc(tilde(c.folder))}</span>`:''}${c.runs?` · ran ${c.runs}×, last ${when(c.last_run)}${c.note?': '+esc(c.note):''}`:''}${c.status==='pending'?' · waiting for your approval':''}</div>
     <div class="addline" style="margin-top:10px">${actions(c)}</div></div></details>`;
   const on=allSched.filter(live),ended=allSched.filter(c=>!live(c));
@@ -5366,7 +5422,7 @@ function renderSchedules(force){
 document.addEventListener('click',e=>{const b=e.target.closest('[data-schededit]');if(!b)return;schedEdit=b.dataset.schededit;renderSchedules(true)});
 document.addEventListener('submit',async e=>{const f=e.target.closest('[data-schedform]');if(!f)return;e.preventDefault();const v=n=>f.elements[n].value.trim();
   const w=v('when'),cron=/^\S+\s+\S+\s+\S+\s+\S+\s+\S+$/.test(w)&&!/^in\s/i.test(w)&&!/^\d{4}-/.test(w);
-  const r=await post(`/api/schedules/${encodeURIComponent(f.dataset.schedform)}`,{...(v('target')?{agent:v('target')}:{}),prompt:v('prompt'),...(cron?{cron:w}:{at:w}),start:f.elements.start.checked});
+  const r=await post(`/api/schedules/${encodeURIComponent(f.dataset.schedform)}`,{...(v('target')?{agent:v('target')}:{}),prompt:v('prompt'),prompt_file:v('prompt_file'),...(cron?{cron:w}:{at:w}),start:f.elements.start.checked});
   if(r.error){f.querySelector('[data-schedmsg]').textContent=r.error;return}
   schedEdit='';refresh(true)});
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-schedok]');if(!b)return;
@@ -5377,9 +5433,9 @@ document.addEventListener('click',async e=>{const b=e.target.closest('[data-sche
   if(!confirm(`Cancel ${b.dataset.schedcancel}?`))return;const r=await post(`/api/schedules/${encodeURIComponent(b.dataset.schedcancel)}/cancel`);if(r.error)alert(r.error);refresh(true)});
 document.addEventListener('submit',async e=>{if(e.target.id!=='schedform')return;e.preventDefault();const f=e.target,v=n=>f.elements[n].value.trim();
   const w=v('when'),cron=/^\S+\s+\S+\s+\S+\s+\S+\s+\S+$/.test(w)&&!/^in\s/i.test(w)&&!/^\d{4}-/.test(w);
-  const r=await post('/api/schedules',{agent:v('target'),prompt:v('prompt'),...(cron?{cron:w}:{at:w}),start:f.elements.start.checked});
+  const r=await post('/api/schedules',{agent:v('target'),prompt:v('prompt'),prompt_file:v('prompt_file'),...(cron?{cron:w}:{at:w}),start:f.elements.start.checked});
   const out=$('#schedmsg');out.className='small '+(r.error?'err':'ok');out.textContent=r.error||`Added ${r.schedule.id}`;
-  if(!r.error){f.elements.prompt.value='';f.elements.when.value=''}refresh(true)});
+  if(!r.error){f.elements.prompt.value='';f.elements.prompt_file.value='';f.elements.when.value=''}refresh(true)});
 // The Inbox: one row per thing waiting on you, with the action it needs.
 let inbox=[];
 let seenInbox=null;
