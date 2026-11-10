@@ -18,9 +18,11 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
-VERSION = "0.8.62"
+VERSION = "0.9.4"
 PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 HEARTBEAT_S = 2.0
+WAIT_BEAT_S = 0.5  # how often the daemon is asked while a caller waits in inbox
+WAIT_MAX_S = 25.0   # under the request timeout most MCP clients keep
 SEEN_MAX = 2000
 HOME = os.environ.get("PEERLINK_HOME", os.path.expanduser("~/.peerlink"))
 TOOLS = [
@@ -47,10 +49,15 @@ TOOLS = [
     {
         "name": "inbox",
         "description": "Messages and replies addressed to you that you haven't read yet. Call it to poll. Reading marks them read; "
-        "with peek true they stay unread, so a turn that fails before it handled them doesn't lose them.",
+        "with peek true they stay unread, so a turn that fails before it handled them doesn't lose them. "
+        "With wait, the call holds until a message arrives or that many seconds pass, so a loop of waits hears each one as it comes.",
         "inputSchema": {
             "type": "object",
-            "properties": {"peek": {"type": "boolean", "description": "Leave the messages unread"}},
+            "properties": {
+                "peek": {"type": "boolean", "description": "Leave the messages unread"},
+                "wait": {"type": "number", "description": "Seconds to hold the call for a message when there is none yet, up to 25. "
+                         "Over HTTP other calls go on meanwhile; over stdio they queue behind it"},
+            },
         },
     },
 ]
@@ -72,7 +79,8 @@ class Daemon:
         self.base = f"http://127.0.0.1:{port}"
         self.key_path = os.path.join(home, "key")
         self.id = f"mcp-{name}"
-        self.lock = threading.Lock()
+        self.lock = threading.Condition()
+        self.waiting = 0   # inbox calls holding for a message: the daemon is asked more often while there are any
         self.pending = {}  # id -> message handed by the daemon, not yet read
         self.to_ack = []   # read, and the daemon not yet told
         self.seen = {}     # id -> True for every message addressed to us, so a reply_to on one is ours to make
@@ -149,12 +157,14 @@ class Daemon:
                     continue
                 self.pending.setdefault(mid, m)
                 self.seen[mid] = True
+            if self.pending:
+                self.lock.notify_all()
             while len(self.seen) > SEEN_MAX:
                 self.seen.pop(next(iter(self.seen)))
 
     def run_heartbeats(self):
         while True:
-            time.sleep(HEARTBEAT_S)
+            time.sleep(WAIT_BEAT_S if self.waiting else HEARTBEAT_S)
             try:
                 self.heartbeat()
             except Refused as err:
@@ -214,7 +224,17 @@ class Daemon:
 
     def inbox(self, args):
         peek = bool(args.get("peek"))
+        try:
+            wait = min(max(float(args.get("wait") or 0), 0.0), WAIT_MAX_S)
+        except (TypeError, ValueError):
+            raise Refused("wait is a number of seconds")
         with self.lock:
+            if wait and not self.pending:
+                self.waiting += 1
+                try:
+                    self.lock.wait_for(lambda: self.pending, wait)
+                finally:
+                    self.waiting -= 1
             items = list(self.pending.values())
             if not peek:
                 for m in items:

@@ -180,6 +180,19 @@ class EndpointTest(unittest.TestCase):
         # A reply to something it was handed is its to make even when the daemon's log has aged it out.
         self.assertFalse(self.c.tool("send_message", reply_to="m5", text="pong")[0])
 
+    def test_inbox_with_wait_holds_until_a_message_comes_and_gives_up_after_its_time(self):
+        import time
+        start = time.time()
+        self.assertEqual(self.c.tool("inbox", wait=0.6)[1]["messages"], [])
+        self.assertGreaterEqual(time.time() - start, 0.5)
+        threading.Timer(1.0, lambda: self.d.inbox.append({"id": "m6", "from": "p1", "from_name": "billing", "text": "now"})).start()
+        start = time.time()
+        got = self.c.tool("inbox", wait=20)[1]["messages"]
+        self.assertEqual([m["id"] for m in got], ["m6"])
+        self.assertLess(time.time() - start, 6)
+        self.assertTrue(wait_for(lambda: "m6" in self.d.acked))
+        self.assertTrue(self.c.tool("inbox", wait="soon")[0])
+
 
 class StartupTest(unittest.TestCase):
     def test_refuses_the_wrong_space(self):
