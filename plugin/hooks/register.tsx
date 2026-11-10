@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.75'
+const DAEMON_VERSION = '0.9.0'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -43,6 +43,7 @@ type ClientConfig = {
   // The agent that leads this agent's space, and the leads of spaces nested inside it.
   lead?: string
   children?: { name: string; space: string }[]
+  rules?: { id: string; text: string; space: string }[]
   // The Discord channels this agent's folder is mapped into: where it receives your messages (master: the ones
   // that name nobody too) and where it may post.
   discord?: { channel_id: string; channel: string; master: boolean; receives?: boolean; sends?: boolean; platform?: string }[]
@@ -984,10 +985,35 @@ function spaceTag(p: any) {
   return Array.isArray(p.also) && p.also.includes(cfg.space) ? ` [${p.space}, also in ${cfg.space}]` : ` [${p.space}]`
 }
 
+// A task's record as its tool shows it: the tasks above (with what was decided there), the task and its log,
+// and every task below with where it stands.
+function taskRecord(d: any) {
+  const since = (ts: number) => `${ago(Math.max(0, Math.round(Date.now() / 1000 - ts)))} ago`
+  const head = (t: any) => `${t.id} [${String(t.status).replace('_', ' ')}${t.blocked ? ', BLOCKED' : ''}] ${t.title} (${t.requester || 'your user'} → ${t.owner}, updated ${since(t.updated)})`
+  const entry = (e: any) => `  - ${e.kind}, ${e.by}, ${since(e.ts)}: ${oneLine(e.text, 600)}`
+  const lines: string[] = []
+  for (const t of d.above ?? []) lines.push(`Above: ${head(t)}`, ...(t.log ?? []).map(entry))
+  lines.push(head(d.task), ...(d.task.blocked ? [`  Blocked on: ${d.task.blocked}`] : []), ...((d.task.log ?? []).length ? ['  Record:', ...d.task.log.map(entry)] : ['  Nothing on its record yet.']))
+  for (const t of d.below ?? []) {
+    const pad = '  '.repeat(t.depth)
+    const last = t.blocked ? `blocked on: ${oneLine(t.blocked, 300)}` : t.last ? `${t.last.kind}, ${since(t.last.ts)}: ${oneLine(t.last.text, 300)}` : t.note ? oneLine(t.note, 300) : 'nothing reported yet'
+    lines.push(`${pad}└ ${head(t)}`, `${pad}  ${last}`)
+  }
+  if (!(d.below ?? []).length) lines.push('No tasks under it.')
+  return lines.join('\n')
+}
+
+// What the user told their agents for good: in the instructions, so a cleared context still has it.
+function rulesText() {
+  const rules = cfg?.rules ?? []
+  if (!rules.length) return ''
+  return `\nStanding rules from your user. They hold in every task, and outrank a schedule's text and your own notes:\n${rules.map(r => `- ${r.text}`).join('\n')}`
+}
+
 // The system prompt's peerlink section: who this agent is to its peers, its role, and how to work with them.
 function guidanceText() {
   if (!cfg || cfg.muted) return ''
-  return `# Peer agents\nPeers know you as "${myName}"${cfg.space && cfg.space !== 'default' ? ` in the "${cfg.space}" space; you only see agents in that space${[cfg.parent, ...(cfg.also ?? [])].filter(Boolean).map(s => ` and "${s}"`).join('')}` : ''}.${hierarchyGuidance()}\n${cfg.guidance ?? ''}`
+  return `# Peer agents\nPeers know you as "${myName}"${cfg.space && cfg.space !== 'default' ? ` in the "${cfg.space}" space; you only see agents in that space${[cfg.parent, ...(cfg.also ?? [])].filter(Boolean).map(s => ` and "${s}"`).join('')}` : ''}.${hierarchyGuidance()}\n${cfg.guidance ?? ''}${rulesText()}`
 }
 
 // What the prompt.compose and prompt.context hooks would have sent, for a prompt, when they didn't run.
@@ -1401,6 +1427,16 @@ export const register: Register = on => {
               'message (the default); task: work you hand to that agent, tracked until its owner marks it done or failed with update_task, and you get its note then (a task to a space lead is the lead\'s to delegate); announcement: to "space" (or "space:<name>"), read by every agent there at its next turn, no replies. Announce only what everyone needs, such as a shared API change',
           },
           parent_task: { type: 'string', description: 'When delegating part of a task you own: its id (t…), so the subtask shows under it' },
+          task: {
+            type: 'string',
+            description: "For a question to your user: the id (t…) of the task it's about. Their answer is kept on that task as a decision and goes straight to everyone working under it, so you needn't pass it on",
+          },
+          default: {
+            type: 'string',
+            description:
+              "For a question to your user about something easy to undo: what you'll go with if they don't answer in time (one of the options, when you give options). They see it under the question. Never for what's hard to undo: a production deploy, deleting, spending money, sending something outside",
+          },
+          default_after: { type: 'string', description: 'How long they have before the default applies: "30m" (the default), "2h", "1d"' },
           options: {
             type: 'array',
             items: { type: 'string' },
@@ -1468,6 +1504,35 @@ export const register: Register = on => {
           folder: { type: 'string', description: 'create: a folder whose agent runs it, whichever one that is, instead of a named agent' },
           start: { type: 'boolean', description: 'create: start an agent there when none is running (the default, needs approval); false holds the prompt for the next agent instead' },
           id: { type: 'string', description: 'cancel: the schedule id, like c3' },
+        },
+      },
+      isDeferred: false,
+    })
+    await $.tool.register({
+      name: 'task',
+      description:
+        "A task's record, shared by everyone on it: whoever asked for it, whoever owns it, and the same for the tasks above and below it. Read it (the default) to see where a task and every subtask stands, what's blocked and what was decided, before asking anyone for status. Or add a note: on a task you own it reports progress, or what you're blocked on, to whoever asked; on a task you asked for (or one above it) it goes at once to its owner and the owner of every open task under it, so no lead has to pass it on.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'The task id, e.g. t3' },
+          action: { type: 'string', enum: ['show', 'note'], description: 'show (the default) or note' },
+          text: { type: 'string', description: 'note: what to put on the record, briefly, with paths rather than pasted content' },
+          blocked: { type: 'boolean', description: "note, on a task you own: true when you can't go on until someone answers; it starts a turn for whoever asked" },
+        },
+        required: ['id'],
+      },
+      isDeferred: false,
+    })
+    await $.tool.register({
+      name: 'rule',
+      description:
+        'Standing rules from your user, kept for every agent in your space across context clears. When your user gives an instruction meant for good ("from now on", "always", "never"), add it here in their words, a sentence or two: they approve it, and then it is in every agent\'s instructions. List them to see what stands, with any of yours still waiting. Only your user changes or removes one.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['add', 'list'], description: 'add (the default when text is given) or list' },
+          text: { type: 'string', description: 'add: the rule, as your user said it' },
         },
       },
       isDeferred: false,
@@ -1682,6 +1747,9 @@ export const register: Register = on => {
       reply_to: input.reply_to,
       kind: input.kind === 'task' || input.kind === 'announcement' ? input.kind : undefined,
       parent_task: typeof input.parent_task === 'string' && input.parent_task ? input.parent_task : undefined,
+      task: typeof input.task === 'string' && input.task ? input.task : undefined,
+      default: typeof input.default === 'string' && input.default ? input.default : undefined,
+      default_after: typeof input.default_after === 'string' && input.default_after ? input.default_after : undefined,
       options: Array.isArray(input.options) ? input.options : undefined,
       files: Array.isArray(input.files) ? input.files : undefined,
     })
@@ -1689,7 +1757,7 @@ export const register: Register = on => {
     if (res.data.task)
       return text(`Sent to ${res.data.to} (${res.data.id}) as task ${res.data.task}. You'll get its note when it's done or failed; continue with other work meanwhile.`)
     return text(
-      `Sent to ${res.data.to} (${res.data.id}).${res.data.note ? ` Note: ${res.data.note}.` : input.expects_reply ? ' Their reply will arrive as a peer message; continue with other work meanwhile.' : ''}`,
+      `Sent to ${res.data.to} (${res.data.id}).${res.data.note ? ` Note: ${res.data.note}.` : input.expects_reply ? ' Their reply will arrive as a peer message; continue with other work meanwhile.' : ''}${res.data.about_task ? ` Their answer will be kept on task ${res.data.about_task} and sent to everyone working under it.` : ''}`,
     )
   }).catch(daemonDown)
 
@@ -1741,6 +1809,38 @@ export const register: Register = on => {
     if (t.status === 'done' || t.status === 'failed') summaryDue = true
     // The task's own title, so an agent that mixed up two task ids sees it closed the wrong one.
     return text(`Task ${t.id} from ${t.requester?.name || 'your user'} ("${t.title}") is ${t.status.replace('_', ' ')}.${t.status === 'done' || t.status === 'failed' ? ` ${t.requester?.name || 'Whoever asked'} gets your note. If that isn't the task you meant, tell them at once.` : ''}`)
+  }).catch(daemonDown)
+
+  on('tool.call', { tool: 'mcp__peerlink__task' }, async ($, e) => {
+    const input = e as any
+    const id = encodeURIComponent(String(input.id ?? '').trim())
+    if (input.action === 'note' || (input.action === undefined && input.text)) {
+      const res = await call($, 'POST', `/api/tasks/${id}/note`, { by: sessionId, text: input.text, blocked: !!input.blocked })
+      if (!res.ok) return text(`Not noted: ${res.data.error ?? res.status}`)
+      const told = (res.data.told as string[]).join(', ')
+      return text(
+        res.data.direction === 'down'
+          ? `On ${res.data.task}'s record${told ? `, and sent to ${told}` : '; nobody is working under it right now'}. Don't message them as well.`
+          : `On ${res.data.task}'s record${told ? `; ${told} ${input.blocked ? 'was told now' : 'reads it at its next turn'}` : ''}. Don't message them as well.`,
+      )
+    }
+    const res = await call($, 'GET', `/api/tasks/${id}?by=${encodeURIComponent(sessionId)}`)
+    if (!res.ok) return text(`Not shown: ${res.data.error ?? res.status}`)
+    return text(taskRecord(res.data))
+  }).catch(daemonDown)
+
+  on('tool.call', { tool: 'mcp__peerlink__rule' }, async ($, e) => {
+    const input = e as any
+    const rule = String(input.text ?? '').trim()
+    if (input.action === 'list' || !rule) {
+      const res = await call($, 'GET', `/api/rules?by=${encodeURIComponent(sessionId)}`)
+      if (!res.ok) return text(`Daemon error: ${res.data.error ?? res.status}`)
+      const rows = (res.data.rules as any[]).map(r => `- ${r.id}${r.status === 'pending' ? ' (waiting for your user)' : ''} [${r.space === '*' ? 'every space' : r.space}]: ${r.text}`)
+      return text(rows.length ? rows.join('\n') : 'No standing rules reach you.')
+    }
+    const res = await call($, 'POST', '/api/rules', { by: sessionId, text: rule })
+    if (!res.ok) return text(`Not added: ${res.data.error ?? res.status}`)
+    return text(`Rule ${res.data.rule.id} for ${res.data.rule.space} waits for your user's approval. You'll get a message when they decide; follow it yourself meanwhile.`)
   }).catch(daemonDown)
 
   on('tool.call', { tool: 'mcp__peerlink__report_issue' }, async ($, e) => text(await reportIssue($, String((e as any).what ?? ''), String((e as any).details ?? ''), (e as any).type === 'idea' ? 'idea' : 'bug')))

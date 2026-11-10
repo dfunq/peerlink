@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.8.75"
+VERSION = "0.9.0"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -50,6 +50,7 @@ LOG_PATH = os.path.join(HOME, "daemon.log")
 MESSAGES_PATH = os.path.join(HOME, "messages.jsonl")
 ISSUES_PATH = os.path.join(HOME, "issues.jsonl")
 TASKS_PATH = os.path.join(HOME, "tasks.json")
+RULES_PATH = os.path.join(HOME, "rules.json")
 SPAWNS_PATH = os.path.join(HOME, "spawns.json")
 SCHEDULES_PATH = os.path.join(HOME, "schedules.json")
 TERMINATIONS_PATH = os.path.join(HOME, "terminations.jsonl")
@@ -122,6 +123,15 @@ and to the point, and skip acknowledgements, thanks and sign-offs.
 - To hand a peer a piece of work, send_message with kind "task". A task \
 that comes to you ("task t3") is yours until you call update_task with \
 done or failed and a short note; the note goes to whoever asked.
+- A task keeps a record that everyone above and below it reads with the \
+task tool: look there before asking anyone where something stands. Report \
+progress and blockers as notes on your task, not as messages. To tell \
+everyone working under a task something, put one note on it: it reaches \
+every owner beneath at once, so no lead passes it on. Hand on part of a \
+task with parent_task.
+- When your user gives an instruction meant for good ("from now on", \
+"always", "never"), save it with the rule tool, so every agent keeps it \
+after a context clear; they approve it first.
 {clear_rule}- A peerlink tool added after your session started (clear_context, \
 schedule) may be listed only as a deferred tool: load it with ToolSearch, \
 "select:mcp__peerlink__<name>", then call it.
@@ -136,7 +146,10 @@ closes, and starts an agent in the folder if none is running.
 - When you need your user to do something only they can (a login, an \
 approval, a decision), send_message to "user": kind "task" for something to \
 do, expects_reply for a question. It waits in their Inbox, and on Discord \
-when you have a channel there; their answer comes back to you.
+when you have a channel there; their answer comes back to you. Name the \
+task a question is about (task): the answer is kept on it and sent to \
+everyone working under it. A question about something easy to undo can \
+carry a default you go with if they don't answer in time.
 {feedback_rule}""".replace("{clear_rule}", CLEAR_RULE).replace("{feedback_rule}", FEEDBACK_RULE)
 
 DEFAULT_CONFIG = {
@@ -161,6 +174,8 @@ DEFAULT_CONFIG = {
     "summary_model": "haiku",
     "auto_approve_all": False,  # every agent's requests to start an agent, or a schedule that may, go ahead without asking you
     "auto_approve_folders": [],  # the folders whose agents' requests do; set only from the web UI
+    "ask_defaults": True,  # a question to you may name a default the agent goes with when you haven't answered in time
+    "ask_default_min_m": 10,  # the shortest wait, in minutes, an agent may give you before its default applies
     "sessions": {},
     "folder_spaces": {},  # folder -> the space you put it in from the web UI; wins over its .peerlink
     "space_parents": {},  # space -> the space it sits inside, set on the Spaces page; wins over parent: lines
@@ -409,6 +424,7 @@ def client_config(sid):
         "inject_while_busy": config["inject_while_busy"],
         "wake_delay_s": config.get("wake_delay_s", 15),
         "guidance": config["guidance"] or default_guidance(),
+        "rules": [{"id": r["id"], "text": r["text"], "space": r["space"]} for r in rules_for(rec)] if rec else [],
         "feedback": config.get("feedback", False),
         "clear_nudge_tokens": config.get("clear_nudge_tokens", 400000),
         "muted": s["muted"],
@@ -1510,6 +1526,8 @@ def on_discord(d):
         next_msg[0] += 1
         task = new_task(msg, {"id": "", "name": msg["from_name"], "cwd": "", "discord": msg["discord"]}) if kind == "task" else None
         agent = queue_for_entry(entry, msg, asker)
+        if replied:
+            user_answered(replied, text, d["author"])
         msg["to_space"] = space_of(agent)[0] if agent else ""
         if task:
             task["owner"], task["space"] = msg["to_name"], msg["to_space"]
@@ -1668,6 +1686,8 @@ def on_press(press):
         return on_spawn_press(press)
     if press["custom_id"].startswith("pc:"):
         return on_spawn_press(press, decide_schedule, schedules)
+    if press["custom_id"].startswith("pu:"):
+        return on_spawn_press(press, decide_rule, rules)
     if press["custom_id"].startswith("pa:"):
         return on_clear_all_press(press)
     if press["custom_id"] in ("pr:0", "pl:0"):  # "pl:0" from before 0.8.33; an agent's buttons are "pl:<message>:<n>"
@@ -1706,6 +1726,7 @@ def on_press(press):
         }
         next_msg[0] += 1
         queue_for_folder(asked.get("from_cwd", ""), msg, continuation(asked.get("from", ""), asked.get("from_name", ""), asked.get("from_cwd", "")))
+        user_answered(asked, choice, press["author"])
     log("chat press", msg["id"], press["author"], "->", msg["to_name"], choice)
 
 
@@ -1827,6 +1848,10 @@ def inbox_items():
                  "title": f"Schedule for {tilde_path(c['folder'])}: {when_text(c)}",
                  "text": f"{c['prompt']}\n\nApproving it: {start_note(c)}."}
                 for c in schedules.values() if c["status"] == "pending"]
+        out += [{"kind": "approval", "id": r["id"], "who": r["requester"].get("name", ""), "since": r["created"],
+                 "title": f"Standing rule for {'every space' if r['space'] == '*' else r['space']}",
+                 "text": f"{r['text']}\n\nApproving it: every agent in {'every space' if r['space'] == '*' else r['space'] + ' and the spaces inside it'} gets it in its instructions, and keeps it after a context clear."}
+                for r in rules.values() if r["status"] == "pending"]
     order = {"approval": 0, "task": 1, "question": 2, "feedback": 3}
     return sorted(out, key=lambda x: (order[x["kind"]], x["since"]))
 
@@ -1847,7 +1872,7 @@ def inbox_act(body, discord_from=None):
     if kind == "approval":
         if action not in ("approve", "deny"):
             return 400, {"error": "a request to start an agent is approved or denied"}
-        decide = decide_schedule if iid in schedules else decide_spawn
+        decide = decide_schedule if iid in schedules else decide_rule if iid in rules else decide_spawn
         return decide(iid, action == "approve", chatlink.name(discord_from["channel_id"]) if discord_from else "the web UI")
     if kind == "feedback":
         if action not in ("accepted", "dismissed"):
@@ -1876,6 +1901,7 @@ def inbox_act(body, discord_from=None):
                         "reply_to": iid, "hops": 0, "status": "queued", "v": 2})
             next_msg[0] += 1
             agent = queue_for_folder(m.get("from_cwd", ""), msg, continuation(m.get("from", ""), m.get("from_name", ""), m.get("from_cwd", "")))
+            user_answered(m, text, discord_from["author"] if discord_from else USER_NAME)
         close_buttons(m)
         return 200, {"id": msg["id"], "to": msg["to_name"], "waiting": not agent}
     return 400, {"error": "kind is approval, task, question or feedback"}
@@ -2065,18 +2091,47 @@ def send(body):
     if parent and parent.get("from") == "user":
         to = "user"
     word = to.strip().lower()
+    # A question to you may name the default its agent goes with when you haven't answered in time, said under it.
+    try:
+        default, wait = ask_default(body, options) if sender_rec and kind == "message" else (None, 0)
+    except ValueError as err:
+        return 400, {"error": str(err)}
+    asks = bool(body.get("expects_reply")) or bool(default)
+    shown = text + (f"\n\nNo answer in {when_wait(wait)}, and {display_name(sender_rec)} goes with: {default}" if default else "")
+
+    def to_you(out):
+        """What went to you keeps the task it's about, so your answer lands on that task, and its default."""
+        code, res = out
+        if code == 200 and res.get("id") and kind == "message":
+            with lock:
+                m = next((x for x in reversed(messages) if x["id"] == res["id"]), None)
+                change = {"about_task": about_task(sender_rec, body.get("task"), text)} if m and m.get("expects_reply") else {}
+                if m and default:
+                    change.update(default=default, default_at=m["ts"] + wait)
+                change = {k: v for k, v in change.items() if v}
+                if change:
+                    m.update(change)
+                    append_log({"id": m["id"], **change})
+            if default:
+                res["note"] = f"they have {when_wait(wait)} to answer; after that you're told to go with your default"
+            if change.get("about_task"):
+                res["about_task"] = change["about_task"]
+        return out
+
     # A reply to a message from Discord goes back to that message, whether the model wrote "user" or "discord":
     # as a reply in its thread, and recorded with reply_to, so the message no longer reads as unanswered.
     if parent and parent.get("discord") and kind == "message":
-        out = send_discord(sender_rec, to, text, parent, hops, options, files, bool(body.get("expects_reply")))
+        out = send_discord(sender_rec, to, shown, parent, hops, options, files, asks)
         if out is not None:
-            return out
+            return to_you(out)
     # "discord", "telegram" or one with "#channel", not an agent whose name starts with discord, like discord-voice.
     if sender_rec and (word in USER_ALIASES or (kind == "task" and chat_target(word) and not parent)):
-        return user_send(sender_rec, word, text, kind, parent_task, bool(body.get("expects_reply")), hops, options, files)
-    out = send_discord(sender_rec, to, text, parent, hops, options, files, bool(body.get("expects_reply")))
+        return to_you(user_send(sender_rec, word, shown, kind, parent_task, asks, hops, options, files))
+    out = send_discord(sender_rec, to, shown, parent, hops, options, files, asks)
     if out is not None:
-        return out
+        return to_you(out)
+    if default:
+        return 400, {"error": "a default is for a question to your user: another agent answers when it reads yours"}
     # Between agents, options and files read as text: a numbered list, and paths (the filesystem is shared).
     if options:
         text += "\n" + "\n".join(f"{i + 1}. {o}" for i, o in enumerate(options))
@@ -2152,6 +2207,10 @@ def send(body):
         msg["wake"] = config.get("wake_for", "needed") == "all" or msg["expects_reply"] or bool(parent and parent.get("expects_reply"))
         next_msg[0] += 1
         if kind == "task":
+            if not parent_task and sender_rec:
+                # Handing on part of a task it owns, an agent names that task more often than it passes parent_task.
+                mine = {i for i in re.findall(r"\bt\d+\b", text) if i in tasks and tasks[i]["status"] in TASK_OPEN and owns_task(sender_rec, tasks[i])}
+                parent_task = mine.pop() if len(mine) == 1 else ""
             new_task(msg, {"id": sender, "name": msg["from_name"], "cwd": msg["from_cwd"]}, parent_task)
         inboxes.setdefault(target["id"], []).append(msg)
         if sender in sent_times:
@@ -2751,6 +2810,11 @@ def update_task(tid, body, web=False):
         if note:
             t["note"] = note
         t["updated"] = time.time()
+        if note or (status and status != was):
+            who = USER_NAME if web else display_name(by)
+            task_log(t, who, "closed" if t["status"] in TASK_CLOSED else "progress", (f"{t['status'].replace('_', ' ')}: " if status != was else "") + (note or ""))
+            if not web and owns:
+                t["blocked"] = ""
         if handed:
             task_message(t, t["owner_cwd"], f"{handed}. When it's finished, call update_task with done or failed and a short note.\n\n{t['text']}", kind="task")
             t["owner"] = folder_name(t["owner_cwd"]) if not successor(t["owner_cwd"]) else display_name(successor(t["owner_cwd"]))
@@ -2801,6 +2865,353 @@ def task_closed(t, web=False):
                 except ChatError as err:
                     log("discord", "task post failed:", err)
         threading.Thread(target=post_all, daemon=True).start()
+
+
+# A task's record: what was said and decided on it, read by everyone on its tree (whoever asked for it, whoever
+# owns it, and the same for the tasks above and below it), so a lead needn't pass each note on by hand.
+TASK_LOG_MAX = 60
+
+
+def task_log(t, who, kind, text):
+    """Add an entry to a task's record: progress, blocked, note, decision or closed. Called with the lock held."""
+    t.setdefault("log", []).append({"ts": time.time(), "by": who, "kind": kind, "text": str(text)[:2000]})
+    del t["log"][:-TASK_LOG_MAX]
+    t["updated"] = time.time()
+
+
+def task_chain(t):
+    """The tasks above this one, the topmost first."""
+    chain, seen = [], {t["id"]}
+    while t.get("parent") in tasks and t["parent"] not in seen:
+        t = tasks[t["parent"]]
+        seen.add(t["id"])
+        chain.insert(0, t)
+    return chain
+
+
+def task_below(t):
+    """Every task under this one as (task, depth), each parent before its children."""
+    out, todo, seen = [], [(c, 1) for c in tasks.values() if c.get("parent") == t["id"]], {t["id"]}
+    while todo:
+        c, depth = todo.pop(0)
+        if c["id"] in seen:
+            continue
+        seen.add(c["id"])
+        out.append((c, depth))
+        todo[0:0] = [(g, depth + 1) for g in tasks.values() if g.get("parent") == c["id"]]
+    return out
+
+
+def task_party(rec, t):
+    """What this agent is to the task: 'owner', 'asker' or ''."""
+    if owns_task(rec, t):
+        return "owner"
+    req = t["requester"]
+    return "asker" if rec["id"] == req.get("id") or (rec.get("cwd") and rec.get("cwd") == req.get("cwd")) else ""
+
+
+def on_task_tree(rec, t):
+    """Whether this agent asked for or owns the task, or any task above or below it."""
+    root = (task_chain(t) or [t])[0]
+    return any(task_party(rec, x) for x in [root] + [c for c, _ in task_below(root)])
+
+
+def task_brief(t, depth=0, log=False):
+    entries = t.get("log") or []
+    return {"id": t["id"], "title": t["title"], "owner": t["owner"], "requester": t["requester"].get("name", ""), "status": t["status"],
+            "created": t["created"], "updated": t["updated"], "note": t.get("note", ""), "blocked": t.get("blocked", ""), "depth": depth,
+            "log": list(entries) if log else [e for e in entries if e["kind"] in ("decision", "note")][-5:],
+            "last": entries[-1] if entries else None}
+
+
+def task_view(tid, by=None):
+    """A task with its record, the tasks above it (with what was decided on them) and every task below it: for
+    an agent on its tree, or for you (by None)."""
+    with lock:
+        t = tasks.get(tid)
+        if t is None:
+            return 404, {"error": f"no task {tid}"}
+        if by is not None and not on_task_tree(by, t):
+            return 403, {"error": f"{tid} isn't yours, and you're on no task above or below it"}
+        return 200, {"task": {**task_brief(t, log=True), "text": t["text"]}, "above": [task_brief(x) for x in task_chain(t)],
+                     "below": [task_brief(c, d) for c, d in task_below(t)]}
+
+
+def task_fan_out(t, text, sender=None, skip=()):
+    """Send `text` to the owner of task t and of every open task under it, once each; the names it reached.
+    Called with the lock held."""
+    told, seen = [], set(skip)
+    for x in [t] + [c for c, _ in task_below(t) if c["status"] in TASK_OPEN]:
+        if x.get("user") or not x.get("owner_cwd"):
+            continue
+        owner = task_owner(x)
+        key = owner["id"] if owner else f"{x['owner_cwd']}|{x['owner']}"
+        if key in seen:
+            continue
+        seen.add(key)
+        via = "" if x is t else f"\n(It reaches you through your task {x['id']}: {x['title']})"
+        msg = task_message(x, x["owner_cwd"], text + via, sender=sender, prefer=owner)
+        msg["wake"] = True
+        told.append(display_name(owner) if owner else x["owner"])
+    return told
+
+
+def task_note(tid, body):
+    """A note on an open task, kept in its record. From its owner it goes up: progress, or what it's blocked on,
+    to whoever asked. From whoever asked for it, or for a task above it, it goes down: to its owner and the owner
+    of every open task under it at once."""
+    text, blocked = str(body.get("text") or "").strip(), bool(body.get("blocked"))
+    if not text:
+        return 400, {"error": "text is required: the note"}
+    limit = int(config.get("max_message_chars") or 0)
+    if limit and len(text) > limit:
+        return 413, {"error": f"note is {len(text)} characters, over the {limit} limit: write the details to a file and give its path with a short summary"}
+    posts = []
+    with lock:
+        by = sessions.get(body.get("by") or "")
+        if by is None:
+            return 403, {"error": "unknown agent; register again"}
+        t = tasks.get(tid)
+        if t is None:
+            return 404, {"error": f"no task {tid}"}
+        if t["status"] not in TASK_OPEN:
+            return 409, {"error": f"{tid} is {t['status']}: notes go on open tasks"}
+        name = display_name(by)
+        if owns_task(by, t):
+            task_log(t, name, "blocked" if blocked else "progress", text)
+            t["blocked"] = text[:300] if blocked else ""
+            t["status"] = "in_progress"
+            req, told = t["requester"], []
+            line = f"Task {tid} ({t['title']}) is blocked. {name}:\n{text}" if blocked else f"Task {tid} ({t['title']}), progress from {name}:\n{text}"
+            if req.get("discord"):
+                posts.append((req["discord"]["channel_id"], f"**{name}**: {line}", req["discord"]["message_id"]))
+                told = [req.get("name") or USER_NAME]
+            elif req.get("cwd"):
+                asker = continuation(req.get("id") or "", req.get("name") or "", req.get("cwd") or "")
+                msg = task_message(t, req["cwd"], line, sender=by, reply_to=t["msg"], prefer=asker)
+                # Progress is read at the asker's next turn; only a blocker is worth starting one for.
+                msg["wake"], msg["expects_reply"] = blocked or config.get("wake_for", "needed") == "all", blocked
+                told = [msg["to_name"]]
+            save_tasks()
+            out = {"task": tid, "direction": "up", "told": told}
+        elif any(task_party(by, x) for x in task_chain(t) + [t]):
+            task_log(t, name, "note", text)
+            t["blocked"] = ""
+            reach = [x for x in [t] + [c for c, _ in task_below(t) if c["status"] in TASK_OPEN]]
+            told = task_fan_out(t, f"Note on task {tid} ({t['title']}) from {name}"
+                                   + (f", sent to everyone working under it ({len(reach)} tasks)" if len(reach) > 1 else "") + f":\n{text}",
+                                sender=by, skip={by["id"]})
+            save_tasks()
+            out = {"task": tid, "direction": "down", "told": told}
+        else:
+            return 403, {"error": f"{tid} isn't yours, and you asked for neither it nor a task above it"}
+    post_async(posts)
+    log("task", tid, "note", out["direction"], "->", ", ".join(out["told"]) or "nobody")
+    return 200, out
+
+
+def about_task(sender_rec, named, text):
+    """The task a question to your user is about: the one named, else the single open task on the sender's own
+    trees that its text mentions. '' for none. Called with the lock held."""
+    if named:
+        t = tasks.get(str(named))
+        return t["id"] if t and on_task_tree(sender_rec, t) else ""
+    ids = {i for i in re.findall(r"\bt\d+\b", text) if i in tasks and tasks[i]["status"] in TASK_OPEN and task_party(sender_rec, tasks[i])}
+    return ids.pop() if len(ids) == 1 else ""
+
+
+def user_answered(asked, answer, who):
+    """Your answer to an agent's question about a task is kept on the task as a decision, and goes straight to
+    everyone working under it: the agent that asked doesn't have to pass it down. Called with the lock held."""
+    t = tasks.get(asked.get("about_task") or "")
+    if not t or t["status"] not in TASK_OPEN:
+        return
+    question = task_title_of(asked.get("text", ""))[:300]
+    task_log(t, who, "decision", f"{question}\n→ {answer}")
+    task_fan_out(t, f"Decision from {who} on task {t['id']} ({t['title']}), asked by {asked.get('from_name') or 'an agent'}:\n> {question}\n{answer}",
+                 skip={asked.get("from", "")})
+    save_tasks()
+
+
+# Standing rules: what you told your agents once and meant for good ("never merge on Fridays"). A rule belongs to a
+# space and reaches every agent in it and in the spaces inside it, in its instructions, so a cleared context still
+# has it. You write them in the web UI; one an agent proposes waits for your approval, whatever auto-approve says.
+rules = {}
+RULE_MAX = 600
+
+
+def load_rules():
+    try:
+        with open(RULES_PATH) as f:
+            for x in json.load(f):
+                rules[x["id"]] = x
+    except (OSError, ValueError, KeyError):
+        pass
+
+
+def save_rules():
+    with open(RULES_PATH + ".tmp", "w") as f:
+        json.dump(list(rules.values()), f, indent=1)
+    os.replace(RULES_PATH + ".tmp", RULES_PATH)
+
+
+def rules_for(rec):
+    """The active rules that reach this agent: those of every space ("*"), its own, and each space its own is inside."""
+    space, chain = space_of(rec)[0], {"*"}
+    while space and space not in chain:
+        chain.add(space)
+        space = space_parent(space)
+    return [r for r in sorted(rules.values(), key=lambda r: r["created"]) if r["status"] == "active" and r["space"] in chain]
+
+
+def rule_view(r):
+    return {k: r[k] for k in ("id", "space", "text", "status", "created", "updated")} | {"by": r["requester"].get("name", "")}
+
+
+def add_rule(body, by=None):
+    """A rule from you (by None): active at once. From an agent: for its own space, pending until you approve."""
+    text = " ".join(str(body.get("text") or "").split())
+    if not text:
+        return 400, {"error": "text is required: the rule, in a sentence"}
+    if len(text) > RULE_MAX:
+        return 400, {"error": f"a rule is a sentence or two: this is {len(text)} characters, over {RULE_MAX}"}
+    now = time.time()
+    with lock:
+        space = space_of(by)[0] if by else "*" if str(body.get("space") or "*") == "*" else clean_space(body.get("space")) or "*"
+        if any(r["text"].lower() == text.lower() and r["space"] == space and r["status"] in ("active", "pending") for r in rules.values()):
+            return 409, {"error": "that rule is already there" + ("" if not by else ", or waiting for your user")}
+        n = max([int(i[1:]) for i in rules] or [0]) + 1
+        r = {"id": f"r{n}", "space": space, "text": text, "status": "pending" if by else "active", "created": now, "updated": now,
+             "requester": {"id": by["id"], "name": display_name(by), "cwd": by.get("cwd", "")} if by else {"name": USER_NAME, "cwd": ""}}
+        rules[r["id"]] = r
+        save_rules()
+        channel = approval_channel(by) if by else ""
+    log("rule", r["id"], r["status"], space, r["requester"]["name"])
+    if r["status"] == "pending" and channel and chat_ready(channel):
+        try:
+            sent = chat_post(channel, f"**{r['requester']['name']}** asks to keep this as a standing rule for every agent in **{space}**:\n> {text}",
+                             None, choices(["Approve", "Deny"], f"pu:{r['id']}"))
+            with lock:
+                r["discord_out"] = {"channel_id": channel, "message_id": sent}
+                save_rules()
+        except ChatError as err:
+            log("discord", "rule post failed:", err)
+    return 200, {"rule": rule_view(r)}
+
+
+def rule_told(r, text):
+    """Tell the agent that proposed a rule what became of it. Called with the lock held."""
+    if r["requester"].get("cwd"):
+        task_message(None, r["requester"]["cwd"], text)
+
+
+def decide_rule(rid, approve, via):
+    with lock:
+        r = rules.get(rid)
+        if r is None:
+            return 404, {"error": f"no rule {rid}"}
+        if r["status"] != "pending":
+            return 409, {"error": f"{rid} is already {r['status']}"}
+        r["status"], r["updated"] = ("active" if approve else "denied"), time.time()
+        rule_told(r, f"Your user {'approved' if approve else 'denied'} rule {rid}" + (f": every agent in {r['space']} has it from its next prompt." if approve else "."))
+        save_rules()
+    close_buttons(r)
+    log("rule", rid, r["status"], "via", via)
+    return 200, {"rule": rule_view(r)}
+
+
+def edit_rule(rid, body):
+    """You change a rule's text or space, turn it off or on, or delete it."""
+    with lock:
+        r = rules.get(rid)
+        if r is None:
+            return 404, {"error": f"no rule {rid}"}
+        if body.get("delete"):
+            rules.pop(rid)
+            save_rules()
+            close_buttons(r)
+            return 200, {"deleted": rid}
+        text = " ".join(str(body["text"]).split()) if "text" in body else r["text"]
+        if not text or len(text) > RULE_MAX:
+            return 400, {"error": f"a rule is a sentence or two, up to {RULE_MAX} characters"}
+        status = body.get("status", r["status"])
+        if status not in ("active", "off"):
+            return 400, {"error": "a rule is active or off"}
+        space = ("*" if str(body["space"]) == "*" else clean_space(body["space"]) or r["space"]) if "space" in body else r["space"]
+        r.update({"text": text, "status": status, "space": space, "updated": time.time()})
+        save_rules()
+    close_buttons(r)
+    return 200, {"rule": rule_view(r)}
+
+
+# A question to you may carry a default: what the agent goes with when you haven't answered in time. You can turn
+# that off, and set the shortest wait an agent may give you, under Settings.
+def parse_wait(raw):
+    """Seconds in "30m", "2h", "1d" or "in 45m"; ValueError when it's none of those."""
+    m = re.fullmatch(r"\s*(?:in\s+)?(\d+)\s*(m|min|mins|minutes?|h|hours?|d|days?)\s*", str(raw or ""), re.I)
+    if not m:
+        raise ValueError('default_after is a wait like "30m", "2h" or "1d"')
+    return int(m.group(1)) * {"m": 60, "h": 3600, "d": 86400}[m.group(2)[0].lower()]
+
+
+def ask_default(body, options):
+    """(default, seconds) a question carries, (None, 0) when it has none. Raises ValueError saying what's wrong."""
+    default = str(body.get("default") or "").strip()
+    if not default:
+        return None, 0
+    if not config.get("ask_defaults", True):
+        raise ValueError("your user turned defaults off: ask without one, and wait for their answer")
+    if options and default not in options:
+        raise ValueError(f"default has to be one of the options: {', '.join(options)}")
+    wait = parse_wait(body.get("default_after") or "30m")
+    least = int(config.get("ask_default_min_m") or 0)
+    if wait < least * 60:
+        raise ValueError(f"default_after is at least {least} minutes: your user set that")
+    return default[:300], min(wait, 7 * 86400)
+
+
+def ask_settled(m):
+    """Whether you've dealt with a question: answered it, dismissed it, or written to its agent or channel since.
+    Called with the lock held."""
+    if m.get("handled") or m.get("inbox_done"):
+        return True
+    for x in reversed(messages):
+        if x["ts"] < m["ts"]:
+            break
+        if x.get("reply_to") == m["id"]:
+            return True
+        if str(x.get("from", "")).startswith("discord:") and (x.get("to_cwd") == m.get("from_cwd") or x["from"] == m.get("to")):
+            return True
+    return False
+
+
+def apply_defaults(now):
+    """Questions whose wait has run out unanswered: the agent is told to go with its default, the question leaves
+    your Inbox, and its chat post says what happened. Called with the lock held."""
+    for m in [x for x in messages if x.get("default_at") and x["default_at"] <= now and not x.get("default_done")]:
+        m["default_done"] = True
+        change = {"id": m["id"], "default_done": True}
+        if not ask_settled(m):
+            waited = when_wait(m["default_at"] - m["ts"])
+            answer = {"id": f"m{next_msg[0]}", "ts": now, "from": "peerlink", "from_name": "peerlink", "from_host": HOSTNAME, "from_cwd": "",
+                      "to_cwd": m.get("from_cwd", ""), "from_space": "", "to_space": m.get("from_space", ""),
+                      "text": f"No answer from your user in {waited}, so go with your default: {m['default']}\nThey were told; if they answer later, their answer wins.",
+                      "expects_reply": False, "reply_to": m["id"], "hops": 0, "status": "queued", "v": 2, "wake": True}
+            next_msg[0] += 1
+            queue_for_folder(m.get("from_cwd", ""), answer, continuation(m.get("from", ""), m.get("from_name", ""), m.get("from_cwd", "")))
+            m["inbox_done"] = change["inbox_done"] = True
+            user_answered(m, f"{m['default']} (the default: no answer in {waited})", "default")
+            close_buttons(m)
+            out = m.get("discord_out") or {}
+            if out.get("message_id"):
+                post_async([(out["channel_id"], f"No answer in {waited}, so **{m.get('from_name') or 'the agent'}** is going with its default: {m['default']}\nTell it if that's wrong.", out["message_id"])])
+            log("default", m["id"], m.get("from_name", ""), "->", m["default"][:80])
+        append_log(change)
+
+
+def when_wait(s):
+    s = int(round(s / 60.0)) * 60
+    return f"{s // 86400} day{'s' if s >= 172800 else ''}" if s >= 86400 and s % 86400 == 0 else f"{s // 3600} hour{'s' if s >= 7200 else ''}" if s >= 3600 and s % 3600 == 0 else f"{max(1, s // 60)} min"
 
 
 # Starting an agent: an agent asks, you approve (web UI or Discord, never an agent or a bot), and only then
@@ -3736,6 +4147,12 @@ def reap():
             else:
                 continue
             save_schedules()
+        for r in [x for x in rules.values() if x["status"] == "pending" and now - x["created"] > SPAWN_TTL_S]:
+            r["status"], r["updated"] = "expired", now
+            rule_told(r, f"Your rule {r['id']} expired: your user didn't approve it within a day.")
+            lapse(r, f"keep a standing rule for {r['space']}", rule_told)
+            save_rules()
+        apply_defaults(now)
         lapsed = usage_limit and now >= (usage_limit.get("resets_at") or usage_limit["since"] + LIMIT_FALLBACK_S)
         # While the limit holds, a due schedule waits: it runs once the limit lifts.
         due = [] if usage_limit else [c for c in schedules.values() if c["status"] == "active" and c.get("next_run") and c["next_run"] <= now]
@@ -4388,6 +4805,33 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(403, {"error": "the Inbox is answered from the web UI or Discord"})
             code, out = inbox_act(self.body())
             return self.reply(code, out)
+        if rest == ["rules"] and method == "GET":
+            with lock:
+                by = sessions.get(q.get("by", [""])[0])
+                shown = rules_for(by) + [r for r in rules.values() if r["status"] == "pending" and r["requester"].get("id") == by["id"]] if by else sorted(rules.values(), key=lambda r: r["created"])
+                return self.reply(200, {"rules": [rule_view(r) for r in shown]})
+        if rest == ["rules"] and method == "POST":
+            b = self.body()
+            if browser and not self.key_ok():
+                return self.reply(*add_rule(b))
+            with lock:
+                by = sessions.get(str(b.get("by") or ""))
+            if by is None:
+                return self.reply(403, {"error": "unknown agent; register again"})
+            return self.reply(*add_rule(b, by))
+        # Only you change or drop a rule: an agent proposes one, and asks you to change one.
+        if len(rest) == 2 and rest[0] == "rules" and method == "POST":
+            if not browser:
+                return self.reply(403, {"error": "only your user changes or removes a rule, from the web UI: ask them"})
+            return self.reply(*edit_rule(rest[1], self.body()))
+        if len(rest) == 2 and rest[0] == "tasks" and method == "GET":
+            with lock:
+                by = sessions.get(q.get("by", [""])[0])
+            if by is None and not (browser and not self.key_ok()):
+                return self.reply(403, {"error": "unknown agent; register again"})
+            return self.reply(*task_view(rest[1], by))
+        if len(rest) == 3 and rest[0] == "tasks" and rest[2] == "note" and method == "POST":
+            return self.reply(*task_note(rest[1], self.body()))
         if rest == ["tasks"] and method == "GET":
             with lock:
                 return self.reply(200, {"tasks": sorted(tasks.values(), key=lambda t: -t["created"])[:500]})
@@ -4534,6 +4978,7 @@ def serve():
     load_feedback()
     load_spawns()
     load_schedules()
+    load_rules()
     load_dirs()
     file_pending_issues()
     load_discord()
@@ -4871,7 +5316,9 @@ details.plat .pbody h2{font-size:14px;margin:16px 0 6px}.pill.warn{color:var(--w
 .mlist{display:flex;flex-direction:column;gap:8px}
 .task{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px}
 .task .mh{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;font-size:13px}.task .mh .when{margin-left:auto;color:var(--mut);font-size:12px}
-.task .note{margin-top:6px;overflow-wrap:anywhere;font-size:13px}.task .tact{margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}.task .tact select{width:auto}
+.task .note{margin-top:6px;overflow-wrap:anywhere;font-size:13px}.tblocked{margin-top:6px;font-size:13px;color:var(--warn);overflow-wrap:anywhere}
+.tlog{margin-top:6px;font-size:12px}.tlog summary{cursor:pointer;color:var(--mut)}.tlog .te{margin-top:6px;padding-left:8px;border-left:2px solid var(--line);overflow-wrap:anywhere}.tlog .te.decision{border-left-color:var(--ok)}.tlog .te.blocked{border-left-color:var(--warn)}.tlog .te .k{color:var(--mut)}
+.rule{display:flex;gap:8px;align-items:center;flex-wrap:wrap;border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:var(--card,transparent)}.rule.off{opacity:.6}.rule input[type=text]{flex:1;min-width:220px}.rule select{width:150px}.task .tact{margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}.task .tact select{width:auto}
 .task.sub{margin-left:24px}button.danger{color:var(--bad);border-color:var(--bad)}nav .count.hot:not(:empty){background:var(--acc);color:#fff;border-radius:999px;padding:1px 7px;font-weight:600}.ititle{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}.task .ftext{margin-top:6px;overflow-wrap:anywhere;font-size:13px;max-height:16em;overflow:auto}
 .task .tact input{flex:1;min-width:160px}.tchip.new,.tchip.bug{color:var(--warn);border-color:var(--warn)}.tchip.accepted,.tchip.idea{color:var(--acc);border-color:var(--acc)}.tchip{font-size:11px;border-radius:999px;padding:1px 8px;border:1px solid var(--line);color:var(--mut)}
 .fl[hidden]{display:none}.seg{display:inline-flex}.seg button{border-radius:0}.seg button:first-child{border-radius:8px 0 0 8px}.seg button:last-child{border-radius:0 8px 8px 0;margin-left:-1px}.seg button.on{background:var(--acc);color:#fff;border-color:var(--acc)}
@@ -4987,6 +5434,10 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <p class="lead">Which agents can see and message each other.</p>
 <details class="how"><summary>How spaces work</summary><p>An agent is in the space you put its folder in, from its Details tab on the Agents page. A folder you haven't placed takes the space in the nearest <span class="mono">.peerlink</span> file at or above it, else it's <b>unassigned</b>. Here you pick each space's lead, which gets work sent to the space, and which space it sits inside: its lead then speaks for it there.</p></details>
 <div id="spacelist"></div>
+<h2 style="margin-top:28px">Standing rules</h2>
+<p class="lead">What you've told your agents for good. A rule reaches every agent in its space and the spaces inside it, in its instructions, so a cleared context still has it. One an agent proposes waits here for your approval.</p>
+<div id="rules"><div id="rulelist" style="display:flex;flex-direction:column;gap:8px"></div>
+<form id="ruleform" class="addline" style="margin-top:10px"><select name="space" id="rulespace" style="width:170px"></select><input name="text" type="text" class="grow" placeholder="Never merge to main on a Friday" required maxlength="600"><button type="submit">Add rule</button><span class="small err" id="rulemsg"></span></form></div>
 </section>
 
 <section id="schedules"><h1>Schedules</h1><p class="lead">Prompts the daemon sends an agent at a time or on a repeat, even with no terminal open.</p>
@@ -5067,6 +5518,9 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <details class="plat" id="sapprove"><summary><span class="plogo" style="background:var(--ok)"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10zM9 12l2 2 4-4"/></svg></span><span class="ptitle"><b>Approvals</b><span class="psub">Whether agents ask you before starting agents and schedules</span></span><span class="chev" aria-hidden="true"></span></summary><div class="pbody">
 <div class="check"><input type="checkbox" name="auto_approve_all" id="aaa"><label for="aaa" style="margin:0">Let every agent start agents and schedules without asking me</label></div>
 <div class="mut small">You're still told on Discord when one does. To allow only some agents, leave this off and turn it on in an agent's Controls tab.</div>
+<div class="check" style="margin-top:10px"><input type="checkbox" name="ask_defaults" id="adf"><label for="adf" style="margin:0">Let an agent's question name a default it goes with when I don't answer in time</label></div>
+<div class="row"><div><label for="adm">The shortest wait an agent may give me (minutes)</label><input type="number" name="ask_default_min_m" id="adm" min="0" step="5"></div><div></div></div>
+<div class="mut small">The question says the default and the wait. When the wait runs out you're told under it, and a later answer from you still wins. A standing rule an agent proposes always waits for your approval.</div>
 </div></details>
 <details class="plat" id="ssee"><summary><span class="plogo" style="background:#3d8fd6"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/></svg></span><span class="ptitle"><b>What agents see</b><span class="psub">The live agent list, summaries and feedback</span></span><span class="chev" aria-hidden="true"></span></summary><div class="pbody">
 <div class="check"><input type="checkbox" name="roster_in_prompt" id="rp"><label for="rp" style="margin:0">Show each agent the live agent list when it changes</label></div>
@@ -5524,13 +5978,19 @@ document.addEventListener('change',async e=>{const t=e.target;
 let allTasks=[],panelTab='about';
 const TSTATE={open:'open',in_progress:'in progress',done:'done',failed:'failed',cancelled:'cancelled'};
 const isLive=t=>t.status==='open'||t.status==='in_progress';
+// A task's record: what its owner reported, what it's blocked on, notes from above and what you decided.
+const TKIND={progress:'progress',blocked:'blocked',note:'note',decision:'decision',closed:'closed'};
+const taskLog=t=>(t.blocked&&isLive(t)?`<div class="tblocked"><b>Blocked:</b> ${esc(t.blocked)}</div>`:'')
+  +((t.log||[]).length?`<details class="tlog" data-tlog="${esc(t.id)}" ${openLogs.has(t.id)?'open':''}><summary>Record (${t.log.length})</summary>${t.log.slice().reverse().map(e=>`<div class="te ${esc(e.kind)}"><span class="k">${esc(TKIND[e.kind]||e.kind)} · ${esc(e.by)} · ${ago(e.ts)} ago</span><div class="md">${md(e.text)}</div></div>`).join('')}</details>`:'');
+const openLogs=new Set();
+document.addEventListener('toggle',e=>{const d=e.target;if(!d.dataset||!d.dataset.tlog)return;d.open?openLogs.add(d.dataset.tlog):openLogs.delete(d.dataset.tlog)},true);
 // A summary unchanged for two hours may describe work that's long done: shown dimmed, with its age.
 const oldSummary=x=>!!(x.summary&&x.summary_ts&&Date.now()/1000-x.summary_ts>7200);
 const ago=ts=>{const d=Date.now()/1000-ts;return d<90?Math.round(d)+'s':d<5400?Math.round(d/60)+'m':d<129600?Math.round(d/3600)+'h':Math.round(d/86400)+'d'};
 function taskRow(t,sub){const kids=allTasks.filter(x=>x.parent===t.id);
   return `<div class="task${sub?' sub':''}" data-task="${esc(t.id)}"><div class="mh"><span class="tchip ${esc(t.status)}">${TSTATE[t.status]||esc(t.status)}</span><b>${esc(t.title)}</b><span class="when">${esc(t.id)} · ${ago(t.created)} ago</span></div>
     <div class="small mut">${esc(t.requester?.name||'?')} → <b>${esc(t.owner)}</b>${t.space?' · '+esc(t.space):''}${kids.length?` · ${kids.filter(k=>k.status==='done').length} of ${kids.length} subtasks done`:''}${!isLive(t)?' · closed '+ago(t.updated)+' ago':''}</div>
-    ${t.note?`<div class="note md">${md(t.note)}</div>`:''}
+    ${t.note?`<div class="note md">${md(t.note)}</div>`:''}${taskLog(t)}
     <div class="tact">${isLive(t)?'<button class="ghost small" data-tact="cancelled">Cancel</button>':'<button class="ghost small" data-tact="open">Reopen</button>'}${agentSelect('','data-treassign','Reassign to…')}</div></div>`}
 // Open and in-progress first, then the rest, newest first within each.
 const byLive=list=>list.slice().sort((a,b)=>(isLive(b)-isLive(a))||(b.created-a.created));
@@ -5557,9 +6017,9 @@ function taskCard(t){const kids=allTasks.filter(x=>x.parent===t.id),done=kids.fi
   return `<div class="tcard${openCards.has(t.id)?' open':''}" draggable="true" data-task="${esc(t.id)}" data-st="${esc(t.status)}" tabindex="0" aria-label="${esc(t.title)}, ${TSTATE[t.status]}, owner ${esc(t.owner)}">
     <div class="tt">${esc(t.title)}</div>
     <div class="meta by"><span><b>${esc(t.owner)}</b> · asked by ${esc(reqName(t))}</span><span class="age" title="${new Date(t.created*1000).toLocaleString()}">${ago(t.created)}</span></div>
-    ${t.parent?`<div class="meta">↳ part of ${esc(t.parent)}</div>`:''}
+    ${t.parent?`<div class="meta">↳ part of ${esc(t.parent)}</div>`:''}${t.blocked&&isLive(t)?`<div class="meta" style="color:var(--warn)">blocked</div>`:''}
     ${kids.length?`<div class="meta">${done} of ${kids.length} subtasks done</div><div class="bar"><i style="width:${Math.round(100*done/kids.length)}%"></i></div>`:''}
-    <div class="more">${t.space?`<div class="meta">${esc(t.id)} · ${esc(t.space)}</div>`:`<div class="meta">${esc(t.id)}</div>`}${t.note?`<div class="note md">${md(t.note)}</div>`:''}
+    <div class="more">${t.space?`<div class="meta">${esc(t.id)} · ${esc(t.space)}</div>`:`<div class="meta">${esc(t.id)}</div>`}${t.note?`<div class="note md">${md(t.note)}</div>`:''}${taskLog(t)}
     <div class="tact">${isLive(t)?'<button class="ghost small" data-tact="cancelled">Cancel</button>':'<button class="ghost small" data-tact="open">Reopen</button>'}${agentSelect('','data-treassign','Reassign to…')}</div></div></div>`}
 function board(list){const shut=!openCards.has('col:cancelled');
   return `<div class="board">${COLS.map(([k,label])=>{const cards=list.filter(t=>t.status===k).sort((a,b)=>b.created-a.created);
@@ -5813,6 +6273,30 @@ setInterval(()=>{if(location.hash==='#channels'&&tState?.configured&&!document.h
 window.addEventListener('focus',()=>{if(location.hash==='#channels'&&dState?.configured){dGuilds=null;loadDiscord(true)}});
 window.addEventListener('hashchange',()=>{if(location.hash==='#discord')location.hash='#channels';if(location.hash==='#channels'){loadDiscord();loadTelegram()}});
 
+// Standing rules, on the Spaces page: yours to add, change, turn off or delete; an agent's proposal to approve.
+let allRules=[];
+async function loadRules(){const r=await api('/api/rules');if(!r||r.error)return;allRules=r.rules||[];
+  const spaces=[...new Set([...livePeers.map(x=>x.space).filter(Boolean),...allRules.map(x=>x.space).filter(x=>x!=='*')])].sort();
+  const sopts=sel=>`<option value="*" ${sel==='*'?'selected':''}>Every space</option>`+spaces.map(n=>`<option value="${esc(n)}" ${sel===n?'selected':''}>${esc(n)}</option>`).join('');
+  const sel=$('#rulespace');if(sel&&document.activeElement!==sel){const was=sel.value||'*';sel.innerHTML=sopts(was)}
+  if(document.activeElement&&document.activeElement.closest('#rulelist'))return;
+  const row=x=>x.status==='pending'?`<div class="rule" data-rule="${esc(x.id)}"><span class="pill warn">needs approval</span><span class="grow"><b>${esc(x.by)}</b> proposes for <b>${esc(x.space==='*'?'every space':x.space)}</b>: ${esc(x.text)}</span><button data-ruleok="approve">Approve</button><button class="ghost" data-ruleok="deny">Deny</button></div>`
+    :`<div class="rule${x.status==='off'?' off':''}" data-rule="${esc(x.id)}"><select data-rulespace aria-label="Space">${sopts(x.space)}</select><input type="text" data-ruletext value="${esc(x.text)}" maxlength="600" aria-label="Rule ${esc(x.id)}"><span class="small mut">${esc(x.id)}${x.by?' · '+esc(x.by):''}</span><button class="ghost small" data-ruleset="${x.status==='off'?'active':'off'}">${x.status==='off'?'Turn on':'Turn off'}</button><button class="ghost small danger" data-ruledel>Delete</button></div>`;
+  const shown=allRules.filter(x=>['pending','active','off'].includes(x.status)).sort((a,b)=>(a.status==='pending'?0:1)-(b.status==='pending'?0:1)||a.created-b.created);
+  $('#rulelist').innerHTML=shown.map(row).join('')||'<div class="empty">No rules yet.</div>'}
+const ruleOf=e=>e.target.closest('[data-rule]')?.dataset.rule;
+document.addEventListener('submit',async e=>{if(e.target.id!=='ruleform')return;e.preventDefault();const f=e.target;
+  const r=await post('/api/rules',{space:f.elements.space.value,text:f.elements.text.value});$('#rulemsg').textContent=r.error||'';if(!r.error)f.elements.text.value='';loadRules()});
+document.addEventListener('click',async e=>{const id=ruleOf(e);if(!id)return;const b=e.target.closest('button');if(!b)return;let r;
+  if(b.dataset.ruleok)r=await post('/api/inbox',{kind:'approval',id,action:b.dataset.ruleok});
+  else if(b.dataset.ruleset)r=await post('/api/rules/'+encodeURIComponent(id),{status:b.dataset.ruleset});
+  else if(b.dataset.ruledel!==undefined){if(!confirm('Delete this rule? Agents stop getting it from their next prompt.'))return;r=await post('/api/rules/'+encodeURIComponent(id),{delete:true})}
+  if(r&&r.error)alert(r.error);b.blur();loadRules();refresh(true)});
+document.addEventListener('change',async e=>{const id=ruleOf(e);if(!id)return;const t=e.target;
+  const r=t.dataset.ruletext!==undefined?await post('/api/rules/'+encodeURIComponent(id),{text:t.value}):t.dataset.rulespace!==undefined?await post('/api/rules/'+encodeURIComponent(id),{space:t.value}):null;
+  if(r&&r.error)alert(r.error);t.blur();loadRules()});
+window.addEventListener('hashchange',()=>{if(location.hash==='#spaces')loadRules()});
+setInterval(()=>{if(location.hash==='#spaces'&&!document.hidden)loadRules()},5000);
 async function loadCfg(){cfg=await api('/api/config');const f=$('#cfg');
   panels({swake:true,sctx:true,sapprove:true,ssee:false,sguide:false,slimits:false,sremote:!!(cfg.remotes||[]).length});
   for(const el of f.elements){if(!el.name)continue;const v=cfg[el.name];
