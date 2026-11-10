@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.9.0'
+const DAEMON_VERSION = '0.9.1'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -704,7 +704,9 @@ async function poll($: EngineInterface) {
   try {
     const ack = unacked
     unacked = []
-    res = await call($, 'POST', `/api/sessions/${sessionId}/heartbeat`, { busy, activity: busy ? activity : undefined, context: await contextPercent($), branch: await freshBranch($), reload_queued: reloadQueued, ack })
+    // What's here on purpose, waiting for the next turn: the daemon needn't hand it out again while this says so.
+    const holding = [...pending, ...notices].map(m => m.id)
+    res = await call($, 'POST', `/api/sessions/${sessionId}/heartbeat`, { busy, activity: busy ? activity : undefined, context: await contextPercent($), branch: await freshBranch($), reload_queued: reloadQueued, ack, holding })
     if (!res.ok) unacked.push(...ack)
   } catch {
     await ensureDaemon($)
@@ -787,7 +789,13 @@ function summaryAge(p: any) {
 
 function taskNote(p: any) {
   const ids: string[] = Array.isArray(p.task_ids) ? p.task_ids : []
-  return ids.length ? ` · open tasks: ${ids.slice(0, 5).join(', ')}${ids.length > 5 ? ` +${ids.length - 5}` : ''}` : ''
+  // A task that hasn't moved in a day says so: its owner's summary may be about something else by now.
+  const quiet = (id: string) => {
+    const moved = p.task_times?.[id]?.[1]
+    const days = typeof moved === 'number' ? Math.floor((Date.now() / 1000 - moved) / 86400) : 0
+    return days >= 1 ? `${id} (quiet ${days}d)` : id
+  }
+  return ids.length ? ` · open tasks: ${ids.slice(0, 5).map(quiet).join(', ')}${ids.length > 5 ? ` +${ids.length - 5}` : ''}` : ''
 }
 
 function peerLine(p: any) {
