@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.1"
+VERSION = "0.9.2"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -51,6 +51,7 @@ MESSAGES_PATH = os.path.join(HOME, "messages.jsonl")
 ISSUES_PATH = os.path.join(HOME, "issues.jsonl")
 TASKS_PATH = os.path.join(HOME, "tasks.json")
 RULES_PATH = os.path.join(HOME, "rules.json")
+AGENTS_PATH = os.path.join(HOME, "agents.json")
 SPAWNS_PATH = os.path.join(HOME, "spawns.json")
 SCHEDULES_PATH = os.path.join(HOME, "schedules.json")
 TERMINATIONS_PATH = os.path.join(HOME, "terminations.jsonl")
@@ -757,6 +758,10 @@ def task_owner(t):
                 t["owner_id"] = oid  # the chain lives only in memory: a daemon restart would lose it
             return rec
         oid = succeeded_by.get(oid)
+    # The agent it was given to, in the session it runs in now; one from before agents had ids is found by the session.
+    mine = agent_session(t.get("owner_agent") or agent_of.get(t["owner_id"]))
+    if mine:
+        return mine
     named = [r for r in sessions.values() if is_live(r) and r.get("cwd") == t["owner_cwd"] and display_name(r) == t.get("owner")]
     return max(named, key=lambda r: r["last_seen"]) if named else successor(t["owner_cwd"])
 
@@ -766,7 +771,11 @@ def owns_task(rec, t):
     if not (t["owner_cwd"] and rec.get("cwd") == t["owner_cwd"]):
         return False
     owner = task_owner(t)
-    return not owner or owner["id"] == rec["id"]
+    if owner:
+        return owner["id"] == rec["id"]
+    # Its owner isn't running: the folder's agent stands in, unless the owner is another agent of this folder.
+    theirs = t.get("owner_agent") or agent_of.get(t.get("owner_id") or "")
+    return theirs not in agents or theirs == rec.get("agent") or not other_agent_stays(theirs, rec)
 
 
 def owned_task_ids(rec):
@@ -778,6 +787,7 @@ def public_peer(rec):
     space, source, where = space_of(rec)
     return {
         "id": rec["id"],
+        "agent": rec.get("agent", ""),  # the same through every session this agent has
         "name": display_name(rec),
         "host": HOSTNAME,
         "cwd": rec.get("cwd", ""),
@@ -2154,10 +2164,17 @@ def send(body):
             # The sender's conversation may have moved on (a /clear, a resume): the session that continued it takes the
             # reply, else its folder's live agent. Two agents can share a folder, so the right one is found first.
             back = continuation(parent["from"], parent.get("from_name", ""), parent.get("from_cwd", ""))
-            if not back:
+            theirs = agents.get(agent_of.get(parent["from"]) or "")
+            if not back and theirs and theirs.get("cwd"):
+                # Its agent isn't running: the reply waits for that agent (adopt() hands it over), not for another
+                # one in its folder.
+                target = {"id": parent["from"], "cwd": theirs["cwd"], "name": theirs["name"], "held": True}
+            if not back and not theirs:
                 back = successor(parent.get("from_cwd") or (sessions.get(parent["from"]) or {}).get("cwd", ""))
             if back:
                 target = back
+            elif target:
+                pass
             elif parent.get("from_cwd"):
                 # Nobody there right now (a daemon restart, an agent reloading): it waits for the folder's next agent.
                 target = {"id": f"folder:{parent['from_cwd']}", "cwd": parent["from_cwd"], "name": parent.get("from_name") or ""}
@@ -2221,6 +2238,8 @@ def send(body):
         record(msg)
     log("msg", msg["id"], msg["from_name"], "->", msg["to_name"])
     out = {"id": msg["id"], "to": msg["to_name"], "status": "queued", "task": msg.get("task")}
+    if target.get("held"):
+        out["note"] = f"{msg['to_name']} isn't running right now: it waits up to an hour for it"
     if last_word:
         out["note"] = f"delivered as this thread's last reply: it reached its {limit}-reply limit, so neither of you can reply to it"
     return 200, out
@@ -2465,6 +2484,79 @@ def forward(body, hops, spaces):
 
 
 # A session id -> the one that continued it after a /clear or resume, so a reply to the old one finds the new.
+# Who an agent is, apart from the session it's running in. A session id changes with every /clear, resume and
+# restart of Claude Code, and a folder can hold several agents, so neither says whose a message, a task or a setting
+# is. An agent is a name in a folder; its id stays through every session it has, and through a daemon restart.
+agents = {}       # agent id -> {"id", "name", "reg", "cwd", "created", "seen", "sid", summary…}
+agent_of = {}     # session id -> agent id, for the sessions an agent has had lately
+AGENT_SESSIONS_KEPT = 2000
+AGENT_KEPT_S = 60 * 86400
+
+
+def load_agents():
+    try:
+        with open(AGENTS_PATH) as f:
+            data = json.load(f)
+        for a in data.get("agents", []):
+            agents[a["id"]] = a
+        agent_of.update({k: v for k, v in data.get("sessions", {}).items() if v in agents})
+    except (OSError, ValueError, KeyError, AttributeError):
+        pass
+
+
+def save_agents():
+    for gone in list(agent_of)[:-AGENT_SESSIONS_KEPT]:
+        agent_of.pop(gone)
+    try:
+        with open(AGENTS_PATH + ".tmp", "w") as f:
+            json.dump({"agents": list(agents.values()), "sessions": agent_of}, f)
+        os.replace(AGENTS_PATH + ".tmp", AGENTS_PATH)
+    except OSError as err:
+        log("could not save agents:", err)
+
+
+def agent_session(aid):
+    """The live session an agent is running in now, or None."""
+    live = [r for r in sessions.values() if aid and r.get("agent") == aid and is_live(r)]
+    return max(live, key=lambda r: r["last_seen"]) if live else None
+
+
+def agent_for(rec, old=None):
+    """Say which agent this session is, at registration: the one it was already, the one the session it continues
+    was, else the agent of its name in its folder that isn't running elsewhere, else a new one. Returns the agent
+    and the session it last ran in (None when it's new or the same). Called with the lock held."""
+    now = time.time()
+    aid = rec.get("agent") or agent_of.get(old or "") or agent_of.get(rec["id"])
+    if aid not in agents:
+        names = {display_name(rec).lower(), str(rec.get("name") or "").lower()} - {""}
+        known = [a for a in agents.values() if a.get("cwd") == rec.get("cwd") and {a["name"].lower(), str(a.get("reg") or "").lower()} & names
+                 and not (agent_session(a["id"]) and agent_session(a["id"])["id"] != rec["id"])]
+        if known:
+            aid = max(known, key=lambda a: a.get("seen", 0))["id"]
+        else:
+            aid = f"a{max([int(i[1:]) for i in agents] or [0]) + 1}"
+            agents[aid] = {"id": aid, "created": now}
+    a = agents[aid]
+    before = a.get("sid") if a.get("sid") != rec["id"] else None
+    a.update(name=display_name(rec), reg=rec.get("name") or "", cwd=rec.get("cwd", ""), sid=rec["id"], seen=now)
+    rec["agent"] = agent_of[rec["id"]] = aid
+    return a, before
+
+
+def agent_seen(rec):
+    """Keep an agent's record current with its session: a new name, a summary. Called with the lock held."""
+    a = agents.get(rec.get("agent") or "")
+    if a is None:
+        return
+    changed = a.get("name") != display_name(rec)
+    a["name"], a["seen"] = display_name(rec), time.time()
+    if rec.get("summary") and rec["summary"] != a.get("summary"):
+        a.update(summary=rec["summary"], headline=rec.get("headline", ""), summary_ts=rec.get("summary_ts") or time.time())
+        changed = True
+    if changed:
+        save_agents()
+
+
 succeeded_by = {}
 
 
@@ -2478,6 +2570,11 @@ def continuation(sid, name="", cwd=""):
         if rec and is_live(rec):
             return rec
         sid = succeeded_by.get(sid)
+    # The agent that session was, in whatever session it runs now: after a restart of Claude Code, or of the daemon.
+    for first in seen:
+        rec = agent_session(agent_of.get(first))
+        if rec:
+            return rec
     named = [r for r in sessions.values() if is_live(r) and r.get("cwd") == cwd and name and display_name(r) == name]
     return max(named, key=lambda r: r["last_seen"]) if named else None
 
@@ -2527,6 +2624,13 @@ def spawn_of(rec, fresh):
     return None
 
 
+def other_agent_stays(aid, rec):
+    """Whether agent `aid`'s queue is its own to come back for, not rec's to take over: both are agents of this folder
+    in their own right, rec no newcomer taking the folder over from one that's gone for good."""
+    mine = agents.get(rec.get("agent") or "") or {}
+    return bool(mine) and mine.get("created", 0) < agents[aid].get("seen", 0) and mine.get("name", "").lower() != agents[aid].get("name", "").lower()
+
+
 def adopt(rec, old=None, spawn=None):
     """Give rec the messages still queued for sessions that are gone: `old` (one it replaces), or any in its folder.
     `spawn`: the spawn rec is the agent for, whose first prompt waits for it alone."""
@@ -2544,8 +2648,11 @@ def adopt(rec, old=None, spawn=None):
             # A first prompt for the agent a spawn started: that one takes it, found by its tmux pane, else the first
             # new one in that folder.
             box = list(inboxes[sid]) if spawn and sid == f"spawn:{spawn['id']}" else []
+        elif sid != old and agent_of.get(sid) in agents and agent_of[sid] != rec.get("agent") and other_agent_stays(agent_of[sid], rec):
+            # Queued for another agent that shares this folder: it waits for that agent, not for whoever starts first.
+            box = []
         else:
-            box = [m for m in inboxes[sid] if sid == old or (m.get("to_cwd") and m.get("to_cwd") == rec.get("cwd"))]
+            box = [m for m in inboxes[sid] if sid == old or agent_of.get(sid) == rec.get("agent") or (m.get("to_cwd") and m.get("to_cwd") == rec.get("cwd"))]
         if not box:
             continue
         inboxes[sid] = [m for m in inboxes[sid] if m not in box]
@@ -2740,7 +2847,8 @@ def new_task(msg, requester, parent_task=""):
     t = {"id": f"t{next_task[0]}", "title": re.sub(r"(?i)^task\s*:\s*", "", title)[:120], "text": msg["text"][:4000],
          "requester": requester, "owner_cwd": msg.get("to_cwd", ""), "owner": msg.get("to_name") or folder_name(msg.get("to_cwd", "")),
          "space": msg.get("to_space", ""), "status": "open", "created": now, "updated": now, "note": "",
-         "msg": msg["id"], "parent": parent_task, "owner_id": msg.get("to", "") if msg.get("to", "") in sessions else ""}
+         "msg": msg["id"], "parent": parent_task, "owner_id": msg.get("to", "") if msg.get("to", "") in sessions else "",
+         "owner_agent": agent_of.get(msg.get("to", ""), "")}
     next_task[0] += 1
     tasks[t["id"]] = t
     msg["kind"], msg["task"] = "task", t["id"]
@@ -2802,7 +2910,7 @@ def update_task(tid, body, web=False):
         if web and owner and owner != t["owner_cwd"]:
             if t["owner_cwd"] and was in TASK_OPEN:
                 task_message(t, t["owner_cwd"], f"Task {tid} was handed to {folder_name(owner)} in the web UI: stop work on it. {t['title']}")
-            t["owner_cwd"], t["owner"], t["owner_id"] = owner, folder_name(owner), ""
+            t["owner_cwd"], t["owner"], t["owner_id"], t["owner_agent"] = owner, folder_name(owner), "", ""
             t.pop("user", None)
             status = status if status in TASK_OPEN else "open"
             handed = f"Task {tid} was handed to you"
@@ -4104,6 +4212,12 @@ def tidy():
     now = time.time()
     last_tidy[0] = now
     with lock:
+        for aid in [a["id"] for a in agents.values() if now - a.get("seen", now) > AGENT_KEPT_S and not agent_session(a["id"])]:
+            agents.pop(aid)
+            for sid in [k for k, v in agent_of.items() if v == aid]:
+                agent_of.pop(sid)
+        save_agents()
+    with lock:
         dropped = {}
         for name, items, live, save in (("tasks", tasks, TASK_OPEN, save_tasks), ("spawns", spawns, ("pending",), save_spawns),
                                         ("schedules", schedules, ("active", "pending"), save_schedules)):
@@ -4597,7 +4711,7 @@ class Handler(BaseHTTPRequestHandler):
                         rec[k] = b[k]
                 # A plugin just reloaded comes back with no summary: the one this agent last had in its folder stays.
                 known = dir_summaries.get(rec.get("cwd") or "") or {}
-                if not rec.get("summary") and known.get("summary") and known.get("name") == display_name(rec):
+                if not rec.get("summary") and known.get("summary") and known.get("name") == display_name(rec) and not agent_of.get(b.get("succeeds") or sid):
                     rec.update(summary=known["summary"], headline=known.get("headline", ""), summary_ts=known.get("ts") or time.time())
                 # A folder in no space yet (none set, no .peerlink) takes the one its first started agent was asked for.
                 # A space set for one agent, as older versions allowed, becomes its folder's.
@@ -4624,6 +4738,15 @@ class Handler(BaseHTTPRequestHandler):
                         save_config()
                     if prev and prev.get("name"):
                         rec["name"] = prev["name"]
+                # Which agent this is, whatever session it's in: what you set for it (a role, a nickname, muting) and
+                # its summary come with it into a session that says nothing of the last one.
+                agent, before = agent_for(rec, old)
+                if before and before in config["sessions"] and sid not in config["sessions"]:
+                    config["sessions"][sid] = dict(config["sessions"][before])
+                    save_config()
+                if not rec.get("summary") and agent.get("summary"):
+                    rec.update(summary=agent["summary"], headline=agent.get("headline", ""), summary_ts=agent.get("summary_ts") or time.time())
+                save_agents()
                 # A nickname you gave this agent is its name: another live one that took it first (registering
                 # sooner after a daemon restart) moves aside.
                 nick = session_cfg(sid)["nickname"]
@@ -4669,6 +4792,7 @@ class Handler(BaseHTTPRequestHandler):
                     rec["headline"] = str(b.get("headline") or "")[:80]
                     if b.get("summary_kind") in ("model", "manual"):
                         remember_dir(rec)
+                agent_seen(rec)
                 cfg = client_config(sid)
             ack(sid, b.get("ack"), b.get("holding"))
             inbox = [] if cfg["muted"] else take_inbox(sid, track="ack" in b)
@@ -5033,6 +5157,7 @@ def serve():
     load_spawns()
     load_schedules()
     load_rules()
+    load_agents()
     load_dirs()
     file_pending_issues()
     load_discord()
