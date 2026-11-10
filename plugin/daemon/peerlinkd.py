@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.0"
+VERSION = "0.9.1"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -174,6 +174,7 @@ DEFAULT_CONFIG = {
     "summary_model": "haiku",
     "auto_approve_all": False,  # every agent's requests to start an agent, or a schedule that may, go ahead without asking you
     "auto_approve_folders": [],  # the folders whose agents' requests do; set only from the web UI
+    "task_nudge_h": 24,  # an open task with no update for this many hours is raised with its owner, then with whoever asked; 0 is off
     "ask_defaults": True,  # a question to you may name a default the agent goes with when you haven't answered in time
     "ask_default_min_m": 10,  # the shortest wait, in minutes, an agent may give you before its default applies
     "sessions": {},
@@ -797,6 +798,8 @@ def public_peer(rec):
         "threads": {k: [{f: t[f] for f in ("id", "with", "text")} for t in v] for k, v in open_threads(rec, limit=5).items()},
         "open_tasks": len(owned_task_ids(rec)),
         "task_ids": owned_task_ids(rec),
+        # When each was handed over and last moved, so a peer list shows a task nobody has touched in days.
+        "task_times": {i: [int(tasks[i]["created"]), int(tasks[i]["updated"])] for i in owned_task_ids(rec)[:20]},
         "reach": sorted(reach(rec)),
         "also": also_in(rec),
         "busy": rec.get("busy", False),
@@ -3033,6 +3036,47 @@ def user_answered(asked, answer, who):
     save_tasks()
 
 
+# An open task nobody has touched goes stale unseen, and its owner's summary with it. After task_nudge_h without an
+# update its owner is asked to say where it stands or close it; after two asks, or when the owner isn't running,
+# whoever asked for it is told, so it's cancelled or handed on.
+NUDGE_EVERY_S = 600
+last_nudge = [0.0]
+
+
+def nudge_stale_tasks(now):
+    """Called with the lock held."""
+    every = float(config.get("task_nudge_h") or 0) * 3600
+    if not every or usage_limit or now - last_nudge[0] < NUDGE_EVERY_S:
+        return
+    last_nudge[0] = now
+    changed = False
+    for t in [x for x in tasks.values() if x["status"] in TASK_OPEN and not x.get("user") and x.get("owner_cwd")]:
+        if now - t["updated"] < every or now - t.get("nudged", 0) < every:
+            continue
+        if t.get("nudged_for") != t["updated"]:
+            t["nudged_for"], t["nudges"] = t["updated"], 0
+        quiet = when_wait(now - t["updated"])
+        owner, req = task_owner(t), t["requester"]
+        if owner and t["nudges"] < 2:
+            msg = task_message(t, t["owner_cwd"], f"Task {t['id']} ({t['title']}) is yours and hasn't moved in {quiet}. Put a note on it saying where "
+                               "it stands (the task tool), or close it with update_task: done, or failed with why.", prefer=owner)
+            msg["wake"] = True
+        elif req.get("cwd") and not t.get("escalated_for") == t["updated"]:
+            t["escalated_for"] = t["updated"]
+            why = f"{t['owner']} was asked twice and hasn't answered" if owner else f"{t['owner']} isn't running"
+            asker = continuation(req.get("id") or "", req.get("name") or "", req.get("cwd") or "")
+            msg = task_message(t, req["cwd"], f"Task {t['id']} ({t['title']}), which you gave {t['owner']}, hasn't moved in {quiet}, and {why}. "
+                               "Cancel it with update_task, or put a note on it with what's needed.", prefer=asker)
+            msg["wake"] = True
+        else:
+            continue
+        t["nudged"], t["nudges"] = now, t["nudges"] + 1
+        changed = True
+        log("task", t["id"], "nudged", t["nudges"], "quiet", quiet)
+    if changed:
+        save_tasks()
+
+
 # Standing rules: what you told your agents once and meant for good ("never merge on Fridays"). A rule belongs to a
 # space and reaches every agent in it and in the spaces inside it, in its instructions, so a cleared context still
 # has it. You write them in the web UI; one an agent proposes waits for your approval, whatever auto-approve says.
@@ -3210,6 +3254,10 @@ def apply_defaults(now):
 
 
 def when_wait(s):
+    if s >= 36 * 3600:
+        return f"{int(round(s / 86400.0))} days"
+    if s >= 2 * 3600 and s % 3600:
+        return f"{int(round(s / 3600.0))} hours"
     s = int(round(s / 60.0)) * 60
     return f"{s // 86400} day{'s' if s >= 172800 else ''}" if s >= 86400 and s % 86400 == 0 else f"{s // 3600} hour{'s' if s >= 7200 else ''}" if s >= 3600 and s % 3600 == 0 else f"{max(1, s // 60)} min"
 
@@ -3940,13 +3988,18 @@ def terminate(sid, by):
     return 200, {"ok": True}
 
 
-def ack(sid, ids):
-    """The plugin says these messages reached its session: stop handing them out."""
-    if isinstance(ids, list) and ids:
-        with lock:
-            mine = handed.get(sid, {})
-            for mid in ids:
-                mine.pop(str(mid), None)
+def ack(sid, ids, holding=None):
+    """The plugin says these messages reached its session: stop handing them out. Ones it says it's `holding` (an
+    announcement for its next turn, a message that needs no turn of its own) it still has: they aren't handed out
+    again while it keeps saying so, only if it stops (a reload lost them)."""
+    with lock:
+        mine = handed.get(sid, {})
+        for mid in ids if isinstance(ids, list) else []:
+            mine.pop(str(mid), None)
+        now = time.time()
+        for mid in holding if isinstance(holding, list) else []:
+            if str(mid) in mine:
+                mine[str(mid)] = (mine[str(mid)][0], now)
 
 
 def clear_context(sid, by):
@@ -4153,6 +4206,7 @@ def reap():
             lapse(r, f"keep a standing rule for {r['space']}", rule_told)
             save_rules()
         apply_defaults(now)
+        nudge_stale_tasks(now)
         lapsed = usage_limit and now >= (usage_limit.get("resets_at") or usage_limit["since"] + LIMIT_FALLBACK_S)
         # While the limit holds, a due schedule waits: it runs once the limit lifts.
         due = [] if usage_limit else [c for c in schedules.values() if c["status"] == "active" and c.get("next_run") and c["next_run"] <= now]
@@ -4616,7 +4670,7 @@ class Handler(BaseHTTPRequestHandler):
                     if b.get("summary_kind") in ("model", "manual"):
                         remember_dir(rec)
                 cfg = client_config(sid)
-            ack(sid, b.get("ack"))
+            ack(sid, b.get("ack"), b.get("holding"))
             inbox = [] if cfg["muted"] else take_inbox(sid, track="ack" in b)
             with lock:
                 mine = reach(rec)
@@ -5512,6 +5566,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 </div></details>
 <details class="plat" id="sctx"><summary><span class="plogo" style="background:#7a6ff0"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 3v4M12 17v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M3 12h4M17 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/></svg></span><span class="ptitle"><b>Context and usage</b><span class="psub">Clearing context so it doesn't drain your usage limit</span></span><span class="chev" aria-hidden="true"></span></summary><div class="pbody">
 <div class="check"><input type="checkbox" name="clear_between_tasks" id="cbt"><label for="cbt" style="margin:0">Agents clear their own context after each task, saving notes to memory first</label></div>
+<div class="row"><div><label for="tnh">Ask a task's owner where it stands after this many hours without an update (0 for never)</label><input type="number" name="task_nudge_h" id="tnh" min="0" step="12"></div><div></div></div>
 <div class="row"><div><label for="cnt">Ask an agent to save and clear once its context passes (tokens, 0 for never)</label><input type="number" name="clear_nudge_tokens" id="cnt" min="0" step="50000"></div><div></div></div>
 <div class="mut small">A large context is re-read on every turn and drains the usage limit fast. The ask arrives with the agent's next prompt, so it clears at a stopping point.</div>
 </div></details>

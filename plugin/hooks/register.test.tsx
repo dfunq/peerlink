@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.9.0', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.9.1', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (state.forget && path.endsWith('/heartbeat') && 'busy' in body) {
       state.forget = false
       return { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'unknown agent; register again' }) } }
@@ -241,6 +241,24 @@ test("the user's standing rules are in the agent's instructions, so a cleared co
   const sent = first.context.join('\n')
   expect(sent).toContain('Standing rules from your user')
   expect(sent).toContain('- Never merge on a Friday.')
+})
+
+test('a peer list says which open tasks have gone quiet, and held messages are reported so they are not sent again', async ($, on) => {
+  const { clock } = engine(on)
+  const daemon = fakeDaemon(on, 1, null, [], { poll_interval_ms: 30_000 })
+  const now = Math.floor(Date.now() / 1000)
+  Object.assign(daemon.peers[0]!, { task_ids: ['t3', 't9'], task_times: { t3: [now - 5 * 86400, now - 3 * 86400], t9: [now - 3600, now - 60] } })
+  await $.session.start(START)
+  await settle()
+  const listed = JSON.stringify(await $.tool.call({ tool: 'mcp__peerlink__list_peers' } as any))
+  expect(listed).toContain('open tasks: t3 (quiet 3d), t9')
+  // An announcement waits here for the agent's next turn: the next heartbeat says it's held.
+  daemon.state.once = { inbox: [{ id: 'm7', kind: 'announcement', from: 'p1', from_name: 'billing-api', text: 'Freeze until 5pm', expects_reply: false }] }
+  for (let i = 0; i < 2; i++) {
+    await clock.advance(31_000)
+    await settle()
+  }
+  expect(daemon.posted.filter(p => p.path.endsWith('/heartbeat')).pop()!.body.holding).toEqual(['m7'])
 })
 
 test('task shows a record with the tasks above and below, and a note says who it reached', async ($, on) => {
@@ -960,7 +978,7 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.9.0 · daemon 0.9.0 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.9.1 · daemon 0.9.1 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the space is listed once', async ($, on) => {
@@ -993,7 +1011,7 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.9.0')
+  expect(reg.plugin).toBe('0.9.1')
 })
 
 test('an agent registers again under the folder it started in, wherever the host has moved its root since', async ($, on) => {
@@ -1095,7 +1113,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.9.1', true], ['0.9.0', false]] as const)
+for (const [installed, reloads] of [['0.9.2', true], ['0.9.1', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     const daemon = fakeDaemon(on)
