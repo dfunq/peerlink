@@ -178,6 +178,31 @@ class ChatTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(c["status"], "cancelled")
 
+    def test_a_schedule_with_a_playbook_sends_it_as_it_reads_at_each_run(self):
+        book = os.path.join(os.environ["PEERLINK_HOME"], "PLAYBOOK.md")
+        with open(book, "w") as f:
+            f.write("1. Check the queue.")
+        # A relative path is the schedule's folder's (the asking agent's, when an agent asks).
+        status, out = peerlinkd.create_schedule({"folder": os.path.dirname(book), "prompt_file": "PLAYBOOK.md", "cron": "0 * * * *", "start": False})
+        self.assertEqual(status, 200, out)
+        c = peerlinkd.schedules[out["schedule"]["id"]]
+        self.assertEqual(c["prompt_file"], book)
+        self.addCleanup(lambda: peerlinkd.schedules.pop(c["id"], None))
+        self.assertTrue(c["prompt"].startswith("Follow the playbook"))
+        with open(book, "a") as f:
+            f.write("\n2. Never merge on Fridays.")  # a rule added after it was scheduled
+        with peerlinkd.lock:
+            peerlinkd.fire_schedule(c, peerlinkd.time.time())
+        sent = [m for q in peerlinkd.inboxes.values() for m in q if m.get("from_name") == f"schedule {c['id']}"]
+        self.assertIn("2. Never merge on Fridays.", sent[-1]["text"])
+        os.remove(book)
+        with peerlinkd.lock:
+            peerlinkd.fire_schedule(c, peerlinkd.time.time())
+        sent = [m for q in peerlinkd.inboxes.values() for m in q if m.get("from_name") == f"schedule {c['id']}"]
+        self.assertIn("couldn't be read", sent[-1]["text"])
+        status, out = peerlinkd.create_schedule({"folder": os.path.dirname(book), "prompt_file": "/nope/PLAYBOOK.md", "cron": "0 * * * *"})
+        self.assertIn("no such file", out["error"])
+
 
 if __name__ == "__main__":
     unittest.main()
