@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.74'
+const DAEMON_VERSION = '0.8.75'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -1458,6 +1458,10 @@ export const register: Register = on => {
         properties: {
           action: { type: 'string', enum: ['create', 'list', 'cancel'], description: 'create (the default), list, or cancel' },
           prompt: { type: 'string', description: 'create: what the agent should do when it runs, written so it stands on its own' },
+          prompt_file: {
+            type: 'string',
+            description: "create: a playbook file the daemon reads fresh at each run and sends after the prompt, so rules your user adds to it reach the next run. Use it for a standing routine whose rules change; the prompt can then be left out",
+          },
           cron: { type: 'string', description: 'create, to repeat: five cron fields, minute hour day-of-month month weekday, like "0 9 * * 1-5"' },
           at: { type: 'string', description: 'create, to run once: "in 30m", "in 2h", "in 1d", or a local date and time like "2026-10-25 09:00"' },
           agent: { type: 'string', description: "create: the agent that runs it, by name; when it isn't running, its folder's agent or a new one there does. You if this and folder are left out" },
@@ -1708,7 +1712,7 @@ export const register: Register = on => {
       // Ones that stopped this past week stay in view, so one that expired or was cancelled doesn't just vanish.
       const ended = all.filter(c => !live.includes(c) && Date.now() / 1000 - (c.updated ?? 0) < 7 * 86400)
       const row = (c: any) => `- ${c.id} ${c.status} · ${c.when_text} · ${c.agent ? `${c.agent} ` : ''}${c.folder}`
-      const lines = live.map(c => `${row(c)}${c.next_run ? ` · next ${new Date(c.next_run * 1000).toLocaleString()}` : ''} · ${clip(c.prompt, 100)}`)
+      const lines = live.map(c => `${row(c)}${c.next_run ? ` · next ${new Date(c.next_run * 1000).toLocaleString()}` : ''} · ${clip(c.prompt, 100)}${c.prompt_file && !c.prompt.includes(c.prompt_file.split('/').pop()) ? ` (playbook ${c.prompt_file})` : ''}`)
       if (ended.length) lines.push('Ended this past week:', ...ended.map(c => `${row(c)} ${new Date(c.updated * 1000).toLocaleString()}${c.status === 'expired' ? ' (never approved)' : ''} · ${clip(c.prompt, 100)}`))
       return text(lines.length ? (live.length ? '' : 'No schedules are active.\n') + lines.join('\n') : 'No schedules are active.')
     }
@@ -1716,7 +1720,7 @@ export const register: Register = on => {
       const res = await call($, 'POST', `/api/schedules/${encodeURIComponent(String(input.id ?? '').trim())}/cancel`, { by: sessionId })
       return text(res.ok ? `Cancelled ${res.data.schedule.id}.` : `Not cancelled: ${res.data.error ?? res.status}`)
     }
-    const res = await call($, 'POST', '/api/schedules', { by: sessionId, prompt: input.prompt, cron: input.cron, at: input.at, agent: input.agent, folder: input.folder, start: input.start })
+    const res = await call($, 'POST', '/api/schedules', { by: sessionId, prompt: input.prompt, prompt_file: input.prompt_file, cron: input.cron, at: input.at, agent: input.agent, folder: input.folder, start: input.start })
     if (!res.ok) return text(`Not scheduled: ${res.data.error ?? res.status}`)
     const c = res.data.schedule
     const next = c.next_run ? new Date(c.next_run * 1000).toLocaleString() : ''
