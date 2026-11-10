@@ -219,6 +219,26 @@ class Agent:
             raise AssertionError(f"{self.name} couldn't send {body}: {code} {out}")
         return out if ok else (code, out)
 
+    def quit(self):
+        """Claude Code exits: the plugin says so on its way out."""
+        self.rig.call("DELETE", f"/api/sessions/{self.sid}")
+
+    def restart(self):
+        """Claude Code quit and started again in the folder: a new session that says nothing of the old one but the
+        name it had. Messages the old session never read wait for it."""
+        self.quit()
+        self.sid = str(uuid.uuid4())
+        self.seen = []
+        code, out = self.rig.call("POST", "/api/sessions", {"id": self.sid, "name": os.path.basename(self.cwd), "had_name": self.name,
+                                                             "cwd": self.cwd, "plugin": "rig"})
+        if code != 200:
+            raise AssertionError(f"{self.name} couldn't register: {code} {out}")
+        self.name, self.config = out.get("name", self.name), out.get("config", {})
+        return out
+
+    def summary(self, text):
+        self.rig.call("POST", f"/api/sessions/{self.sid}/heartbeat", {"busy": False, "summary": text, "summary_kind": "model"})
+
     def clear(self):
         """A /clear or resume: the same agent under a new session id, as the plugin announces it."""
         old, self.sid = self.sid, str(uuid.uuid4())

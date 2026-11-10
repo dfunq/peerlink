@@ -147,6 +147,55 @@ class ScenarioTest(unittest.TestCase):
         second.expect("Thanks.")
         self.assertNotIn("Thanks.", first.texts())
 
+    def test_an_agent_is_the_same_agent_after_claude_code_restarts_even_sharing_a_folder(self):
+        rig = self.rig()
+        lead = rig.agent("lead", space="acme")
+        shared = rig.folder("app", space="acme")
+        app, helper = rig.agent("app", folder=shared), rig.agent("helper", folder=shared)
+        rig.user("POST", f"/api/sessions/{helper.sid}/config", {"role": "Seeds and migrates the database."})
+        app.summary("Building the invoice page")
+        helper.summary("Migrating the orders table")
+        task = lead.send(to="helper", kind="task", text="Migrate the orders table")["task"]
+        helper.expect("Migrate the orders table")
+        asked = helper.send(to="lead", expects_reply=True, text="Lock the table first?")
+        lead.expect("Lock the table first?")
+
+        # helper quits; the answer to its question arrives while it's away, and app restarts first.
+        gone = helper.sid
+        helper.quit()
+        lead.send(reply_to=asked["id"], text="Yes, lock it.")
+        app.restart()
+        self.assertEqual(app.name, "app")
+        self.assertNotIn("Yes, lock it.", app.texts())  # another agent's, though it's in the same folder
+
+        helper.restart()
+        self.assertEqual(helper.name, "helper")
+        self.assertEqual(helper.expect("Yes, lock it.")["reply_to"], asked["id"])
+        self.assertEqual(helper.config["role"], "Seeds and migrates the database.")
+        lead.poll(), app.poll()
+        seen = lead.peers()
+        self.assertEqual((seen["helper"]["summary"], seen["app"]["summary"]), ("Migrating the orders table", "Building the invoice page"))
+        self.assertEqual(seen["helper"]["id"], helper.sid)
+        self.assertNotEqual(helper.sid, gone)
+        # Each is one agent across its sessions, and they are two agents.
+        self.assertTrue(seen["helper"]["agent"] and seen["helper"]["agent"] != seen["app"]["agent"])
+        # The task is still helper's alone to close.
+        self.assertEqual(app.call("POST", f"/api/tasks/{task}", {"status": "done"})[0], 403)
+        self.assertEqual(helper.call("POST", f"/api/tasks/{task}", {"status": "done", "note": "Migrated."})[0], 200)
+        lead.expect("Migrated.")
+
+        # The same holds across a daemon restart in between: who an agent is doesn't live in the daemon's memory.
+        asked = helper.send(to="lead", expects_reply=True, text="Drop the old column too?")
+        lead.expect("Drop the old column too?")
+        agent = seen["helper"]["agent"]
+        helper.clear()
+        rig.restart()
+        lead.poll(), helper.poll(), app.poll()
+        lead.send(reply_to=asked["id"], text="Not yet.")
+        helper.expect("Not yet.")
+        self.assertNotIn("Not yet.", app.texts())
+        self.assertEqual(lead.peers()["helper"]["agent"], agent)
+
     def test_chatter_stops_at_the_reply_limit_and_work_on_a_task_carries_on(self):
         rig = self.rig(config={"max_hops": 4})
         a, b = rig.agent("a", space="acme"), rig.agent("b", space="acme")
