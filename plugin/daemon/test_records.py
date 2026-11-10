@@ -142,6 +142,54 @@ class RecordsTest(unittest.TestCase):
         peerlinkd.edit_rule(rid, {"delete": True})
         self.assertEqual(peerlinkd.client_config("s-sky")["rules"], [])
 
+    def test_a_task_nobody_touched_is_raised_with_its_owner_then_with_whoever_asked(self):
+        top, _ = self.tree()
+        t = peerlinkd.tasks[top]
+        peerlinkd.tasks = {top: t}  # only this one, whatever else the tree made
+        self.addCleanup(lambda: setattr(peerlinkd, "tasks", self.keep[0]))
+        peerlinkd.inboxes.clear()
+        day, start = 86400, t["updated"]
+
+        def at(days):
+            peerlinkd.last_nudge[0] = 0
+            with peerlinkd.lock:
+                peerlinkd.nudge_stale_tasks(start + days * day)
+
+        at(0.5)
+        self.assertEqual(self.inbox("core"), [])  # not quiet for a day yet
+        at(1.1)
+        at(1.2)  # asked once a day, not at every pass
+        self.assertEqual(len(self.inbox("core")), 1)
+        self.assertIn(f"Task {top} (Ship the template engine) is yours and hasn't moved in", self.inbox("core")[0])
+        at(2.2)
+        at(3.3)  # two asks unanswered: whoever asked hears, once
+        at(4.4)
+        self.assertEqual((len(self.inbox("core")), len(self.inbox("sky"))), (2, 1))
+        self.assertIn("was asked twice and hasn't answered", self.inbox("sky")[0])
+        self.assertEqual(t["updated"], start)  # asking isn't an update
+        # A note from the owner starts the count again; with nudges off, nobody is asked.
+        peerlinkd.task_note(top, {"by": "s-core", "text": "Waiting on CI."})
+        peerlinkd.inboxes.clear()
+        peerlinkd.config["task_nudge_h"] = 0
+        peerlinkd.last_nudge[0] = 0
+        with peerlinkd.lock:
+            peerlinkd.nudge_stale_tasks(t["updated"] + 5 * day)
+        self.assertEqual(self.inbox("core"), [])
+
+    def test_a_message_its_agent_is_holding_isnt_handed_out_again(self):
+        self.send("sky", to="core", text="FYI: the freeze is over.")
+        first = peerlinkd.take_inbox("s-core", track=True)
+        self.addCleanup(lambda: peerlinkd.handed.pop("s-core", None))
+        mid = first[0]["id"]
+        m, ts = peerlinkd.handed["s-core"][mid]
+        peerlinkd.handed["s-core"][mid] = (m, ts - 2 * peerlinkd.REDELIVER_S)  # long enough ago to hand out again
+        peerlinkd.ack("s-core", [], [mid])  # the plugin still has it, waiting for its next turn
+        self.assertEqual(peerlinkd.take_inbox("s-core", track=True), [])
+        peerlinkd.handed["s-core"][mid] = (m, ts - 2 * peerlinkd.REDELIVER_S)
+        self.assertEqual([x["id"] for x in peerlinkd.take_inbox("s-core", track=True)], [mid])  # it stopped saying so: a reload lost it
+        peerlinkd.ack("s-core", [mid])
+        self.assertEqual(peerlinkd.handed["s-core"], {})
+
 
 if __name__ == "__main__":
     unittest.main()
