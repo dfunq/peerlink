@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.8.73'
+const DAEMON_VERSION = '0.8.74'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -71,6 +71,7 @@ const SUMMARY_SYSTEM =
 const SUMMARY_EVERY_TURNS = 8
 const SUMMARY_MIN_GAP_MS = 10 * 60_000
 const MANUAL_SUMMARY_HOLD_MS = 10 * 60_000
+const SETTLE_SUMMARY_MS = 3 * 60_000
 
 const HELP = `peerlink commands:
   /peerlink [status]       daemon, this agent, its summary
@@ -161,6 +162,10 @@ let sentGuidance = ''
 let sentThreads = false
 let contextFor = ''
 let manualSummaryAt = -Infinity
+// A summary is due outside the usual cadence: a task this agent owned just closed, or its work went quiet.
+let summaryDue = false
+let lastTurnEnd = 0
+let settledFor = 0
 let lastSummaryAt = -Infinity
 let summarizing = false
 let summary = ''
@@ -719,6 +724,13 @@ async function poll($: EngineInterface) {
   peerCount = Number(res.data.peer_count ?? 0)
   // The first peer to show up gets a real summary to read.
   if (!hadPeers && peerCount > 0 && !hasSummarizedTalk && !busy) void summarize($)
+  // Work that stopped short of the next regular summary: once quiet for a while, the summary says where it ended,
+  // not what it was waiting on. Tried once for each quiet spell.
+  else if (!busy && turnsSinceSummary > 0 && lastTurnEnd && lastTurnEnd !== settledFor && (await $.clock.now()) - lastTurnEnd > SETTLE_SUMMARY_MS) {
+    settledFor = lastTurnEnd
+    summaryDue = true
+    void summarize($)
+  }
   if (res.data.terminate && !terminating) {
     // The user asked for this session to end: /exit, once the turn it's in is done.
     terminating = true
@@ -769,7 +781,7 @@ function oneLine(text: string, max: number) {
 // How old a peer's summary is, and the tasks it owns now: a summary set hours ago may not be what it's doing.
 function summaryAge(p: any) {
   const age = typeof p.summary_ts === 'number' ? Math.max(0, Math.round(Date.now() / 1000 - p.summary_ts)) : null
-  return age === null || age < 600 ? '' : ` (set ${ago(age)} ago)`
+  return age === null || age < 600 ? '' : ` (set ${ago(age)} ago${age > 7200 ? ', may be out of date' : ''})`
 }
 
 function taskNote(p: any) {
@@ -881,8 +893,8 @@ async function summarize($: EngineInterface) {
   if (!cfg || cfg.auto_summary === false || summarizing || !sessionId) return
   // Nobody to read it: spend nothing.
   if (peerCount === 0) return
-  if (now - manualSummaryAt < MANUAL_SUMMARY_HOLD_MS) return
-  if (hasSummarizedTalk && (turnsSinceSummary < SUMMARY_EVERY_TURNS || now - lastSummaryAt < SUMMARY_MIN_GAP_MS)) return
+  if (!summaryDue && now - manualSummaryAt < MANUAL_SUMMARY_HOLD_MS) return
+  if (!summaryDue && hasSummarizedTalk && (turnsSinceSummary < SUMMARY_EVERY_TURNS || now - lastSummaryAt < SUMMARY_MIN_GAP_MS)) return
   summarizing = true
   try {
     const messages = (await $.session.messages()) as any[]
@@ -906,6 +918,7 @@ async function summarize($: EngineInterface) {
     if (!done.isAnswered) return
     lastSummaryAt = now
     turnsSinceSummary = 0
+    summaryDue = false
     hasSummarizedTalk = true
     // The headline, then the summary; a model that answers in one line gives a summary alone.
     // A model that labels its lines ("Line 1: … Line 2: …", sometimes on one line) gets them split and the labels dropped.
@@ -1589,6 +1602,7 @@ export const register: Register = on => {
       busy = false
       turnStarted($, undefined)
       turnsSinceSummary++
+      lastTurnEnd = await $.clock.now()
       if (await limitCheck($, e.reason).catch(() => false)) return done
       await checkContextSize($).catch(() => undefined)
       if (clearing) {
@@ -1719,6 +1733,8 @@ export const register: Register = on => {
     const res = await call($, 'POST', `/api/tasks/${encodeURIComponent(id)}`, { by: sessionId, status: input.status, note: input.note })
     if (!res.ok) return text(`Not updated: ${res.data.error ?? res.status}`)
     const t = res.data.task
+    // What this agent was doing just ended: its summary is rewritten when the turn does.
+    if (t.status === 'done' || t.status === 'failed') summaryDue = true
     // The task's own title, so an agent that mixed up two task ids sees it closed the wrong one.
     return text(`Task ${t.id} from ${t.requester?.name || 'your user'} ("${t.title}") is ${t.status.replace('_', ' ')}.${t.status === 'done' || t.status === 'failed' ? ` ${t.requester?.name || 'Whoever asked'} gets your note. If that isn't the task you meant, tell them at once.` : ''}`)
   }).catch(daemonDown)
