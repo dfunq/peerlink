@@ -1,4 +1,4 @@
-"""What peerlink's chat platforms share: Discord now, Telegram and Slack to come.
+"""What peerlink's chat platforms share: Discord, Telegram and Slack.
 
 A channel id says its platform: Discord's are bare digits, as they always were, Telegram's `tg:<chat id>` and
 Slack's `slack:<channel id>`. Each platform's module (discordlink, …) offers the same calls, and the daemon picks one

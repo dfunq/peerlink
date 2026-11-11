@@ -167,6 +167,23 @@ Talk to your agents from Telegram, in a private chat with your bot or a group it
 - A group that Telegram upgrades to a supergroup gets a new id; its mapping moves with it.
 - The token is kept beside Discord's, in `~/.peerlink/discord.json` (0600), and never sent back to the browser. Updates come by long polling, so nothing needs a public URL.
 
+
+## Slack
+
+Talk to your agents from Slack, in a direct message with your app or a channel it's in. Open **Channels** in the web UI:
+
+1. **Create the app and paste its two tokens.** The page's button opens Slack with the app's manifest filled in (Socket Mode, the `/peerlink` command, the message events and permissions). Create it in your workspace, then copy two tokens: an **app-level token** (`xapp-…`, made under Basic Information with the scope `connections:write`) and the **bot token** (`xoxb-…`, shown after Install to Workspace).
+2. **Message it, then allow yourself.** Everyone in the workspace can message the app, so peerlink ignores everyone until you allow them. Send the app any message: you show up on the Channels page under "Wrote to the app, not allowed yet", with an Allow button.
+3. **Map channels to agents**, under Chats and agents. The app's direct messages and every channel it was invited to (`/invite @peerlink`) are listed.
+
+- **Nothing needs a public URL:** events come over Socket Mode, a websocket the daemon opens to Slack.
+- **In channels** the app reads every message, so you needn't @mention it.
+- **Threads:** a message you write inside a thread is answered in that thread; one in the channel is answered in the channel.
+- **Everything else works as on Discord:** replies, buttons (a picked one collapses to "✓ choice · who"), files both ways, approvals, tasks, and `/peerlink status`, `inbox`, `peers`, `run`, `clear` and the rest, typed as `/peerlink <sub>`.
+- **Reactions** are 👀 delivered, 🤔 thinking, 🛠️ using tools, ❓ asked you something, ✅ answered, ❌ failed.
+- **Agents send** to `"slack"`, or `"slack#<channel>"` when they're in several.
+- **Allowed people** are Slack member ids (`U…`); another app's bot can be trusted by its user id through `trusted_bots` in `~/.peerlink/discord.json`.
+
 ## Starting and ending agents
 
 **Starting:** when work belongs in a folder no agent runs in, an agent can call `request_spawn` with the folder, why, and a first prompt. Nothing starts until you approve it, either in the Inbox (**Approve and start it**) or with the **Approve** button on Discord. `/inbox` then `1 approve` works too. Only you can approve: never an agent, never a bot.
@@ -409,6 +426,8 @@ plugin/daemon/discordlink.py      the Discord bot: gateway, REST, buttons, /peer
 plugin/daemon/telegramlink.py     the Telegram bot: long polling, buttons, commands, reactions
 plugin/daemon/test_chat.py        tests for the chat layer, against a fake Discord
 plugin/daemon/test_telegram.py    tests for the Telegram bot, against a fake Bot API
+plugin/daemon/slacklink.py        the Slack app: Socket Mode, buttons, the /peerlink command, reactions
+plugin/daemon/test_slack.py       tests for the Slack app, against a fake Web API and websocket
 plugin/daemon/peerlink_mcp.py     an MCP endpoint for clients outside Claude Code
 plugin/daemon/test_peerlink_mcp.py  its tests (python3 -m unittest)
 ```
