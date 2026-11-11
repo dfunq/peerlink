@@ -29,19 +29,20 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.4"
+VERSION = "0.9.5"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
 import chatlink  # noqa: E402  (beside this file; installs nothing)
 import discordlink  # noqa: E402
 import telegramlink  # noqa: E402
+import slacklink  # noqa: E402
 from cronlib import cron_next, parse_cron  # noqa: E402,F401
 from webui import UI_HTML  # noqa: E402
 
 # A fingerprint of the daemon's code: this file and the modules beside it together.
 _h = hashlib.sha256()
-for _name in ("peerlinkd.py", "chatlink.py", "discordlink.py", "telegramlink.py", "cronlib.py", "webui.py"):
+for _name in ("peerlinkd.py", "chatlink.py", "discordlink.py", "telegramlink.py", "slacklink.py", "cronlib.py", "webui.py"):
     with open(os.path.join(_here, _name), "rb") as _f:
         _h.update(_f.read())
 CODE = _h.hexdigest()[:16]
@@ -1033,9 +1034,17 @@ TELEGRAM = {"token": "", "user": "", "enabled": True,
             "allowed_users": [],
             "chats": {},  # "tg:<id>" -> title, every chat the bot has heard from, for the mapping's picker
             "strangers": []}  # the last few people who wrote without being allowed, offered on the Channels page
+# Slack's app, likewise: `token` is the bot token (xoxb-), `app_token` the one Socket Mode connects with (xapp-).
+# Its conversations map to agents in `routes`, as "slack:<channel id>".
+SLACK = {"token": "", "app_token": "", "user": "", "team": "", "enabled": True,
+         "allowed_users": [],  # Slack user ids; everyone in the workspace can message the app, so nobody until listed
+         "trusted_bots": [],
+         "chats": {},  # "slack:<id>" -> name, every conversation the app is in
+         "strangers": []}
 DISCORD_FILES = os.path.join(HOME, "files", "discord")  # what you attach on Discord, for the agent to read
 discord_bot = [None]
 telegram_bot = [None]
+slack_bot = [None]
 
 
 def load_discord():
@@ -1045,9 +1054,10 @@ def load_discord():
     except (OSError, ValueError):
         pass
     discord["routes"] = [clean_route(r) for r in discord.get("routes", []) if r.get("channel_id")]
-    tg = discord.setdefault("telegram", {})
-    for k, v in TELEGRAM.items():
-        tg.setdefault(k, json.loads(json.dumps(v)))
+    for key, defaults in (("telegram", TELEGRAM), ("slack", SLACK)):
+        own = discord.setdefault(key, {})
+        for k, v in defaults.items():
+            own.setdefault(k, json.loads(json.dumps(v)))
 
 
 def clean_route(r):
@@ -1119,22 +1129,45 @@ def start_telegram():
         bot.allowed_users = set(tg.get("allowed_users") or [])
         bot.chats = dict(tg.get("chats") or {})
         bot.on_command = on_slash
-        bot.on_chat, bot.on_stranger, bot.on_migrate = telegram_chat, telegram_stranger, telegram_migrate
+        bot.on_chat, bot.on_stranger, bot.on_migrate = chat_seen("telegram"), chat_stranger("telegram"), telegram_migrate
 
 
-def telegram_chat(channel_id, title):
-    with lock:
-        discord["telegram"]["chats"][channel_id] = title
-        save_discord()
+def start_slack():
+    old = slack_bot[0]
+    if old:
+        old.close()
+    slack_bot[0] = None
+    sl = discord["slack"]
+    if sl.get("token") and sl.get("app_token") and sl.get("enabled", True):
+        bot = slack_bot[0] = slacklink.Bot(sl["token"], sl["app_token"], on_discord, log, on_press)
+        bot.allowed_users = set(sl.get("allowed_users") or [])
+        bot.trusted_bots = set(sl.get("trusted_bots") or [])
+        bot.chats = dict(sl.get("chats") or {})
+        bot.on_command = on_slash
+        bot.on_chat, bot.on_stranger = chat_seen("slack"), chat_stranger("slack")
 
 
-def telegram_stranger(who):
-    """Someone not allowed wrote to the bot: they're offered on the Channels page, newest first, and nothing else."""
-    log("telegram", "ignored a message from", who["name"], who["id"], "(not allowed)")
-    with lock:
-        tg = discord["telegram"]
-        tg["strangers"] = [{**who, "ts": time.time()}] + [s for s in tg["strangers"] if s["id"] != who["id"]][:9]
-        save_discord()
+def chat_seen(platform):
+    """What a platform's bot calls with a chat it has heard from, or one renamed: it's kept for the mapping's picker."""
+    def seen(channel_id, title):
+        with lock:
+            discord[platform]["chats"][channel_id] = title
+            save_discord()
+    return seen
+
+
+def chat_stranger(platform):
+    """What a platform's bot calls when someone not allowed wrote to it: they're offered on the Channels page, newest
+    first, and nothing else happens."""
+    def stranger(who):
+        log(platform, "ignored a message from", who["name"], who["id"], "(not allowed)")
+        with lock:
+            own = discord[platform]
+            fresh = not any(s["id"] == who["id"] for s in own["strangers"])
+            own["strangers"] = [{**who, "ts": time.time()}] + [s for s in own["strangers"] if s["id"] != who["id"]][:9]
+            if fresh:
+                save_discord()
+    return stranger
 
 
 def telegram_migrate(old, new):
@@ -1150,9 +1183,9 @@ def telegram_migrate(old, new):
 
 
 # Chat platforms: every post, reaction and button press goes through these, which pick the platform's module by the
-# channel id (chatlink): Discord's are bare digits, Telegram's "tg:<chat id>".
+# channel id (chatlink): Discord's are bare digits, Telegram's "tg:<chat id>", Slack's "slack:<channel id>".
 ChatError = chatlink.ChatError
-CHAT_LINKS = {"discord": discordlink, "telegram": telegramlink}
+CHAT_LINKS = {"discord": discordlink, "telegram": telegramlink, "slack": slacklink}
 
 
 def chat_token(platform):
@@ -1170,7 +1203,7 @@ def chat_link(channel_id):
 def chat_bot(channel_id):
     """The running bot for the platform a channel is on, or None."""
     platform = chatlink.platform(channel_id)
-    bot = {"discord": discord_bot, "telegram": telegram_bot}.get(platform, [None])[0]
+    bot = {"discord": discord_bot, "telegram": telegram_bot, "slack": slack_bot}.get(platform, [None])[0]
     return bot if chat_token(platform) else None
 
 
@@ -1178,7 +1211,7 @@ def chat_ready(channel_id=""):
     """Whether the platform a channel is on is set up with its bot running; with no channel, whether any is."""
     if channel_id:
         return chat_bot(channel_id) is not None
-    return chat_bot("0") is not None or chat_bot("tg:0") is not None
+    return any(chat_bot(c) is not None for c in ("0", "tg:0", "slack:0"))
 
 
 def chat_configured():
@@ -1473,7 +1506,7 @@ def on_clear_all_press(press):
 
 
 def on_discord(d):
-    """A message from you on Discord or Telegram: to the chat's first receiver, or to another one it names first."""
+    """A message from you on Discord, Telegram or Slack: to the chat's first receiver, or to another one it names first."""
     bot = chat_bot(d["channel_id"])
     if not bot:
         return
@@ -1746,10 +1779,10 @@ def on_press(press):
 
 
 def chat_target(word):
-    """A chat `to` names: "discord", "telegram", "telegram#family", as (platform name or "" for any, "#channel" or "").
+    """A chat `to` names: "discord", "telegram", "slack", "telegram#family", as (platform name or "" for any, "#channel" or "").
     None when it names no chat. "discord" is any platform, as it was before there were others."""
     head, sep, channel = word.partition("#")
-    if head not in ("discord", "telegram"):
+    if head not in ("discord", "telegram", "slack"):
         return None
     return ("" if head == "discord" else chatlink.NAMES[head]), ("#" + channel.lstrip("#") if sep else "")
 
@@ -1760,7 +1793,7 @@ def chats_matching(chans, target):
 
 
 def send_discord(sender_rec, to, text, parent, hops, options=None, files=None, expects_reply=False):
-    """`to: "discord"`, `"telegram"` or one with "#name", or a reply to a message from a chat. None when it's not for one."""
+    """`to: "discord"`, `"telegram"`, `"slack"` or one with "#name", or a reply to a message from a chat. None when it's not for one."""
     if not sender_rec or not chat_ready():
         return None
     if parent and parent.get("discord") and parent.get("to_cwd") == sender_rec.get("cwd"):
@@ -2139,7 +2172,7 @@ def send(body):
         out = send_discord(sender_rec, to, shown, parent, hops, options, files, asks)
         if out is not None:
             return to_you(out)
-    # "discord", "telegram" or one with "#channel", not an agent whose name starts with discord, like discord-voice.
+    # "discord", "telegram", "slack" or one with "#channel", not an agent whose name starts with discord, like discord-voice.
     if sender_rec and (word in USER_ALIASES or (kind == "task" and chat_target(word) and not parent)):
         return to_you(user_send(sender_rec, word, shown, kind, parent_task, asks, hops, options, files))
     out = send_discord(sender_rec, to, shown, parent, hops, options, files, asks)
@@ -4349,10 +4382,9 @@ class Handler(BaseHTTPRequestHandler):
             start_discord()
             return self.reply(200, {"ok": True})
         if rest == ["channels"] and method == "GET":
-            # Telegram's chats come as one more group, the ones its bot has heard from.
-            tg = discord["telegram"]
-            chats = ([{"id": "telegram", "name": "Telegram", "channels": sorted(({"id": k, "name": v} for k, v in tg["chats"].items()), key=lambda c: c["name"].lower())}]
-                     if tg.get("token") else [])
+            # Telegram's and Slack's chats come as one more group each, the ones their bots know of.
+            chats = [{"id": key, "name": chatlink.NAMES[key], "channels": sorted(({"id": k, "name": v} for k, v in discord[key]["chats"].items()), key=lambda c: c["name"].lower())}
+                     for key in ("telegram", "slack") if discord[key].get("token")]
             if not discord.get("token"):
                 return self.reply(200, {"guilds": chats})
             # ↻ Refresh asks Discord itself (fresh=1), and what it says replaces the gateway's view.
@@ -4420,6 +4452,57 @@ class Handler(BaseHTTPRequestHandler):
                 tg.update({"token": "", "user": ""})
                 save_discord()
             start_telegram()
+            return self.reply(200, {"ok": True})
+        return self.reply(404, {"error": "not found"})
+
+    def slack_api(self, rest, method):
+        sl, bot = discord["slack"], slack_bot[0]
+        if rest == [] and method == "GET":
+            return self.reply(200, {
+                "configured": bool(sl.get("token") and sl.get("app_token")), "token_hint": slacklink.hint(sl.get("token", "")),
+                "app_token_hint": slacklink.hint(sl.get("app_token", "")), "user": sl.get("user", ""), "team": sl.get("team", ""),
+                "enabled": sl.get("enabled", True), "state": bot.state if bot else ("off" if sl.get("token") else "unconfigured"),
+                "error": bot.error if bot else "", "allowed_users": sl.get("allowed_users", []), "trusted_bots": sl.get("trusted_bots", []),
+                "strangers": sl.get("strangers", []), "chats": sl.get("chats", {}), "manifest_url": slacklink.manifest_url(),
+            })
+        if rest == [] and method == "PUT":
+            b = self.body()
+            restart = False
+            with lock:
+                if "token" in b or "app_token" in b:
+                    # Either token alone replaces that one; the pair is checked with Slack before it's kept.
+                    bot_token = str(b.get("token") or sl.get("token") or "").strip()
+                    app_token = str(b.get("app_token") or sl.get("app_token") or "").strip()
+                    try:
+                        info = slacklink.inspect_tokens(bot_token, app_token)
+                    except slacklink.SlackError as err:
+                        return self.reply(400, {"error": str(err)})
+                    sl.update({"token": bot_token, "app_token": app_token, "user": info["user"], "team": info["team"], "enabled": True})
+                    restart = True
+                if "enabled" in b:
+                    sl["enabled"], restart = bool(b["enabled"]), True
+                for k in ("allowed_users", "trusted_bots"):
+                    if k in b:
+                        raw = b[k]
+                        sl[k] = list(dict.fromkeys(re.findall(r"\b[UWB][A-Z0-9]{5,20}\b", raw if isinstance(raw, str) else " ".join(map(str, raw or [])))))
+                if b.get("allow"):
+                    # Pairing: someone who wrote to the app, allowed from the list of who tried.
+                    who = str(b["allow"])
+                    sl["allowed_users"] = list(dict.fromkeys(sl["allowed_users"] + [who]))
+                    sl["strangers"] = [s for s in sl["strangers"] if s["id"] != who]
+                if b.get("dismiss"):
+                    sl["strangers"] = [s for s in sl["strangers"] if s["id"] != str(b["dismiss"])]
+                if bot:
+                    bot.allowed_users, bot.trusted_bots = set(sl["allowed_users"]), set(sl["trusted_bots"])
+                save_discord()
+            if restart:
+                start_slack()
+            return self.reply(200, {"ok": True})
+        if rest == [] and method == "DELETE":
+            with lock:
+                sl.update({"token": "", "app_token": "", "user": "", "team": ""})
+                save_discord()
+            start_slack()
             return self.reply(200, {"ok": True})
         return self.reply(404, {"error": "not found"})
 
@@ -4990,6 +5073,10 @@ class Handler(BaseHTTPRequestHandler):
             if method != "GET" and (not browser or self.key_ok()):
                 return self.reply(403, {"error": "Telegram is set up from the web UI"})
             return self.telegram_api(rest[1:], method)
+        if rest and rest[0] == "slack":
+            if method != "GET" and (not browser or self.key_ok()):
+                return self.reply(403, {"error": "Slack is set up from the web UI"})
+            return self.slack_api(rest[1:], method)
 
         if len(rest) == 2 and rest[0] == "issues" and method == "POST":
             code, out = update_feedback(rest[1], self.body())
@@ -5117,6 +5204,7 @@ def serve():
     clean_stale_reactions()
     start_discord()
     start_telegram()
+    start_slack()
     try:
         write_launcher()
     except OSError as err:

@@ -253,7 +253,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <div class="addline" style="margin-top:8px"><label class="check small"><input type="checkbox" name="start" checked> Start it when it isn&#39;t running</label><button type="submit">Add schedule</button><span class="small" id="schedmsg"></span></div></form></div></details>
 <div id="schedlist" style="margin-top:12px;display:flex;flex-direction:column;gap:8px"></div></section>
 
-<section id="messages"><h1>Messages</h1><p class="lead">Conversations between agents, and with you on Discord and Telegram, the latest first. Open one for its whole history.</p>
+<section id="messages"><h1>Messages</h1><p class="lead">Conversations between agents, and with you on Discord, Telegram and Slack, the latest first. Open one for its whole history.</p>
 <div class="msgbar"><span class="fl"><label class="small mut" for="msgspace">Space</label><select id="msgspace"><option value="">All spaces</option></select></span>
 <span class="fl"><label class="small mut" for="msgagent">Agent</label><select id="msgagent"><option value="">Everyone</option></select></span>
 <input id="msgq" class="search" type="search" placeholder="Search messages" aria-label="Search messages">
@@ -297,6 +297,13 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <li class="step" id="tstep1"><span class="step-n">1</span><div class="step-body"><div class="step-t">Create the bot and paste its token</div><div id="tstep1b"></div></div></li>
 <li class="step" id="tstep2"><span class="step-n">2</span><div class="step-body"><div class="step-t">Message it, then allow yourself</div><div id="tstep2b"></div></div></li>
 <li class="step" id="tstep3"><span class="step-n">3</span><div class="step-body"><div class="step-t">Map chats to agents</div><div id="tstep3b"></div></div></li>
+</ol></div></details>
+<details class="plat" id="pslack"><summary><span class="plogo" style="background:#4A154B"><svg viewBox="0 0 24 24" aria-hidden="true"><path stroke="#fff" stroke-width="2.4" stroke-linecap="round" fill="none" d="M9 4.5v15M15 4.5v15M4.5 9h15M4.5 15h15"/></svg></span><span class="ptitle"><b>Slack</b><span class="psub">A channel or a direct message</span></span><span class="pstate" id="slstatus"></span><span class="chev" aria-hidden="true"></span></summary><div class="pbody">
+<p class="meta">A channel your Slack app is in, or a direct message with it, works like a Discord channel. Everyone in the workspace can message the app, so peerlink ignores everyone until you allow them.</p>
+<ol class="steps">
+<li class="step" id="sstep1"><span class="step-n">1</span><div class="step-body"><div class="step-t">Create the app and paste its two tokens</div><div id="sstep1b"></div></div></li>
+<li class="step" id="sstep2"><span class="step-n">2</span><div class="step-body"><div class="step-t">Message it, then allow yourself</div><div id="sstep2b"></div></div></li>
+<li class="step" id="sstep3"><span class="step-n">3</span><div class="step-body"><div class="step-t">Map channels to agents</div><div id="sstep3b"></div></div></li>
 </ol></div></details>
 <details class="plat" id="pmap"><summary><span class="plogo" style="background:var(--acc)"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" d="M4 7h11m0 0-3-3m3 3-3 3M20 17H9m0 0 3-3m-3 3 3 3"/></svg></span><span class="ptitle"><b>Chats and agents</b><span class="psub">Which agents hear and post in each channel</span></span><span class="pstate" id="mapstatus"></span><span class="chev" aria-hidden="true"></span></summary><div class="pbody">
 <div id="dstep3b"></div></div></details>
@@ -481,8 +488,8 @@ function renderMessages(list){
 const when=ts=>new Date(ts*1000).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
 const partyOf=(x,side)=>{const who=String(x[side]||'');return who.startsWith('discord:')?who:'n:'+String(x[side+'_name']||who).toLowerCase()};
 // A chat channel shows its platform's logo, and its name without "#… on Telegram".
-const partyLabel=(key,name)=>{if(!key.startsWith('discord:'))return `<b>${esc(name)}</b>`;const tg=key.startsWith('discord:tg:');
-  return `<span class="mlogo" style="background:${tg?'#26A5E4':'#5865F2'}">${tg?TG_LOGO:DISCORD_LOGO}</span><b>${esc(String(name).replace(/^#/,'').replace(/ on (Discord|Telegram|Slack)$/,''))}</b>`};
+const partyLabel=(key,name)=>{if(!key.startsWith('discord:'))return `<b>${esc(name)}</b>`;
+  return `${platLogo(key.slice(8))}<b>${esc(String(name).replace(/^#/,'').replace(/ on (Discord|Telegram|Slack)$/,''))}</b>`};
 function convLine(x,c){const st=x.status==='delivered'?'':`<span class="chip ${esc(x.status)}">${esc(x.status)}</span>`;
   return `<div class="cline${partyOf(x,'from')===c.a?'':' other'}${openLines.has(x.id)?' open':''}" data-line="${esc(x.id)}"><div class="mh"><b>${esc(x.from_name)}</b>
     ${x.kind==='announcement'?`<span class="chip reply">announcement · ${(x.recipients||[]).length} agents</span>`:''}${x.task?`<span class="chip reply">task ${esc(x.task)}</span>`:x.expects_reply?'<span class="chip">reply expected</span>':''}${x.reply_to?`<span class="chip reply">re ${esc(x.reply_to)}</span>`:''}${st}
@@ -941,8 +948,8 @@ function entrySelect(attrs,placeholder){return `<select ${attrs}><option value="
 function agentSelect(val,attrs,placeholder){const opts=agentFolders();const extra=val&&!opts.some(o=>o.cwd===val)?[{cwd:val}]:[];
   return `<select ${attrs}><option value="">${placeholder}</option>${[...opts,...extra].map(o=>`<option value="${esc(o.cwd)}" ${o.cwd===val?'selected':''}>${esc(folderLabel(o.cwd))}</option>`).join('')}</select>`}
 function channelSelect(val,attrs){const gs=dGuilds||[];
-  return `<select ${attrs}><option value="">Pick a channel…</option>${gs.map(g=>`<optgroup label="${esc(g.name)}">${g.channels.map(c=>`<option value="${esc(c.id)}" ${c.id===val?'selected':''}>${g.id==='telegram'?'':'#'}${esc(c.name)}</option>`).join('')}</optgroup>`).join('')}</select>`}
-const chanName=id=>{for(const g of dGuilds||[])for(const c of g.channels)if(c.id===id)return (g.id==='telegram'?'':'#')+c.name;return 'channel '+id};
+  return `<select ${attrs}><option value="">Pick a channel…</option>${gs.map(g=>`<optgroup label="${esc(g.name)}">${g.channels.map(c=>`<option value="${esc(c.id)}" ${c.id===val?'selected':''}>${g.id==='telegram'||g.id==='slack'?'':'#'}${esc(c.name)}</option>`).join('')}</optgroup>`).join('')}</select>`}
+const chanName=id=>{for(const g of dGuilds||[])for(const c of g.channels)if(c.id===id)return (g.id==='telegram'||g.id==='slack'?'':'#')+c.name;return 'channel '+id};
 async function loadDiscord(check){
   dState=await api('/api/discord'+(check?'?check=1':''));
   if(dGuilds===null){const r=await api('/api/discord/channels');dGuilds=r.guilds||[]}
@@ -956,29 +963,30 @@ function panels(want){for(const [id,open] of Object.entries(want)){const el=docu
   el.open=saved===null?open:saved==='1';el.addEventListener('toggle',()=>{try{localStorage.setItem('pl.panel.'+id,el.open?'1':'0')}catch(e){}})}}
 const platState=(configured,state,label,user,error)=>!configured?'<span class="pill">Not set up</span>'
   :`<span class="dstate"><span class="dot ${state==='online'?'':'busy'}"></span><b>${esc(label)}</b>${user?` <span class="mut">as ${esc(user)}</span>`:''}${error?` · <span class="err">${esc(error)}</span>`:''}</span>`;
-function renderDiscord(){if(!dState)return;const d=dState,invited=(dGuilds||[]).some(g=>g.id!=='telegram'),mapped=(d.routes||[]).some(r=>(r.agents||[]).length);
-  const tgChats=(dGuilds||[]).some(g=>g.id==='telegram'&&g.channels.length);
+function renderDiscord(){if(!dState)return;const d=dState,invited=(dGuilds||[]).some(g=>!OTHER(g)),mapped=(d.routes||[]).some(r=>(r.agents||[]).length);
+  const tgChats=(dGuilds||[]).some(g=>OTHER(g)&&g.channels.length);
   $('#n-discord').textContent=d.state==='online'?'on':'';
   const label={online:'Online',connecting:'Connecting…',error:'Error',off:'Turned off',unconfigured:'Not set up'}[d.state]||d.state;
   $('#dstatus').innerHTML=platState(d.configured,d.state,label,d.user,d.error);
   const nmap=(d.routes||[]).filter(r=>(r.agents||[]).length).length;$('#mapstatus').innerHTML=nmap?`<span class="pill">${nmap} mapped</span>`:'';
   panels({pdiscord:!d.configured||d.state==='error',pmap:true,popts:false});
-  $('#dstep1').classList.toggle('done',d.configured);$('#dstep2').classList.toggle('done',d.configured&&invited);$('#dstep3').classList.toggle('done',(d.routes||[]).some(r=>!r.channel_id.startsWith('tg:')&&(r.agents||[]).length));
+  $('#dstep1').classList.toggle('done',d.configured);$('#dstep2').classList.toggle('done',d.configured&&invited);$('#dstep3').classList.toggle('done',(d.routes||[]).some(r=>platOf(r.channel_id)==='discord'&&(r.agents||[]).length));
   $('#tstep3').classList.toggle('done',(d.routes||[]).some(r=>r.channel_id.startsWith('tg:')&&(r.agents||[]).length));
+  $('#sstep3').classList.toggle('done',(d.routes||[]).some(r=>r.channel_id.startsWith('slack:')&&(r.agents||[]).length));
   $('#dstep1b').innerHTML=d.configured?`<p class="meta">Token <span class="mono">${esc(d.token_hint)}</span> saved. <button class="ghost small" data-dact="forget">Disconnect</button></p>`
    :`<p class="meta">On the <a href="https://discord.com/developers/applications" target="_blank" rel="noreferrer">Developer Portal ↗</a>, click <b>New Application</b> and give it a name. Open <b>Bot</b>, click <b>Reset Token</b>, and copy it. Optional: on the same page, turn on <b>Message Content Intent</b> so you can talk to it without @mentioning it every time.</p>
      <form class="addline" id="dtoken"><input type="password" class="mono grow" autocomplete="off" spellcheck="false" placeholder="Bot token" name="token"><button type="submit" ${dBusy?'disabled':''}>${dBusy?'Checking…':'Connect'}</button></form><p class="small err" id="dtokerr"></p>`;
-  $('#dstep2b').innerHTML=!d.configured?'':`<p class="meta">${invited?`In ${dGuilds.filter(g=>g.id!=='telegram').map(g=>esc(g.name)).join(', ')}. `:`Pick your server on Discord's page, then come back here. This step completes on its own. `}
+  $('#dstep2b').innerHTML=!d.configured?'':`<p class="meta">${invited?`In ${dGuilds.filter(g=>!OTHER(g)).map(g=>esc(g.name)).join(', ')}. `:`Pick your server on Discord's page, then come back here. This step completes on its own. `}
     ${d.invite_url?`<a href="${esc(d.invite_url)}" target="_blank" rel="noreferrer">${invited?'Invite to another server ↗':'<button>Invite the bot ↗</button>'}</a>`:''}</p>`;
-  if(!(d.configured&&invited)&&!tgChats){$('#dstep3b').innerHTML='<p class="meta">Set up Discord or Telegram above; the channels and chats its bot can see are mapped to agents here.</p>';$('#dmore').innerHTML='';return}
+  if(!(d.configured&&invited)&&!tgChats){$('#dstep3b').innerHTML='<p class="meta">Set up Discord, Telegram or Slack above; the channels and chats its bot can see are mapped to agents here.</p>';$('#dmore').innerHTML='';return}
   const rows=dDraft.routes.map((r,i)=>`<tr>
-    <td><div class="addline" style="flex-wrap:nowrap">${r.channel_id?`<span class="mlogo" title="${r.channel_id.startsWith('tg:')?'Telegram':'Discord'}" style="background:${r.channel_id.startsWith('tg:')?'#26A5E4':'#5865F2'}">${r.channel_id.startsWith('tg:')?TG_LOGO:DISCORD_LOGO}</span>`:''}${channelSelect(r.channel_id,`data-droute="${i}" data-dfield="channel_id"`)}</div></td>
+    <td><div class="addline" style="flex-wrap:nowrap">${r.channel_id?platLogo(r.channel_id):''}${channelSelect(r.channel_id,`data-droute="${i}" data-dfield="channel_id"`)}</div></td>
     <td><div class="kinds">${(r.agents||[]).map((a,j)=>`<div class="addline small"><b>${esc(entryLabel(a))}</b>
         <label class="small"><input type="checkbox" data-dflag="${i}:${j}:receives" ${a.receives?'checked':''}> Receives</label>
         <label class="small"><input type="checkbox" data-dflag="${i}:${j}:sends" ${a.sends?'checked':''}> Sends</label>
         <button class="ghost small" title="Remove" data-dunagent="${i}:${j}">✕</button></div>`).join('')}
       ${entrySelect(`data-daddagent="${i}"`,'+ add agent')}</div></td>
-    <td style="white-space:nowrap"><button class="ghost small" data-dtest="${esc(r.channel_id)}" ${r.channel_id&&(r.channel_id.startsWith('tg:')?tState?.state:d.state)==='online'?'':'disabled'}>Send a test</button> <button class="ghost small" data-dremove="${i}" title="Remove this channel">✕</button></td></tr>`).join('');
+    <td style="white-space:nowrap"><button class="ghost small" data-dtest="${esc(r.channel_id)}" ${r.channel_id&&({telegram:tState,slack:sState,discord:d}[platOf(r.channel_id)]||{}).state==='online'?'':'disabled'}>Send a test</button> <button class="ghost small" data-dremove="${i}" title="Remove this channel">✕</button></td></tr>`).join('');
   $('#dstep3b').innerHTML=`<p class="meta">Your messages go to the first agent that receives. To reach another that receives, start with its name and a colon: <span class="mono">storefront: how's the build?</span> An agent that sends posts its messages and updates there; any agent answers you where you asked.</p>
     <table class="dmap"><thead><tr><th>Channel</th><th>Agents</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="3" class="mut small">No channels mapped yet.</td></tr>'}</tbody></table>
     <p class="small mut" style="margin-top:6px">Start a post with <span class="mono">Task:</span> to hand it over as a task, or <span class="mono">Announcement:</span> to tell the receiving agent's whole space.</p>
@@ -1036,6 +1044,12 @@ document.addEventListener('click',async e=>{const t=e.target.closest('button');i
   if(a==='save'){const bad=dDraft.routes.find(r=>!r.channel_id||!(r.agents||[]).some(a=>a.receives||a.sends));if(bad){$('#dsaved').className='small err';$('#dsaved').textContent='Every row needs a channel and an agent that receives or sends.';return}
     await api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({routes:dDraft.routes,dm:dDraft.dm})});dState=null;dDraft=null;await loadDiscord();
     $('#dsaved').className='small ok';$('#dsaved').textContent='Saved'}});
+// A chat's platform from its id, and that platform's logo.
+const SLACK_LOGO='<svg viewBox="0 0 24 24" aria-hidden="true"><path stroke="#fff" stroke-width="2.6" stroke-linecap="round" fill="none" d="M9 4.5v15M15 4.5v15M4.5 9h15M4.5 15h15"/></svg>';
+const PLAT={discord:['Discord','#5865F2',DISCORD_LOGO],telegram:['Telegram','#26A5E4',TG_LOGO],slack:['Slack','#4A154B',SLACK_LOGO]};
+const platOf=id=>String(id).startsWith('tg:')?'telegram':String(id).startsWith('slack:')?'slack':'discord';
+const platLogo=id=>{const [name,color,logo]=PLAT[platOf(id)];return `<span class="mlogo" title="${name}" style="background:${color}">${logo}</span>`};
+const OTHER=g=>g.id==='telegram'||g.id==='slack';
 // -- Telegram: the bot's token, who may talk to it, and the chats it has heard from ------------------
 let tState=null,tBusy=false;
 async function loadTelegram(){const before=JSON.stringify(Object.keys(tState?.chats||{}));tState=await api('/api/telegram');renderTelegram();
@@ -1071,11 +1085,46 @@ document.addEventListener('click',async e=>{const t=e.target.closest('button');i
   if(t.dataset.tallow){await api('/api/telegram',{method:'PUT',headers:J,body:JSON.stringify({allow:t.dataset.tallow})});loadTelegram()}
   if(t.dataset.tdismiss){await api('/api/telegram',{method:'PUT',headers:J,body:JSON.stringify({dismiss:t.dataset.tdismiss})});loadTelegram()}
   if(t.dataset.tact==='forget'&&confirm('Disconnect the Telegram bot? The chat mapping and allowed people are kept.')){await api('/api/telegram',{method:'DELETE'});loadTelegram()}});
+// -- Slack: the app's two tokens, who may talk to it, and the conversations it is in --------------------
+let sState=null,sBusy=false,sShown=null;
+async function loadSlack(){const before=JSON.stringify(sState?.chats||{});sState=await api('/api/slack');renderSlack();
+  if(before!==JSON.stringify(sState.chats||{})&&dState){dGuilds=null;loadDiscord()}}
+function renderSlack(){const t=sState;if(!t)return;
+  const label={online:'Online',connecting:'Connecting…',error:'Error',off:'Turned off',unconfigured:'Not set up'}[t.state]||t.state;
+  $('#slstatus').innerHTML=platState(t.configured,t.state,label,t.user&&`${t.user}${t.team?' in '+t.team:''}`,t.error)+((t.strangers||[]).length?` <span class="pill warn">${t.strangers.length} waiting</span>`:'');
+  if(dState&&t.state!==sShown){sShown=t.state;renderDiscord()}
+  panels({pslack:t.configured&&(t.state==='error'||(t.strangers||[]).length>0)});
+  $('#sstep1').classList.toggle('done',t.configured);$('#sstep2').classList.toggle('done',t.configured&&(t.allowed_users||[]).length>0);
+  // The token form is left alone while it's being filled in: the page polls.
+  if(t.configured||!$('#stoken')||sBusy!==($('#stoken').dataset.busy==='1'))$('#sstep1b').innerHTML=t.configured?`<p class="meta">Tokens <span class="mono">${esc(t.token_hint)}</span> and <span class="mono">${esc(t.app_token_hint)}</span> saved. <label class="small"><input type="checkbox" data-sact="enabled" ${t.enabled?'checked':''}> App running</label> <button class="ghost small" data-sact="forget">Disconnect</button></p>`
+   :`<p class="meta"><a href="${esc(t.manifest_url)}" target="_blank" rel="noreferrer"><button type="button">Create the app on Slack ↗</button></a> The link fills in everything the app needs; pick your workspace and click <b>Create</b>.</p>
+     <p class="meta"><b>App-level token:</b> on the app's <b>Basic Information</b> page, under <b>App-Level Tokens</b>, click <b>Generate Token and Scopes</b>, add the scope <span class="mono">connections:write</span>, and copy the token (it starts <span class="mono">xapp-</span>).</p>
+     <p class="meta"><b>Bot token:</b> on <b>Install App</b>, click <b>Install to Workspace</b>, allow it, and copy the <b>Bot User OAuth Token</b> (it starts <span class="mono">xoxb-</span>).</p>
+     <form class="addline" id="stoken" data-busy="${sBusy?1:0}"><input type="password" class="mono grow" autocomplete="off" spellcheck="false" placeholder="App-level token, xapp-…" name="app_token"><input type="password" class="mono grow" autocomplete="off" spellcheck="false" placeholder="Bot token, xoxb-…" name="token"><button type="submit" ${sBusy?'disabled':''}>${sBusy?'Checking…':'Connect'}</button></form><p class="small err" id="stokerr"></p>`;
+  const strangers=(t.strangers||[]).map(x=>`<div class="addline small"><b>${esc(x.name)}</b> <span class="mono mut">${esc(x.id)}</span> <span class="mut">in ${esc(x.chat_name||x.chat)}, ${ago(x.ts)} ago</span>
+      <button class="small" data-sallow="${esc(x.id)}">Allow</button><button class="ghost small" data-sdismiss="${esc(x.id)}">Dismiss</button></div>`).join('');
+  if(document.activeElement?.dataset?.susers===undefined)$('#sstep2b').innerHTML=!t.configured?'':`<p class="meta">In Slack, find <b>${esc(t.user||'peerlink')}</b> under <b>Apps</b> and send it any message. You show up here; allow yourself, and it answers you from then on.</p>
+    ${strangers?`<p class="meta"><b>Wrote to the app, not allowed yet:</b></p>${strangers}`:'<p class="small mut">Nobody waiting. This updates by itself.</p>'}
+    <p class="meta" style="margin-top:8px">Allowed (Slack member ids, separated by commas): they can message agents and answer buttons as you do.</p>
+    <div class="addline"><input class="mono" placeholder="e.g. U012AB3CD" value="${esc((t.allowed_users||[]).join(', '))}" data-susers style="flex:1;min-width:0"></div>`;
+  $('#sstep3b').innerHTML=!t.configured?'':`<p class="meta">Your direct message with the app, and every channel it's in, is listed under <b>Chats and agents</b>, below. To add it to a channel, type <span class="mono">/invite @${esc(t.user||'peerlink')}</span> there; it reads every message in that channel.
+    Commands work too: <span class="mono">/peerlink status</span>, <span class="mono">/peerlink inbox</span>, <span class="mono">/peerlink run loop 5m check the deploy</span>.</p>`}
+document.addEventListener('submit',async e=>{if(e.target.id!=='stoken')return;e.preventDefault();const tok=e.target.token.value.trim(),app=e.target.app_token.value.trim();if(!tok||!app){$('#stokerr').textContent='Paste both tokens.';return}
+  sBusy=true;const r=await api('/api/slack',{method:'PUT',headers:J,body:JSON.stringify({token:tok,app_token:app})});sBusy=false;
+  if(r.error){$('#stokerr').textContent=r.error;return}await loadSlack()});
+document.addEventListener('change',e=>{const t=e.target;
+  if(t.dataset.susers!==undefined)api('/api/slack',{method:'PUT',headers:J,body:JSON.stringify({allowed_users:t.value})}).then(()=>{t.blur();loadSlack()});
+  if(t.dataset.sact==='enabled')api('/api/slack',{method:'PUT',headers:J,body:JSON.stringify({enabled:t.checked})}).then(loadSlack)});
+document.addEventListener('click',async e=>{const t=e.target.closest('button');if(!t)return;
+  if(t.dataset.sallow){await api('/api/slack',{method:'PUT',headers:J,body:JSON.stringify({allow:t.dataset.sallow})});loadSlack()}
+  if(t.dataset.sdismiss){await api('/api/slack',{method:'PUT',headers:J,body:JSON.stringify({dismiss:t.dataset.sdismiss})});loadSlack()}
+  if(t.dataset.sact==='forget'&&confirm('Disconnect the Slack app? The channel mapping and allowed people are kept.')){await api('/api/slack',{method:'DELETE'});loadSlack()}});
 // Someone messaging the bot, or a chat it joins, shows up without a reload.
 setInterval(()=>{if(location.hash==='#channels'&&tState?.configured&&!document.hidden)loadTelegram()},4000);
+setInterval(()=>{if(location.hash==='#channels'&&!document.hidden&&(sState?.configured||!sState))loadSlack()},4000);
 // Invited in another tab, or back from the Developer Portal: look again when this tab gets focus.
 window.addEventListener('focus',()=>{if(location.hash==='#channels'&&dState?.configured){dGuilds=null;loadDiscord(true)}});
-window.addEventListener('hashchange',()=>{if(location.hash==='#discord')location.hash='#channels';if(location.hash==='#channels'){loadDiscord();loadTelegram()}});
+window.addEventListener('hashchange',()=>{if(location.hash==='#discord')location.hash='#channels';if(location.hash==='#channels'){loadDiscord();loadTelegram();loadSlack()}});
 
 // Standing rules, on the Spaces page: yours to add, change, turn off or delete; an agent's proposal to approve.
 let allRules=[];
@@ -1128,6 +1177,6 @@ async function tick(){
   catch(e){if(!signedOut){misses++;$('#offline').style.display='block'}}
   if(signedOut){live?.close();return}
   setTimeout(tick,streamOk?30000:misses?10000:2000)}
-show();loadCfg().then(()=>refresh(true)).then(()=>{if(location.hash==='#discord')location.hash='#channels';else if(location.hash==='#channels'){loadDiscord();loadTelegram()}}).catch(()=>{misses=1;$('#offline').style.display='block'}).finally(()=>{connect();setTimeout(tick,2000)});
+show();loadCfg().then(()=>refresh(true)).then(()=>{if(location.hash==='#discord')location.hash='#channels';else if(location.hash==='#channels'){loadDiscord();loadTelegram();loadSlack()}}).catch(()=>{misses=1;$('#offline').style.display='block'}).finally(()=>{connect();setTimeout(tick,2000)});
 </script></body></html>
 """
