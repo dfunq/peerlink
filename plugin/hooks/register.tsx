@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.9.6'
+const DAEMON_VERSION = '0.9.7'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -159,6 +159,10 @@ let lastRoster = ''
 // the next prompt instead, sent again only when it changes or the conversation starts over.
 let composeRan = false
 let contextRan = false
+// Turns finished since this module loaded: prompt.compose runs for every request, so one finished turn without it
+// means a plugin above sent the event past peerlink's hook.
+let turnsSinceLoad = 0
+let composeOff = false
 let sentGuidance = ''
 let sentThreads = false
 let contextFor = ''
@@ -1401,7 +1405,24 @@ async function offerFeedback($: EngineInterface) {
   feedbackTool = true
 }
 
-export const register: Register = on => {
+// An organisation's managed plugin can send prompt.compose past every user plugin. Claude Code then reports peerlink's
+// hook as skipped on every prompt, though the guidance already rides on the prompt instead (skippedContext). Seeing
+// that once, peerlink turns its own setting off, which reloads it without the hook; the setting is in /config.
+async function composeBypassed($: EngineInterface) {
+  if (composeOff || composeRan || turnsSinceLoad < 1) return
+  composeOff = true
+  const rows = await $.config.list().catch(() => [] as { key: string }[])
+  const key = rows.find(r => /^peerlink(@[^.]*)?\.system_prompt$/.test(r.key))?.key ?? 'peerlink.system_prompt'
+  const out: any = await $.config.set({ key, value: false } as any).catch((err: unknown) => ({ deny: String(err) }))
+  $.ui.log(out?.deny
+    ? `peerlink: another plugin skips its system-prompt hook; it couldn't turn the hook off (${out.deny}), so the notice may repeat. Its guidance still reaches the agent on each prompt.`
+    : "peerlink: another plugin skips its system-prompt hook, so peerlink turned that hook off (/config: peerlink's system_prompt). Its guidance reaches the agent on the prompt instead.", { to: 'debug' })
+}
+
+export const register: Register = (on, options) => {
+  // Off when a managed plugin was found sending prompt.compose past peerlink: see composeBypassed.
+  const useCompose = options?.system_prompt !== false
+  if (!useCompose) composeOff = true
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     surface = (e as any).surface ?? ''
@@ -1679,6 +1700,7 @@ export const register: Register = on => {
       busy = false
       turnStarted($, undefined)
       turnsSinceSummary++
+      turnsSinceLoad++
       lastTurnEnd = await $.clock.now()
       if (await limitCheck($, e.reason).catch(() => false)) return done
       await checkContextSize($).catch(() => undefined)
@@ -1700,6 +1722,7 @@ export const register: Register = on => {
       void postSummary($, `${base}${base ? ' · ' : ''}now: ${task}`, 'seed').catch(() => {})
     }
     if (!sessionId || e.command) return next(e)
+    if (useCompose) await composeBypassed($).catch(() => undefined)
     const add = [await rosterContext($), ...(await skippedContext($)), nudgeBlock()].filter((t): t is string => !!t)
     return next(add.length ? { ...e, context: [...(e.context ?? []), ...add] } : e)
   }).catch(($, e, next) => next(e))
@@ -1723,13 +1746,14 @@ export const register: Register = on => {
     return blocks.length ? { ...out, blocks: [...out.blocks, ...blocks] } : out
   })
 
-  on('prompt.compose', async ($, e, next) => {
-    composeRan = true
-    const composed = await next(e)
-    const text = guidanceText()
-    if (!text) return composed
-    return { sections: [...composed.sections, { id: 'peerlink:guidance', scope: 'session', text }] }
-  })
+  if (useCompose)
+    on('prompt.compose', async ($, e, next) => {
+      composeRan = true
+      const composed = await next(e)
+      const text = guidanceText()
+      if (!text) return composed
+      return { sections: [...composed.sections, { id: 'peerlink:guidance', scope: 'session', text }] }
+    })
 
   // A compacted conversation keeps the system prompt, but the prompt that carried what the skipped hooks would have
   // sent is summarized away: send it again.

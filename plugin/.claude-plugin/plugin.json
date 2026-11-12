@@ -1,6 +1,6 @@
 {
   "name": "peerlink",
-  "version": "0.9.6",
+  "version": "0.9.7",
   "description": "Lets your Claude agents discover and message each other through one lightweight daemon per machine, with a CLI and a signed-in web UI.",
   "author": {
     "name": "Dillon",
@@ -8,5 +8,13 @@
   },
   "homepage": "https://github.com/dfunq/peerlink",
   "repository": "https://github.com/dfunq/peerlink",
-  "license": "MIT"
+  "license": "MIT",
+  "userConfig": {
+    "system_prompt": {
+      "type": "boolean",
+      "title": "Guidance in the system prompt",
+      "description": "Put peerlink's guidance for agents in the system prompt. peerlink turns this off by itself when another plugin, such as an organisation's managed one, skips that hook; the guidance then goes with each prompt instead.",
+      "default": true
+    }
+  }
 }
