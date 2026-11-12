@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.5"
+VERSION = "0.9.6"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -3649,7 +3649,8 @@ def when_text(c):
     import datetime as dt
     if c.get("cron"):
         return f"cron {c['cron']}"
-    return "once, " + dt.datetime.fromtimestamp(c.get("at") or 0).strftime("%a %b %-d %H:%M")
+    at = dt.datetime.fromtimestamp(c.get("at") or 0)
+    return f"once, {at:%a %b} {at.day} {at:%H:%M}"  # not %-d: Windows has no such format
 
 
 def load_schedules():
@@ -5105,9 +5106,17 @@ class Handler(BaseHTTPRequestHandler):
     def handle_route(self, method):
         try:
             self.route(method)
-        except (ValueError, TypeError, KeyError, AttributeError) as err:  # a malformed request, e.g. ?limit=abc
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass  # the caller left
+        except Exception as err:
+            # A malformed request (?limit=abc) is the caller's; anything else is a fault here. Both say what and where
+            # in the log, so a page that can't load on one machine leaves a reason behind.
+            import traceback
+            bad = isinstance(err, (ValueError, TypeError, KeyError, AttributeError))
+            where = traceback.extract_tb(err.__traceback__)[-1]
+            log("request failed:", method, self.path.split("?")[0], f"{type(err).__name__}: {err}", f"({os.path.basename(where.filename)}:{where.lineno} in {where.name})")
             try:
-                self.reply(400, {"error": f"bad request: {err}"})
+                self.reply(400 if bad else 500, {"error": f"{'bad request' if bad else 'the daemon failed'}: {type(err).__name__}: {err} ({os.path.basename(where.filename)}:{where.lineno})"})
             except OSError:
                 pass
 
