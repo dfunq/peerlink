@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.9.6', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.9.7', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (state.forget && path.endsWith('/heartbeat') && 'busy' in body) {
       state.forget = false
       return { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'unknown agent; register again' }) } }
@@ -978,7 +978,7 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.9.6 · daemon 0.9.6 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.9.7 · daemon 0.9.7 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the space is listed once', async ($, on) => {
@@ -1011,7 +1011,7 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.9.6')
+  expect(reg.plugin).toBe('0.9.7')
 })
 
 test('an agent registers again under the folder it started in, wherever the host has moved its root since', async ($, on) => {
@@ -1113,7 +1113,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.9.7', true], ['0.9.6', false]] as const)
+for (const [installed, reloads] of [['0.9.8', true], ['0.9.7', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     const daemon = fakeDaemon(on)
@@ -1327,4 +1327,47 @@ test('a turn the usage limit kills puts back what it was given, holds new messag
   expect(woke.length).toBe(2)
   expect(woke[1]).toContain('m2')
   expect(woke[1]).toContain('m1')
+})
+
+test('when another plugin sends prompt.compose past peerlink, it turns its own system-prompt hook off, once', async ($, on) => {
+  engine(on)
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  const set: { key: string; value: unknown }[] = []
+  on('config.list', () => ({ value: [{ key: 'peerlink.system_prompt', label: 'Guidance in the system prompt' }] }))
+  on('config.set', (_: any, e: any) => {
+    set.push({ key: e.key, value: e.value })
+    return { value: e.value }
+  })
+  fakeDaemon(on, 1, null, [], { space: 'acme', space_source: 'set', space_from: '', role: 'Owns the web app.' })
+  await $.session.start(START)
+  await settle()
+  // No turn has finished yet: a missing compose proves nothing.
+  const first: any = await $.prompt.submit({ text: 'add an invoice page' })
+  expect(set).toEqual([])
+  expect(first.context.join('\n')).toContain('Owns the web app.')
+  await $.turn.complete(TURN)
+  for (let i = 0; i < 5; i++) await settle()
+  await $.prompt.submit({ text: 'now style it' })
+  await $.turn.complete(TURN)
+  for (let i = 0; i < 5; i++) await settle()
+  await $.prompt.submit({ text: 'next' })
+  expect(set).toEqual([{ key: 'peerlink.system_prompt', value: false }])
+})
+
+test('when prompt.compose runs, the system-prompt hook stays on', async ($, on) => {
+  engine(on)
+  on('prompt.compose', () => ({ sections: [] }))
+  const set: unknown[] = []
+  on('config.set', (_: any, e: any) => {
+    set.push(e)
+    return { value: e.value }
+  })
+  fakeDaemon(on, 1)
+  await $.session.start(START)
+  await settle()
+  await $.prompt.compose(COMPOSE)
+  await $.turn.complete(TURN)
+  for (let i = 0; i < 5; i++) await settle()
+  await $.prompt.submit({ text: 'carry on' })
+  expect(set).toEqual([])
 })
