@@ -412,7 +412,8 @@ let signedOut=false;
 async function api(p,o){const r=await fetch(p,o);if(r.status===401){signedOut=true;$('#signedout').style.display='block';throw new Error('signed out')}return r.json()}
 const post=(p,b)=>api(p,{method:'POST',headers:J,body:JSON.stringify(b||{})});
 // Agents and Tasks lay out across the whole window; the reading pages keep a comfortable line length.
-function show(){const id=(location.hash||'#agents').slice(1);document.body.classList.toggle('wide',id==='agents'||id==='tasks');
+// The Agents list reads like any other page; only its chart needs the room.
+function show(){const id=(location.hash||'#agents').slice(1);document.body.classList.toggle('wide',(id==='agents'&&aLayout!=='list')||id==='tasks');
   document.querySelectorAll('section').forEach(s=>s.classList.toggle('on',s.id===id));
   document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('on',a.dataset.nav===id))}
 // Leaving Agents, or Escape, closes the agent panel: it should never linger over another page.
@@ -830,7 +831,7 @@ document.addEventListener('click',async e=>{if(!e.target.closest('[data-notify]'
   else if(await Notification.requestPermission()==='granted'){try{localStorage.setItem('peerlink.notify','1')}catch{}}
   else alert('Notifications are blocked for this page. Allow them in the browser\'s site settings.');
   renderInbox()});
-document.addEventListener('click',e=>{const b=e.target.closest('[data-alayout]');if(!b)return;aLayout=b.dataset.alayout;try{localStorage.setItem('peerlink.alayout',aLayout)}catch{};refresh(true)});
+document.addEventListener('click',e=>{const b=e.target.closest('[data-alayout]');if(!b)return;aLayout=b.dataset.alayout;try{localStorage.setItem('peerlink.alayout',aLayout)}catch{};show();refresh(true)});
 const keep=(k,v)=>{try{localStorage.setItem('peerlink.'+k,v)}catch{}};
 let tLayout=pref('tlayout','board'),dragging=null;const openCards=new Set();
 $('#tgroup').value=pref('tgroup','');
