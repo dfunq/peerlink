@@ -93,6 +93,16 @@ details.plat .pbody h2{font-size:14px;margin:16px 0 6px}.pill.warn{color:var(--w
 .chip{display:inline-flex;gap:4px;align-items:center;font-size:12px;border:1px solid var(--line);border-radius:999px;padding:1px 4px 1px 8px}
 .chip button{padding:0 5px;font-size:12px;line-height:1.4;background:transparent;color:var(--mut);border:0}
 .dstate{display:inline-flex;align-items:center;gap:6px;font-size:13px;margin-bottom:8px}.dstate .dot{margin:0}
+.mlist2{display:flex;flex-direction:column;gap:8px;margin-top:8px}
+.mrow{border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:var(--well)}
+.mhead{display:flex;align-items:center;gap:8px;min-width:0}.mhead .mname{font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.mhead select{flex:1;min-width:0}
+.magents{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:8px}
+.magent{display:inline-flex;align-items:center;gap:4px;border:1px solid var(--line);border-radius:999px;padding:2px 4px 2px 10px;background:var(--card);font-size:13px}
+.tog{font-size:11px;padding:1px 8px;border-radius:999px;border:1px solid var(--line);background:transparent;color:var(--mut);cursor:pointer}
+.tog[aria-pressed="true"]{background:var(--acc);border-color:var(--acc);color:#fff}
+.magent .x{border:0;background:transparent;color:var(--mut);padding:0 6px;font-size:13px;cursor:pointer}
+.magents select{width:auto;font-size:13px;padding:3px 8px}
+.linkbtn{border:0;background:transparent;color:var(--mut);font-size:12px;padding:2px 4px;cursor:pointer}.linkbtn:hover{color:var(--bad)}
 #channels a{color:var(--acc)}.dmap td:nth-child(2){min-width:190px}.dmap td:nth-child(1){min-width:150px}
 #channels label.check{display:flex;gap:8px;align-items:flex-start;margin:6px 0;max-width:820px;font-size:13px}#channels label.check input{margin-top:3px}
 .legend{display:grid;grid-template-columns:auto 1fr;gap:4px 10px;font-size:13px;max-width:820px}
@@ -293,7 +303,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <li class="step" id="dstep1"><span class="step-n">1</span><div class="step-body"><div class="step-t">Create the bot and paste its token</div><div id="dstep1b"></div></div></li>
 <li class="step" id="dstep2"><span class="step-n">2</span><div class="step-body"><div class="step-t">Invite it to your server</div><div id="dstep2b"></div></div></li>
 <li class="step" id="dstep3"><span class="step-n">3</span><div class="step-body"><div class="step-t">Map channels to agents</div><p class="meta">Under <b>Chats and agents</b>, below.</p></div></li>
-</ol></div></details>
+</ol><div id="dextra"></div></div></details>
 <details class="plat" id="ptelegram"><summary><span class="plogo" style="background:#26A5E4"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#fff" d="M4.6 11.6l13.1-5.05c.6-.22 1.13.15.93 1.06l-2.23 10.5c-.17.75-.6.93-1.23.58l-3.4-2.5-1.64 1.58c-.18.18-.33.33-.68.33l.24-3.46 6.3-5.69c.27-.24-.06-.38-.43-.14l-7.78 4.9-3.35-1.05c-.73-.23-.74-.73.15-1.07z"/></svg></span><span class="ptitle"><b>Telegram</b><span class="psub">A private chat or a group</span></span><span class="pstate" id="tgstatus"></span><span class="chev" aria-hidden="true"></span></summary><div class="pbody">
 <p class="meta">A private chat with your bot, or a group it's in, works like a Discord channel. Telegram bots answer anyone who finds them, so peerlink ignores everyone until you allow them.</p>
 <ol class="steps">
@@ -310,7 +320,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 </ol></div></details>
 <details class="plat" id="pmap"><summary><span class="plogo" style="background:var(--acc)"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" d="M4 7h11m0 0-3-3m3 3-3 3M20 17H9m0 0 3-3m-3 3 3 3"/></svg></span><span class="ptitle"><b>Chats and agents</b><span class="psub">Which agents hear and post in each channel</span></span><span class="pstate" id="mapstatus"></span><span class="chev" aria-hidden="true"></span></summary><div class="pbody">
 <div id="dstep3b"></div></div></details>
-<details class="plat" id="popts"><summary><span class="plogo" style="background:var(--mut)"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2" fill="none" stroke="#fff" stroke-width="2"/><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M5.6 18.4l1.8-1.8M16.6 7.4l1.8-1.8"/></svg></span><span class="ptitle"><b>Options</b><span class="psub">Progress reactions, buttons, files and who can talk</span></span><span class="pstate" id="optstatus"></span><span class="chev" aria-hidden="true"></span></summary><div class="pbody">
+<details class="plat" id="popts"><summary><span class="plogo" style="background:var(--mut)"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2" fill="none" stroke="#fff" stroke-width="2"/><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M5.6 18.4l1.8-1.8M16.6 7.4l1.8-1.8"/></svg></span><span class="ptitle"><b>Options</b><span class="psub">Progress reactions, buttons and files</span></span><span class="pstate" id="optstatus"></span><span class="chev" aria-hidden="true"></span></summary><div class="pbody">
 <div id="dmore"></div></div></details>
 </section>
 
@@ -950,8 +960,8 @@ const entryLabel=e=>{if(!e.name)return folderLabel(e.cwd);const a=liveAgents().f
 function entrySelect(attrs,placeholder){return `<select ${attrs}><option value="">${placeholder}</option>${liveAgents().map(o=>`<option value="${esc(o.cwd+'\t'+o.name)}">${esc(o.name+' · '+o.space)}</option>`).join('')}</select>`}
 function agentSelect(val,attrs,placeholder){const opts=agentFolders();const extra=val&&!opts.some(o=>o.cwd===val)?[{cwd:val}]:[];
   return `<select ${attrs}><option value="">${placeholder}</option>${[...opts,...extra].map(o=>`<option value="${esc(o.cwd)}" ${o.cwd===val?'selected':''}>${esc(folderLabel(o.cwd))}</option>`).join('')}</select>`}
-function channelSelect(val,attrs){const gs=dGuilds||[];
-  return `<select ${attrs}><option value="">Pick a channel…</option>${gs.map(g=>`<optgroup label="${esc(g.name)}">${g.channels.map(c=>`<option value="${esc(c.id)}" ${c.id===val?'selected':''}>${g.id==='telegram'||g.id==='slack'?'':'#'}${esc(c.name)}</option>`).join('')}</optgroup>`).join('')}</select>`}
+function channelSelect(val,attrs,skip){const gs=dGuilds||[];
+  return `<select ${attrs}><option value="">Pick a channel…</option>${gs.map(g=>`<optgroup label="${esc(g.name)}">${g.channels.filter(c=>!skip||!skip.has(c.id)).map(c=>`<option value="${esc(c.id)}" ${c.id===val?'selected':''}>${g.id==='telegram'||g.id==='slack'?'':'#'}${esc(c.name)}</option>`).join('')}</optgroup>`).join('')}</select>`}
 const chanName=id=>{for(const g of dGuilds||[])for(const c of g.channels)if(c.id===id)return (g.id==='telegram'||g.id==='slack'?'':'#')+c.name;return 'channel '+id};
 async function loadDiscord(check){
   dState=await api('/api/discord'+(check?'?check=1':''));
@@ -981,25 +991,39 @@ function renderDiscord(){if(!dState)return;const d=dState,invited=(dGuilds||[]).
      <form class="addline" id="dtoken"><input type="password" class="mono grow" autocomplete="off" spellcheck="false" placeholder="Bot token" name="token"><button type="submit" ${dBusy?'disabled':''}>${dBusy?'Checking…':'Connect'}</button></form><p class="small err" id="dtokerr"></p>`;
   $('#dstep2b').innerHTML=!d.configured?'':`<p class="meta">${invited?`In ${dGuilds.filter(g=>!OTHER(g)).map(g=>esc(g.name)).join(', ')}. `:`Pick your server on Discord's page, then come back here. This step completes on its own. `}
     ${d.invite_url?`<a href="${esc(d.invite_url)}" target="_blank" rel="noreferrer">${invited?'Invite to another server ↗':'<button>Invite the bot ↗</button>'}</a>`:''}</p>`;
-  if(!(d.configured&&invited)&&!tgChats){$('#dstep3b').innerHTML='<p class="meta">Set up Discord, Telegram or Slack above; the channels and chats its bot can see are mapped to agents here.</p>';$('#dmore').innerHTML='';return}
-  const rows=dDraft.routes.map((r,i)=>`<tr>
-    <td><div class="addline" style="flex-wrap:nowrap">${r.channel_id?platLogo(r.channel_id):''}${channelSelect(r.channel_id,`data-droute="${i}" data-dfield="channel_id"`)}</div></td>
-    <td><div class="kinds">${(r.agents||[]).map((a,j)=>`<div class="addline small"><b>${esc(entryLabel(a))}</b>
-        <label class="small"><input type="checkbox" data-dflag="${i}:${j}:receives" ${a.receives?'checked':''}> Receives</label>
-        <label class="small"><input type="checkbox" data-dflag="${i}:${j}:sends" ${a.sends?'checked':''}> Sends</label>
-        <button class="ghost small" title="Remove" data-dunagent="${i}:${j}">✕</button></div>`).join('')}
-      ${entrySelect(`data-daddagent="${i}"`,'+ add agent')}</div></td>
-    <td style="white-space:nowrap"><button class="ghost small" data-dtest="${esc(r.channel_id)}" ${r.channel_id&&({telegram:tState,slack:sState,discord:d}[platOf(r.channel_id)]||{}).state==='online'?'':'disabled'}>Send a test</button> <button class="ghost small" data-dremove="${i}" title="Remove this channel">✕</button></td></tr>`).join('');
-  $('#dstep3b').innerHTML=`<p class="meta">Your messages go to the first agent that receives. To reach another that receives, start with its name and a colon: <span class="mono">storefront: how's the build?</span> An agent that sends posts its messages and updates there; any agent answers you where you asked.</p>
-    <table class="dmap"><thead><tr><th>Channel</th><th>Agents</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan="3" class="mut small">No channels mapped yet.</td></tr>'}</tbody></table>
-    <p class="small mut" style="margin-top:6px">Start a post with <span class="mono">Task:</span> to hand it over as a task, or <span class="mono">Announcement:</span> to tell the receiving agent's whole space.</p>
-    <div class="addline" style="margin-top:8px"><button class="ghost" data-dact="addroute">+ Map a channel</button><button class="ghost" data-dact="refresh" title="Look for new servers and channels">↻ Refresh channels</button></div>
-    ${d.configured?`<div class="addline" style="margin-top:12px"><label class="small mut">Direct messages to the Discord bot go to</label>${agentSelect(dDraft.dm,'data-ddm','Nobody (ignored)')}</div>`:''}
-    <div class="addline" style="margin-top:12px"><button data-dact="save">Save mapping</button><span class="small" id="dsaved"></span></div>`;
+  // What only Discord has stays in its own panel: whether it reads every message, who and which bots can talk, on or off.
   const reading=d.reads_messages?`<p class="meta">Everything you write in a mapped channel goes to its first receiving agent. No @mention needed.</p>`
     :d.message_content_switch?`<p class="meta">The Message Content switch is on in Discord, but the bot connected before it was. <button class="ghost small" data-dact="reconnect">Reconnect now</button></p>`
     :`<p class="meta">${d.message_content_switch===false?'<b>Discord says the Message Content switch is off.</b> ':''}@mention the bot each time, or DM it. To talk without @mentioning, turn on <b>Message Content Intent</b> on the <a href="${d.app_id?`https://discord.com/developers/applications/${esc(d.app_id)}/bot`:'https://discord.com/developers/applications'}" target="_blank" rel="noreferrer">Bot page ↗</a> (under Privileged Gateway Intents) and save. <button class="ghost small" data-dact="check">I turned it on</button></p>`;
-  $('#dmore').innerHTML=`<h2>Talking to your agents</h2>${d.configured?reading:''}
+  const extra=$('#dextra');if(extra&&!extra.contains(document.activeElement))extra.innerHTML=!d.configured?'':`<h2>Messages</h2>${reading}
+    <h2>People who can talk to agents</h2>
+    <p class="meta">Only you can, as the bot's owner (or its team's members). Add other people's user IDs here, separated by commas: they can then message agents and answer buttons as you do. To find one, turn on Developer Mode in Discord, right-click the person and choose Copy User ID.</p>
+    <div class="addline"><input id="dusers" class="mono" placeholder="e.g. 1562000000000000000" value="${esc((d.allowed_users||[]).join(', '))}" data-dusers style="flex:1;min-width:0"></div>
+    <h2>Bots that can post to agents</h2>
+    <p class="meta">Other bots are ignored unless listed here. Add their user IDs, separated by commas. To find one, turn on Developer Mode in Discord, right-click the bot and choose Copy User ID. List only bots you control.</p>
+    <div class="addline"><input id="dbots" class="mono" placeholder="e.g. 1562000000000000000" value="${esc((d.trusted_bots||[]).join(', '))}" data-dbots style="flex:1;min-width:0"></div>
+    <h2>Bot</h2>
+    <label class="check"><input type="checkbox" data-dact="enabled" ${d.enabled?'checked':''}> Bot running</label>`;
+  if(!(d.configured&&invited)&&!tgChats){$('#dstep3b').innerHTML='<p class="meta">Set up Discord, Telegram or Slack above; the channels and chats its bot can see are mapped to agents here.</p>';$('#dmore').innerHTML='';return}
+  // A mapped channel is a card: its name, then its agents as chips you toggle. Every change saves at once.
+  const online=id=>({telegram:tState,slack:sState,discord:d}[platOf(id)]||{}).state==='online';
+  const taken=new Set(dDraft.routes.map(r=>r.channel_id).filter(Boolean));
+  const rows=dDraft.routes.map((r,i)=>`<div class="mrow">
+    <div class="mhead">${r.channel_id?`${platLogo(r.channel_id)}<span class="mname">${esc(chanName(r.channel_id))}</span>
+      <button class="ghost small" data-dtest="${esc(r.channel_id)}" ${online(r.channel_id)?'':'disabled'}>Send a test</button>`
+      :channelSelect('',`data-droute="${i}" data-dfield="channel_id"`,taken)}
+      <button class="linkbtn" data-dremove="${i}" title="Stop using this channel">Remove</button></div>
+    <div class="magents">${(r.agents||[]).map((a,j)=>`<span class="magent">${esc(entryLabel(a))}
+        <button class="tog" aria-pressed="${!!a.receives}" data-dflag="${i}:${j}:receives" title="Your messages here go to it">Receives</button>
+        <button class="tog" aria-pressed="${!!a.sends}" data-dflag="${i}:${j}:sends" title="It can post here">Sends</button>
+        <button class="x" title="Take it off this channel" aria-label="Remove ${esc(entryLabel(a))}" data-dunagent="${i}:${j}">✕</button></span>`).join('')}
+      ${r.channel_id?entrySelect(`data-daddagent="${i}"`,(r.agents||[]).length?'+ agent':'+ Add an agent'):''}</div></div>`).join('');
+  $('#dstep3b').innerHTML=`<p class="meta">Your messages go to the first agent that <b>receives</b>; to reach another, start with its name and a colon: <span class="mono">storefront: how's the build?</span> An agent that <b>sends</b> posts its messages and updates there. Changes save as you make them.</p>
+    <div class="mlist2">${rows||'<div class="mut small">No channels mapped yet.</div>'}</div>
+    <div class="addline" style="margin-top:10px"><button class="ghost" data-dact="addroute">+ Map a channel</button><button class="ghost" data-dact="refresh" title="Look for new servers and channels">↻ Refresh channels</button><span class="small" id="dsaved"></span></div>
+    ${d.configured?`<div class="addline" style="margin-top:12px"><label class="small mut">Direct messages to the Discord bot go to</label>${agentSelect(dDraft.dm,'data-ddm','Nobody (ignored)')}</div>`:''}
+    <p class="small mut" style="margin-top:10px">Start a post with <span class="mono">Task:</span> to hand it over as a task, or <span class="mono">Announcement:</span> to tell the receiving agent's whole space.</p>`;
+  $('#dmore').innerHTML=`<h2>Talking to your agents</h2>
     <p class="meta">A reaction on your message shows its progress:</p>
     <div class="legend"><span>👀</span><span>delivered to the agent</span><span>🤔</span><span>thinking</span><span>🛠️</span><span>using tools</span><span>❓</span><span>asked you something</span><span>✅</span><span>answered</span></div>
     <p class="meta" style="margin-top:12px">Agents can message you first, labelled with their name. If an agent isn't running, your message waits up to an hour for it.</p>
@@ -1007,36 +1031,36 @@ function renderDiscord(){if(!dState)return;const d=dState,invited=(dGuilds||[]).
     <label class="check"><input type="checkbox" data-dopt="buttons" ${d.buttons?'checked':''}> <span><b>Buttons</b> for choices: tap one and it goes back to the agent as your answer. Off, the choices are a numbered list you reply to.</span></label>
     <label class="check"><input type="checkbox" data-dopt="files_out" ${d.files_out?'checked':''}> <span><b>Files from agents:</b> an agent can attach files from this machine to its messages.</span></label>
     <label class="check"><input type="checkbox" data-dopt="files_in" ${d.files_in?'checked':''}> <span><b>Files to agents:</b> what you attach is saved here, under <span class="mono">~/.peerlink/files</span>, and the agent gets the paths.</span></label>
-    <div class="addline" style="margin-top:8px"><label class="small mut" for="dmaxmb">Largest file, either way</label><input id="dmaxmb" type="number" min="1" max="500" step="1" value="${esc(d.max_file_mb)}" style="width:90px" data-dopt="max_file_mb"> <span class="small mut">MB (Discord allows 10 MB without Nitro; Telegram bots get files up to 20 MB)</span></div>
-    ${d.configured?`<h2>Discord: people who can talk to agents</h2>
-    <p class="meta">Only you can, as the bot's owner (or its team's members). Add other people's user IDs here, separated by commas: they can then message agents and answer buttons as you do. To find one, turn on Developer Mode in Discord, right-click the person and choose Copy User ID.</p>
-    <div class="addline"><input id="dusers" class="mono" placeholder="e.g. 1562000000000000000" value="${esc((d.allowed_users||[]).join(', '))}" data-dusers style="flex:1;min-width:0"></div>
-    <h2>Discord: bots that can post to agents</h2>
-    <p class="meta">Other bots are ignored unless listed here. Add their user IDs, separated by commas. To find one, turn on Developer Mode in Discord, right-click the bot and choose Copy User ID. List only bots you control.</p>
-    <div class="addline"><input id="dbots" class="mono" placeholder="e.g. 1562000000000000000" value="${esc((d.trusted_bots||[]).join(', '))}" data-dbots style="flex:1;min-width:0"></div>
-    <h2>Discord bot</h2>
-    <label class="check"><input type="checkbox" data-dact="enabled" ${d.enabled?'checked':''}> Bot running</label>`:''}`}
+    <div class="addline" style="margin-top:8px"><label class="small mut" for="dmaxmb">Largest file, either way</label><input id="dmaxmb" type="number" min="1" max="500" step="1" value="${esc(d.max_file_mb)}" style="width:90px" data-dopt="max_file_mb"> <span class="small mut">MB (Discord allows 10 MB without Nitro; Telegram bots get files up to 20 MB)</span></div>`}
 document.addEventListener('click',e=>{if(!e.target.closest('[data-stalehide]'))return;const bar=$('#stalebar');
   try{localStorage.setItem('pl.stale.dismissed',bar.dataset.key)}catch(e){}bar.style.display='none'});
 document.addEventListener('click',e=>{if(e.target.closest('[data-limresume]'))post('/api/limit/resume',{}).then(()=>refresh(true))});
 document.addEventListener('submit',async e=>{if(e.target.id!=='dtoken')return;e.preventDefault();const t=e.target.token.value.trim();if(!t)return;
   dBusy=true;renderDiscord();const r=await api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({token:t})});dBusy=false;
   if(r.error){renderDiscord();$('#dtokerr').textContent=r.error;return}dGuilds=null;dDraft=null;await loadDiscord()});
+// The mapping saves as you change it: the channels that have an agent, and where DMs go. One still being set up
+// (no channel or no agent yet) stays on the page until it's complete.
+async function saveMap(){const routes=dDraft.routes.filter(r=>r.channel_id&&(r.agents||[]).length);
+  const r=await api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({routes,dm:dDraft.dm})});
+  if(!r.error&&dState){dState.routes=JSON.parse(JSON.stringify(routes));dState.dm=dDraft.dm}
+  renderDiscord();const s=$('#dsaved');if(s){s.className='small '+(r.error?'err':'ok');s.textContent=r.error||'Saved'}}
 document.addEventListener('change',e=>{const t=e.target;if(!dDraft)return;
   if(t.dataset.droute!==undefined){dDraft.routes[+t.dataset.droute][t.dataset.dfield]=t.value;renderDiscord()}
   if(t.dataset.daddagent!==undefined&&t.value){const r=dDraft.routes[+t.dataset.daddagent];r.agents=r.agents||[];
     // The first agent added receives and sends; after that, one that only posts here is the likelier want.
     const [cwd,name]=t.value.split('\t');
-    if(!r.agents.some(a=>a.cwd===cwd&&(a.name||'').toLowerCase()===name.toLowerCase()))r.agents.push({cwd,name,receives:!r.agents.some(a=>a.receives),sends:true});renderDiscord()}
-  if(t.dataset.dflag){const [i,j,f]=t.dataset.dflag.split(':');dDraft.routes[+i].agents[+j][f]=t.checked;renderDiscord()}
-  if(t.dataset.ddm!==undefined){dDraft.dm=t.value}
+    if(!r.agents.some(a=>a.cwd===cwd&&(a.name||'').toLowerCase()===name.toLowerCase()))r.agents.push({cwd,name,receives:!r.agents.some(a=>a.receives),sends:true});saveMap()}
+  if(t.dataset.ddm!==undefined){dDraft.dm=t.value;saveMap()}
   if(t.dataset.dopt){const v=t.type==='checkbox'?t.checked:Number(t.value);api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({[t.dataset.dopt]:v})}).then(()=>loadDiscord())}
   if(t.dataset.dbots!==undefined)api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({trusted_bots:t.value})}).then(()=>loadDiscord());
   if(t.dataset.dusers!==undefined)api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({allowed_users:t.value})}).then(()=>loadDiscord());
   if(t.dataset.dact==='enabled')api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({enabled:t.checked})}).then(()=>loadDiscord())});
 document.addEventListener('click',async e=>{const t=e.target.closest('button');if(!t||!dDraft&&!t.dataset.dact)return;
-  if(t.dataset.dremove!==undefined){dDraft.routes.splice(+t.dataset.dremove,1);renderDiscord()}
-  if(t.dataset.dunagent){const [i,j]=t.dataset.dunagent.split(':').map(Number);dDraft.routes[i].agents.splice(j,1);renderDiscord()}
+  if(t.dataset.dremove!==undefined){const r=dDraft.routes[+t.dataset.dremove];
+    if(r.channel_id&&(r.agents||[]).length&&!confirm(`Stop using ${chanName(r.channel_id)}? Its agents no longer hear or post there.`))return;
+    dDraft.routes.splice(+t.dataset.dremove,1);saveMap()}
+  if(t.dataset.dunagent){const [i,j]=t.dataset.dunagent.split(':').map(Number);dDraft.routes[i].agents.splice(j,1);saveMap()}
+  if(t.dataset.dflag){const [i,j,f]=t.dataset.dflag.split(':');const a=dDraft.routes[+i].agents[+j];a[f]=!a[f];saveMap()}
   if(t.dataset.dtest){const r=await post('/api/discord/test',{channel_id:t.dataset.dtest});t.textContent=r.error?'Failed':'Sent ✓';if(r.error)alert(r.error)}
   const a=t.dataset.dact;if(!a)return;
   if(a==='addroute'){dDraft.routes.push({channel_id:'',agents:[]});renderDiscord()}
@@ -1044,9 +1068,7 @@ document.addEventListener('click',async e=>{const t=e.target.closest('button');i
   if(a==='forget'&&confirm('Disconnect the Discord bot? The channel mapping is kept.')){await api('/api/discord',{method:'DELETE'});dGuilds=null;await loadDiscord()}
   if(a==='reconnect'){await post('/api/discord/reconnect');setTimeout(()=>loadDiscord(),2000)}
   if(a==='check')await loadDiscord(true);
-  if(a==='save'){const bad=dDraft.routes.find(r=>!r.channel_id||!(r.agents||[]).some(a=>a.receives||a.sends));if(bad){$('#dsaved').className='small err';$('#dsaved').textContent='Every row needs a channel and an agent that receives or sends.';return}
-    await api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({routes:dDraft.routes,dm:dDraft.dm})});dState=null;dDraft=null;await loadDiscord();
-    $('#dsaved').className='small ok';$('#dsaved').textContent='Saved'}});
+});
 // A chat's platform from its id, and that platform's logo.
 const SLACK_LOGO='<svg viewBox="0 0 24 24" aria-hidden="true"><path stroke="#fff" stroke-width="2.6" stroke-linecap="round" fill="none" d="M9 4.5v15M15 4.5v15M4.5 9h15M4.5 15h15"/></svg>';
 const PLAT={discord:['Discord','#5865F2',DISCORD_LOGO],telegram:['Telegram','#26A5E4',TG_LOGO],slack:['Slack','#4A154B',SLACK_LOGO]};
