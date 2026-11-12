@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.9.13'
+const DAEMON_VERSION = '0.9.14'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -458,6 +458,9 @@ function frame(m: PeerMessage) {
   return `${MESSAGE_MARK}${from} · ${tags.join(' · ')}\n${m.text}`
 }
 
+// A message's id in its header line, as frame() writes it: "↘ <from> · m123 · …".
+const FRAMED_ID = new RegExp(`^${MESSAGE_MARK}.*? · (m\\d+)(?= · |$)`, 'gm')
+
 function framed(batch: PeerMessage[]) {
   return `${batch.map(frame).join('\n\n')}\n\n${REPLY_HINT}`
 }
@@ -607,6 +610,14 @@ async function deliver($: EngineInterface) {
 
 // The submitted prompt's turn started: its messages reached the session. None after STARTED_WITHIN_MS: put them again.
 function turnStarted($: EngineInterface, text: unknown) {
+  // Messages framed in the turn's own text reached the session, whoever submitted them: a prompt put in just before a
+  // /reload-plugins starts its turn in the new copy of the plugin, which never saw it go. Ack them, and drop any copy
+  // the daemon has handed out again meanwhile, so the agent doesn't get the same message twice.
+  const framedIds = typeof text === 'string' ? [...text.matchAll(FRAMED_ID)].map(m => m[1]!).filter(id => !placed.has(id)) : []
+  if (framedIds.length) {
+    pending = pending.filter(m => !framedIds.includes(m.id))
+    acked($, framedIds.map(id => ({ id }) as PeerMessage))
+  }
   // A turn you started by typing isn't the one the prompt asked for.
   if (!submitted || (typeof text === 'string' && text && !submitted.batch.some(m => text.includes(m.id)))) return
   acked($, submitted.batch)
