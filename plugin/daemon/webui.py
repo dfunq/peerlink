@@ -211,6 +211,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <a href="#messages" data-nav="messages">Messages <span class="count" id="n-msgs"></span></a>
 <div class="grp" aria-hidden="true">Set up</div>
 <a href="#spaces" data-nav="spaces">Spaces <span class="count" id="n-spaces"></span></a>
+<a href="#rules" data-nav="rules">Rules <span class="count" id="n-rules"></span></a>
 <a href="#channels" data-nav="channels">Channels <span class="count" id="n-discord"></span></a>
 <div class="grp" aria-hidden="true">Peerlink</div>
 <a href="#feedback" data-nav="feedback">Feedback <span class="count" id="n-feedback"></span></a>
@@ -237,10 +238,12 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <p class="lead">Which agents can see and message each other.</p>
 <details class="how"><summary>How spaces work</summary><p>An agent is in the space you put its folder in, from its Details tab on the Agents page. A folder you haven't placed takes the space in the nearest <span class="mono">.peerlink</span> file at or above it, else it's <b>unassigned</b>. Here you pick each space's lead, which gets work sent to the space, and which space it sits inside: its lead then speaks for it there.</p></details>
 <div id="spacelist"></div>
-<h2 style="margin-top:28px">Standing rules</h2>
+</section>
+
+<section id="rules"><h1>Rules</h1>
 <p class="lead">What you've told your agents for good. A rule reaches every agent in its space and the spaces inside it, in its instructions, so a cleared context still has it. One an agent proposes waits here for your approval.</p>
-<div id="rules"><div id="rulelist" style="display:flex;flex-direction:column;gap:8px"></div>
-<form id="ruleform" class="addline" style="margin-top:10px"><select name="space" id="rulespace" style="width:170px"></select><input name="text" type="text" class="grow" placeholder="Never merge to main on a Friday" required maxlength="600"><button type="submit">Add rule</button><span class="small err" id="rulemsg"></span></form></div>
+<div id="rulelist" style="display:flex;flex-direction:column;gap:8px"></div>
+<form id="ruleform" class="addline" style="margin-top:10px"><select name="space" id="rulespace" style="width:170px"></select><input name="text" type="text" class="grow" placeholder="Never merge to main on a Friday" required maxlength="600"><button type="submit">Add rule</button><span class="small err" id="rulemsg"></span></form>
 </section>
 
 <section id="schedules"><h1>Schedules</h1><p class="lead">Prompts the daemon sends an agent at a time or on a repeat, even with no terminal open.</p>
@@ -1126,9 +1129,12 @@ setInterval(()=>{if(location.hash==='#channels'&&!document.hidden&&(sState?.conf
 window.addEventListener('focus',()=>{if(location.hash==='#channels'&&dState?.configured){dGuilds=null;loadDiscord(true)}});
 window.addEventListener('hashchange',()=>{if(location.hash==='#discord')location.hash='#channels';if(location.hash==='#channels'){loadDiscord();loadTelegram();loadSlack()}});
 
-// Standing rules, on the Spaces page: yours to add, change, turn off or delete; an agent's proposal to approve.
+// Standing rules, on their own page: yours to add, change, turn off or delete; an agent's proposal to approve.
 let allRules=[];
 async function loadRules(){const r=await api('/api/rules');if(!r||r.error)return;allRules=r.rules||[];
+  // The nav counts proposals waiting for you, highlighted, else the rules in force.
+  const waiting=allRules.filter(x=>x.status==='pending').length,cnt=$('#n-rules');
+  cnt.textContent=waiting||allRules.filter(x=>x.status==='active').length||'';cnt.classList.toggle('hot',!!waiting);
   const spaces=[...new Set([...livePeers.map(x=>x.space).filter(Boolean),...allRules.map(x=>x.space).filter(x=>x!=='*')])].sort();
   const sopts=sel=>`<option value="*" ${sel==='*'?'selected':''}>Every space</option>`+spaces.map(n=>`<option value="${esc(n)}" ${sel===n?'selected':''}>${esc(n)}</option>`).join('');
   const sel=$('#rulespace');if(sel&&document.activeElement!==sel){const was=sel.value||'*';sel.innerHTML=sopts(was)}
@@ -1148,8 +1154,10 @@ document.addEventListener('click',async e=>{const id=ruleOf(e);if(!id)return;con
 document.addEventListener('change',async e=>{const id=ruleOf(e);if(!id)return;const t=e.target;
   const r=t.dataset.ruletext!==undefined?await post('/api/rules/'+encodeURIComponent(id),{text:t.value}):t.dataset.rulespace!==undefined?await post('/api/rules/'+encodeURIComponent(id),{space:t.value}):null;
   if(r&&r.error)alert(r.error);t.blur();loadRules()});
-window.addEventListener('hashchange',()=>{if(location.hash==='#spaces')loadRules()});
-setInterval(()=>{if(location.hash==='#spaces'&&!document.hidden)loadRules()},5000);
+window.addEventListener('hashchange',()=>{if(location.hash==='#rules')loadRules()});
+// On the Rules page every 5s; elsewhere every minute, for the count in the nav.
+let rulesAt=0;loadRules().catch(()=>{});
+setInterval(()=>{if(document.hidden)return;const n=Date.now();if(location.hash==='#rules'||n-rulesAt>60000){rulesAt=n;loadRules().catch(()=>{})}},5000);
 async function loadCfg(){cfg=await api('/api/config');if(cfg.error&&cfg.max_hops===undefined)throw new Error('!'+cfg.error);const f=$('#cfg');
   panels({swake:true,sctx:true,sapprove:true,ssee:false,sguide:false,slimits:false,sremote:!!(cfg.remotes||[]).length});
   for(const el of f.elements){if(!el.name)continue;const v=cfg[el.name];
