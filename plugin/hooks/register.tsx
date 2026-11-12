@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.9.15'
+const DAEMON_VERSION = '0.9.16'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -29,7 +29,7 @@ type PeerMessage = {
 
 type ClientConfig = {
   space: string
-  space_source: 'started' | 'set' | 'file' | 'default'
+  space_source: 'agent' | 'started' | 'set' | 'file' | 'default'
   space_from: string
   // Set when this agent leads a space nested in another: the space it also sits in and speaks for its own.
   parent?: string
@@ -989,7 +989,8 @@ async function listPeers($: EngineInterface, withIds: boolean) {
 function spaceLine() {
   if (!cfg?.space) return 'space: default'
   const from =
-    cfg.space_source === 'started' ? 'asked for by the agent that started it'
+    cfg.space_source === 'agent' ? 'set for this agent'
+    : cfg.space_source === 'started' ? 'asked for by the agent that started it'
     : cfg.space_source === 'set' ? 'set for this folder'
     : cfg.space_source === 'file' ? `from ${cfg.space_from}`
     : 'no space set'

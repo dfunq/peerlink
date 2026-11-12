@@ -169,6 +169,31 @@ class ScenarioTest(unittest.TestCase):
         helper.expect("And invoices?")
         self.assertNotIn("And invoices?", app.texts())
 
+    def test_moving_one_agent_to_another_space_leaves_the_others_in_its_folder(self):
+        rig = self.rig()
+        shared = rig.folder("app", space="acme")
+        app, helper = rig.agent("app", folder=shared), rig.agent("helper", folder=shared)
+        ops = rig.agent("ops", space="infra")
+        rig.user("POST", "/api/folders/space", {"cwd": shared, "id": helper.sid, "space": "infra"})
+        helper.expect("Your user moved you to the infra space")
+        self.assertNotIn("moved", " ".join(app.texts()))
+        spaces = {p["name"]: (p["space"], p["space_source"]) for p in rig.user("GET", "/api/peers")["peers"]}
+        self.assertEqual(spaces["app"], ("acme", "file"))
+        self.assertEqual(spaces["helper"], ("infra", "agent"))
+        self.assertEqual(sorted(ops.peers()), ["helper"])
+        # It's the agent's, not the session's: still in infra after a /clear.
+        helper.clear()
+        self.assertEqual(sorted(ops.peers()), ["helper"])
+        # Unassigned: out of every space, though its folder's .peerlink says acme.
+        rig.user("POST", "/api/folders/space", {"cwd": shared, "id": helper.sid, "space": "unassigned"})
+        helper.expect("you're unassigned")
+        self.assertEqual(ops.peers(), {})
+        self.assertEqual(app.peers(), {})
+        # Cleared, it goes back to its folder's space.
+        rig.user("POST", "/api/folders/space", {"cwd": shared, "id": helper.sid, "space": ""})
+        self.assertEqual(ops.peers(), {})
+        self.assertEqual(sorted(app.peers()), ["helper"])
+
     def test_a_lead_you_clear_stays_cleared_and_a_lone_agent_is_told_it_leads(self):
         rig = self.rig()
         solo = rig.agent("solo", space="acme")
