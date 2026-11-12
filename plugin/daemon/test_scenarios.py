@@ -219,6 +219,20 @@ class ScenarioTest(unittest.TestCase):
         self.assertEqual(sent, 12)  # three times as long while the task is open
         self.assertIn(f"task {task['task']} hit its 12-reply limit", why)
 
+    def test_a_request_the_daemon_fails_on_says_why_in_its_answer_and_its_log(self):
+        rig = self.rig()
+        lead = rig.agent("lead", space="acme")
+        # A one-time schedule is shown with its day: the format Windows lacks is not used.
+        import peerlinkd
+        self.assertEqual(peerlinkd.when_text({"at": 86400 * 400}).split()[:1], ["once,"])
+        self.assertNotIn("%", peerlinkd.when_text({"at": 86400 * 400}))
+        code, out = rig.call("GET", "/api/messages?limit=abc")
+        self.assertEqual(code, 400)
+        self.assertIn("bad request: ValueError", out["error"])
+        self.assertIn("peerlinkd.py:", out["error"])
+        self.assertIn("request failed: GET /api/messages ValueError", rig.output())
+        self.assertEqual(lead.poll(), [])  # and it goes on serving
+
 
 if __name__ == "__main__":
     unittest.main()
