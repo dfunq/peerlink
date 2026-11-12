@@ -98,6 +98,7 @@ details.plat .pbody h2{font-size:14px;margin:16px 0 6px}.pill.warn{color:var(--w
 .mhead{display:flex;align-items:center;gap:8px;min-width:0}.mhead .mname{font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.mhead select{flex:1;min-width:0}
 .magents{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:8px}
 .magent{display:inline-flex;align-items:center;gap:4px;border:1px solid var(--line);border-radius:999px;padding:2px 4px 2px 10px;background:var(--card);font-size:13px}
+.magent .mn{width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tog{font-size:11px;padding:1px 8px;border-radius:999px;border:1px solid var(--line);background:transparent;color:var(--mut);cursor:pointer}
 .tog[aria-pressed="true"]{background:var(--acc);border-color:var(--acc);color:#fff}
 .magent .x{border:0;background:transparent;color:var(--mut);padding:0 6px;font-size:13px;cursor:pointer}
@@ -1013,7 +1014,7 @@ function renderDiscord(){if(!dState)return;const d=dState,invited=(dGuilds||[]).
       <button class="ghost small" data-dtest="${esc(r.channel_id)}" ${online(r.channel_id)?'':'disabled'}>Send a test</button>`
       :channelSelect('',`data-droute="${i}" data-dfield="channel_id"`,taken)}
       <button class="linkbtn" data-dremove="${i}" title="Stop using this channel">Remove</button></div>
-    <div class="magents">${(r.agents||[]).map((a,j)=>`<span class="magent">${esc(entryLabel(a))}
+    <div class="magents">${(r.agents||[]).map((a,j)=>`<span class="magent"><span class="mn" title="${esc(entryLabel(a))}">${esc(entryLabel(a))}</span>
         <button class="tog" aria-pressed="${!!a.receives}" data-dflag="${i}:${j}:receives" title="Your messages here go to it">Receives</button>
         <button class="tog" aria-pressed="${!!a.sends}" data-dflag="${i}:${j}:sends" title="It can post here">Sends</button>
         <button class="x" title="Take it off this channel" aria-label="Remove ${esc(entryLabel(a))}" data-dunagent="${i}:${j}">✕</button></span>`).join('')}
