@@ -266,7 +266,8 @@ class ScenarioTest(unittest.TestCase):
         self.assertIn("bad request: ValueError", out["error"])
         self.assertIn("peerlinkd.py:", out["error"])
         self.assertIn("request failed: GET /api/messages ValueError", rig.output())
-        self.assertEqual(lead.poll(), [])  # and it goes on serving
+        # And it goes on serving: the only message is the one saying it leads acme, being alone in it.
+        self.assertTrue(all("as the only agent in it" in m["text"] for m in lead.poll()))
 
 
 if __name__ == "__main__":
