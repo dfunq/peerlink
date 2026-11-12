@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.8"
+VERSION = "0.9.9"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -526,13 +526,25 @@ def space_lead(space):
     return (chosen["cwd"], chosen.get("how") == "set" and "set" or "only") if chosen.get("cwd") else ("", "")
 
 
+def lead_rec(space):
+    """The live session leading a space: the agent you picked, while it runs in the lead's folder, else the folder's
+    successor (the one going by the folder's name). None when the space has no lead or nobody runs there."""
+    folder = space_lead(space)[0]
+    if not folder:
+        return None
+    picked = agent_session((config.get("space_leads") or {}).get(space, {}).get("agent") or "")
+    return picked if picked and picked.get("cwd") == folder else successor(folder)
+
+
 def leads(rec):
     """How rec leads its space ('set' or 'only'), or '' when it doesn't."""
-    folder, how = space_lead(space_of(rec)[0])
+    space = space_of(rec)[0]
+    folder, how = space_lead(space)
     if not (folder and rec.get("cwd") == folder):
         return ""
-    # Agents sharing the lead's folder (ones it started) aren't leads too: the one going by the folder's name is.
-    lead = successor(folder)
+    # Agents sharing the lead's folder (ones it started) aren't leads too: the one you picked is, else the one
+    # going by the folder's name.
+    lead = lead_rec(space)
     return how if not lead or lead["id"] == rec.get("id") else ""
 
 
@@ -578,29 +590,35 @@ def note_lone_leads():
         log("lead", space, "->", cwd, "(only agent)")
 
 
-def set_lead(space, cwd):
-    """You pick who leads a space (or clear it, cwd ''), in the web UI. Old and new lead are told."""
+def set_lead(space, cwd, sid=""):
+    """You pick who leads a space (or clear it, cwd ''), in the web UI. `sid` names the agent, for a folder that
+    several share; without it the folder's successor leads. Old and new lead are told."""
     space = clean_space(space)
     if not space or space == DEFAULT_SPACE:
         return 400, {"error": "pick a named space; the default space has no lead"}
     with lock:
+        pick = sessions.get(sid) if sid else None
+        if sid and not (pick and is_live(pick) and pick.get("cwd") == cwd and space_of(pick)[0] == space):
+            return 409, {"error": f"that agent isn't running in {tilde_path(cwd)} in the {space} space"}
         if cwd and not any(is_live(r) and r.get("cwd") == cwd and space_of(r)[0] == space for r in sessions.values()):
             return 409, {"error": f"no live agent in {tilde_path(cwd)} is in the {space} space"}
-        old = space_lead(space)[0]
+        old, old_rec = space_lead(space)[0], lead_rec(space)
         chosen = config.setdefault("space_leads", {})
         if cwd:
-            chosen[space] = {"cwd": cwd, "how": "set", "ts": time.time()}
+            chosen[space] = {"cwd": cwd, "how": "set", "ts": time.time(), **({"agent": pick["agent"]} if pick and pick.get("agent") else {})}
         else:
             chosen.pop(space, None)
         save_config()
-        new = space_lead(space)[0]
-        if old != new:
+        new, new_rec = space_lead(space)[0], lead_rec(space)
+        # Within one folder the lead can still change hands: from the agent going by its name to another there.
+        if old != new or (old_rec and new_rec and old_rec["id"] != new_rec["id"]):
+            new_name = display_name(new_rec) if new_rec else folder_name(new)
             if old:
-                task_message(None, old, f"You no longer lead the {space} space: {folder_name(new) + ' does' if new else 'it has no lead now'}, as your user set in the web UI. Hand anything you were coordinating for the space to {folder_name(new) if new else 'the agent that owns it'}.")
+                task_message(None, old, f"You no longer lead the {space} space: {new_name + ' does' if new else 'it has no lead now'}, as your user set in the web UI. Hand anything you were coordinating for the space to {new_name if new else 'the agent that owns it'}.", prefer=old_rec)
             if new:
                 parent = space_parent(space)
-                task_message(None, new, f"You now lead the {space} space, as your user set in the web UI{' and speak for it in ' + parent if parent else ''}. Work sent to the space comes to you: decide which agent owns it, delegate with send_message, and report the outcome to whoever asked.")
-        log("lead", space, "->", new or "(none)", "set in the web UI")
+                task_message(None, new, f"You now lead the {space} space, as your user set in the web UI{' and speak for it in ' + parent if parent else ''}. Work sent to the space comes to you: decide which agent owns it, delegate with send_message, and report the outcome to whoever asked.", prefer=new_rec)
+        log("lead", space, "->", (display_name(new_rec) + " in " if new_rec else "") + (new or "(none)"), "set in the web UI")
     return 200, {"space": space, "lead": new, "how": space_lead(space)[1]}
 
 
@@ -612,7 +630,7 @@ def leads_view():
         for space in spaces:
             folder, how = space_lead(space)
             if folder:
-                agent = successor(folder)
+                agent = lead_rec(space)
                 out[space] = {"cwd": folder, "how": how, "name": display_name(agent) if agent else folder_name(folder),
                               "live": bool(agent and space_of(agent)[0] == space), "parent": space_parent(space)}
         return out
@@ -2072,7 +2090,7 @@ def lead_target(sender_rec, word, spaces):
     folder = space_lead(space)[0]
     if not folder:
         return None, f"the {space} space has no lead: message one of its agents by name (list_peers), or ask your user to pick a lead in the web UI"
-    agent = successor(folder)
+    agent = lead_rec(space)
     if agent and space_of(agent)[0] == space:
         return agent, None
     return {"id": f"folder:{folder}", "cwd": folder, "name": folder_name(folder)}, None
@@ -4984,7 +5002,8 @@ class Handler(BaseHTTPRequestHandler):
             # Only you, in the browser: no agent or bot makes itself, or another, a lead.
             if not browser or self.key_ok():
                 return self.reply(403, {"error": "a space's lead is set in the web UI"})
-            code, out = set_lead(rest[1], str(self.body().get("cwd") or ""))
+            b = self.body()
+            code, out = set_lead(rest[1], str(b.get("cwd") or ""), str(b.get("id") or ""))
             return self.reply(code, out)
         if rest == ["folders", "space"] and method == "POST":
             if not browser or self.key_ok():
