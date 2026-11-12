@@ -147,6 +147,28 @@ class ScenarioTest(unittest.TestCase):
         second.expect("Thanks.")
         self.assertNotIn("Thanks.", first.texts())
 
+    def test_you_can_make_either_of_two_agents_in_one_folder_the_lead(self):
+        rig = self.rig()
+        shared = rig.folder("app", space="acme")
+        app, helper = rig.agent("app", folder=shared), rig.agent("helper", folder=shared)
+        other = rig.agent("other", space="acme")
+        # app, going by the folder's name, leads by default; you pick the other agent in the folder instead.
+        rig.user("POST", "/api/spaces/acme/lead", {"cwd": shared})
+        self.assertEqual(rig.user("GET", "/api/peers")["leads"]["acme"]["name"], "app")
+        rig.user("POST", "/api/spaces/acme/lead", {"cwd": shared, "id": helper.sid})
+        self.assertEqual(rig.user("GET", "/api/peers")["leads"]["acme"]["name"], "helper")
+        self.assertEqual({n: p.get("leads") for n, p in other.peers().items()}, {"app": "", "helper": "set"})
+        helper.expect("You now lead the acme space")
+        app.expect("You no longer lead the acme space: helper does")
+        # Work sent to the space reaches helper, and still does after it clears its context.
+        other.send(to="space", text="Who owns billing?")
+        helper.expect("Who owns billing?")
+        self.assertNotIn("Who owns billing?", app.texts())
+        helper.clear()
+        other.send(to="space", text="And invoices?")
+        helper.expect("And invoices?")
+        self.assertNotIn("And invoices?", app.texts())
+
     def test_an_agent_is_the_same_agent_after_claude_code_restarts_even_sharing_a_folder(self):
         rig = self.rig()
         lead = rig.agent("lead", space="acme")
