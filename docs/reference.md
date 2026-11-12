@@ -156,7 +156,7 @@ Talk to your agents from Telegram, in a private chat with your bot or a group it
 
 1. **Create the bot and paste its token.** Message [@BotFather](https://t.me/BotFather), send `/newbot`, pick a name and a username, and paste the token it gives you.
 2. **Message it, then allow yourself.** Anyone can find a Telegram bot by name, so peerlink ignores everyone until you allow them. Send your bot any message: you show up on the Channels page under "Wrote to the bot, not allowed yet", with an **Allow** button. A message from someone not allowed gets no answer and reaches no agent. You can also list Telegram user ids by hand.
-3. **Map chats to agents,** under **Chats and agents**, as Discord channels are. Every chat the bot has heard from is listed: your private chat with it, or a group you added it to.
+3. **Map chats to agents,** under **Channel ⇄ Agent Mappings**, as Discord channels are. Every chat the bot has heard from is listed: your private chat with it, or a group you added it to.
 
 - **In groups,** Telegram shows a bot only commands, @mentions and replies to it. To talk without @mentioning it, send `/setprivacy` to @BotFather, choose Disable, then remove the bot from the group and add it again.
 - **Everything else works as on Discord:** replies, buttons (a picked one collapses to "✓ choice", since Telegram has no greyed-out buttons), files both ways (the Bot API takes files up to 20 MB), approvals, tasks, `Task:` and `Announcement:` posts, and the Inbox verbs.
@@ -174,7 +174,7 @@ Talk to your agents from Slack, in a direct message with your app or a channel i
 
 1. **Create the app and paste its two tokens.** The page's button opens Slack with the app's manifest filled in (Socket Mode, the `/peerlink` command, the message events and permissions). Create it in your workspace, then copy two tokens: an **app-level token** (`xapp-…`, made under Basic Information with the scope `connections:write`) and the **bot token** (`xoxb-…`, shown after Install to Workspace).
 2. **Message it, then allow yourself.** Everyone in the workspace can message the app, so peerlink ignores everyone until you allow them. Send the app any message: you show up on the Channels page under "Wrote to the app, not allowed yet", with an Allow button.
-3. **Map channels to agents**, under Chats and agents. The app's direct messages and every channel it was invited to (`/invite @peerlink`) are listed.
+3. **Map channels to agents**, under Channel ⇄ Agent Mappings. The app's direct messages and every channel it was invited to (`/invite @peerlink`) are listed.
 
 - **Nothing needs a public URL:** events come over Socket Mode, a websocket the daemon opens to Slack.
 - **In channels** the app reads every message, so you needn't @mention it.
