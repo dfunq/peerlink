@@ -238,7 +238,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <li>Each space shows its lead first, outlined in orange, with its members beneath it. A space can sit inside another: its lead then sits with that space's agents, with its own space beneath it.</li>
 <li>Work sent to a space goes to its lead: the agent you picked, or else the one that was alone in it. Pick leads, and which space sits inside which, on the Spaces page.</li>
 <li>An agent only sees and messages agents in its own space. A lead also sees the space its space sits inside.</li>
-<li>To move an agent, open it and set its space on the Details tab: its folder keeps it, for every agent opened there.</li>
+<li>To move an agent, open it and set its space on the Details tab. It moves alone: other agents in its folder stay where they are.</li>
 <li>The bar is how full the agent's context window is: it turns yellow past half and red past 80%. A yellow dot means it's working, a green one that it's idle. Messages an hour show only when an agent is chatty, 20 or more.</li></ul></details><div class="orgwrap"><div id="peers"></div><div id="detail"></div></div></section>
 
 <section id="inbox"><h1>Inbox</h1><p class="lead">Everything waiting on you, the longest waiting first. On Discord, <span class="mono">/inbox</span> shows the same list, and you answer by number, like <span class="mono">1 done</span>.</p>
@@ -421,9 +421,9 @@ const closePanel=()=>{if(!sel)return;sel='';editing=false;refresh(true)};
 // A page starts at its top: the browser would otherwise scroll to the section the link names, hiding its heading.
 window.addEventListener('hashchange',()=>{show();closePanel();scrollTo(0,0)});
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closePanel()});
-function agentPanel(x,others=[]){const sc=cfg.sessions?.[x.id]||{};const setSpace=x.space_source==='set'?x.space:'';
+function agentPanel(x,others=[]){const sc=cfg.sessions?.[x.id]||{};const setSpace=x.space_source==='agent'||x.space_source==='set'?(x.space==='default'?'unassigned':x.space):'';
   const wake=sc.auto_wake===true?'on':sc.auto_wake===false?'off':'default';
-  const why=x.space_source==='started'?'the agent that started it asked for it':x.space_source==='set'?'you put its folder here':x.space_source==='file'?'from '+tilde(x.space_from):'no space set';
+  const why=x.space_source==='started'?'the agent that started it asked for it':x.space_source==='agent'?'you put it here':x.space_source==='set'?'you put its folder here':x.space_source==='file'?'from '+tilde(x.space_from):'no space set';
   const how={set:'you picked it',only:'it was the only agent in the space'}[x.leads]||'';
   const led=leadOf[x.space];
   const role=x.leads?`Leads the <b>${esc(x.space)}</b> space${x.parent?` inside <b>${esc(x.parent)}</b>`:''} <span class="mut">· ${how}</span>`:`Member${led?` · led by ${esc(led.name)}${led.live?'':' (offline)'}`:''}`;
@@ -444,7 +444,8 @@ function agentPanel(x,others=[]){const sc=cfg.sessions?.[x.id]||{};const setSpac
    ${tab==='tasks'?panelTasks(x):tab==='details'?`<form id="agentform" data-id="${esc(x.id)}" data-nick="${esc(sc.nickname||'')}" data-space="${esc(setSpace)}" data-role="${esc(sc.role||'')}" data-cwd="${esc(x.cwd)}" data-also="${esc((x.also||[]).join(', '))}">
     <label>Name<input name="nickname" type="text" value="${esc(sc.nickname||'')}" placeholder="${esc(x.name)}"><span class="hint">What other agents call it. Kept for this folder.</span></label>
     <label>Role<textarea name="role" rows="3" placeholder="${x.folder_role?'From the folder: '+esc(x.folder_role):'What this agent is here for, e.g. Owns the billing API: invoices, payments, the Stripe webhook.'}">${esc(sc.role||'')}</textarea><span class="hint">For this agent only, kept across /clear and resume. The agent gets it as its brief, and other agents see it.${x.folder_role?' Leave it empty to use the role: in its folder\'s .peerlink.':' A role: line in a folder\'s .peerlink is the role of every agent there without one of its own.'}</span></label>
-    <label>Space<input name="space" type="text" list="spacenames" value="${esc(setSpace)}" placeholder="${x.space_source==='file'?esc(x.space)+' (from its .peerlink)':x.space_source==='started'?esc(x.space)+' (started for it)':'unassigned'}"><span class="hint">Kept for its folder: every agent opened there joins it.${x.space_source==='file'||!setSpace?'':' Leave it empty to go back to the folder\'s .peerlink.'}</span></label>
+    <label>Space<input name="space" type="text" list="spacenames" value="${esc(setSpace)}" placeholder="${x.space_source==='file'?esc(x.space)+' (from its .peerlink)':x.space_source==='started'?esc(x.space)+' (started for it)':'unassigned'}"><span class="hint">For this agent only: others in its folder stay where they are. It keeps it after /clear and restarts.${x.space_source==='agent'?' Leave it empty to go back to its folder\'s space.':''}</span>
+    ${x.space&&x.space!=='default'?`<button type="button" class="ghost small" data-unassign="${esc(x.id)}" style="margin-top:6px">Unassign from ${esc(x.space)}</button>`:''}</label>
     <details class="adv"${(x.also||[]).length?' open':''}><summary>Also in other spaces</summary>
     <label>Also a member of<input name="also" type="text" value="${esc((x.also||[]).join(', '))}" placeholder="none"><span class="hint">Rarely needed: more spaces it sees and messages, on top of its own. Separate with commas.</span></label></details>
     <datalist id="spacenames">${Object.keys(leadOf).concat(livePeers.map(p=>p.space)).filter((n,i,a)=>n&&n!=='default'&&a.indexOf(n)===i).sort().map(n=>`<option value="${esc(n)}">`).join('')}</datalist>
@@ -831,6 +832,9 @@ document.addEventListener('click',async e=>{if(!e.target.closest('[data-notify]'
   else if(await Notification.requestPermission()==='granted'){try{localStorage.setItem('peerlink.notify','1')}catch{}}
   else alert('Notifications are blocked for this page. Allow them in the browser\'s site settings.');
   renderInbox()});
+// Out of its space, whatever its folder's is: it joins the agents in no space.
+document.addEventListener('click',async e=>{const b=e.target.closest('[data-unassign]');if(!b)return;e.preventDefault();
+  const r=await post('/api/folders/space',{id:b.dataset.unassign,space:'unassigned'});if(r.error)alert(r.error);editing=false;lastPanel='';refresh(true)});
 document.addEventListener('click',e=>{const b=e.target.closest('[data-alayout]');if(!b)return;aLayout=b.dataset.alayout;try{localStorage.setItem('peerlink.alayout',aLayout)}catch{};show();refresh(true)});
 const keep=(k,v)=>{try{localStorage.setItem('peerlink.'+k,v)}catch{}};
 let tLayout=pref('tlayout','board'),dragging=null;const openCards=new Set();
@@ -939,7 +943,7 @@ document.addEventListener('submit',async e=>{if(e.target.id!=='agentform')return
   if(has('role')&&v('role')!==d.role)patch.role=v('role');
   msg.className='small';msg.textContent='Saving…';
   if(Object.keys(patch).length){const r=await post(`/api/sessions/${encodeURIComponent(id)}/config`,patch);if(r.error)errs.push(r.error);else cfg.sessions=r.sessions}
-  if(has('space')&&v('space')!==d.space){const r=await post('/api/folders/space',{cwd:d.cwd,space:v('space')});if(r.error)errs.push(r.error)}
+  if(has('space')&&v('space')!==d.space){const r=await post('/api/folders/space',{cwd:d.cwd,id,space:v('space')});if(r.error)errs.push(r.error)}
   const also=has('also')?v('also').split(',').map(t=>t.trim()).filter(Boolean):[];
   if(has('also')&&also.join(', ')!==d.also){const r=await post('/api/members',{cwd:d.cwd,spaces:also});if(r.error)errs.push(r.error)}
   editing=false;lastPanel='';await refresh(true);

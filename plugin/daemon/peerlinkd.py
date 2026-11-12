@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.15"
+VERSION = "0.9.16"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -495,19 +495,22 @@ def read_space_file(path, key="space"):
 
 
 def space_of(rec):
-    """(space, source, where): the space an agent was started for ('started': a folder can hold agents started for
-    other spaces), else the space you put its folder in ('set'), else the nearest .peerlink ('file'), else default.
-    A .peerlink only places folders you haven't."""
+    """(space, source, where): the space you put this agent in ('agent': agents sharing a folder can sit in different
+    spaces), else the one it was started for ('started'), else the space you put its folder in ('set'), else the
+    nearest .peerlink ('file'), else default. A folder's space places the agents opened there you haven't placed."""
     now = time.time()
     cached = rec.get("_space")
     if cached and now - cached[0] < SPACE_CACHE_S:
         return cached[1]
     cwd = rec.get("cwd", "")
     found = (DEFAULT_SPACE, "default", "")
+    mine = clean_space((config.get("agent_spaces") or {}).get(rec.get("agent") or ""))
     started = clean_space(config["sessions"].get(rec.get("id") or "", {}).get("started_in"))
     chosen = clean_space((config.get("folder_spaces") or {}).get(cwd))
     path = find_space_file(cwd)
-    if started:
+    if mine:
+        found = (mine, "agent", cwd)
+    elif started:
         found = (started, "started", cwd)
     elif chosen:
         found = (chosen, "set", cwd)
@@ -533,7 +536,12 @@ def lead_rec(space):
     if not folder:
         return None
     picked = agent_session((config.get("space_leads") or {}).get(space, {}).get("agent") or "")
-    return picked if picked and picked.get("cwd") == folder else successor(folder)
+    if picked and picked.get("cwd") == folder:
+        return picked
+    # Agents sharing the folder may sit in other spaces: the lead is one of those in this one.
+    here = [r for r in sessions.values() if r.get("cwd") == folder and is_live(r) and space_of(r)[0] == space]
+    named = [r for r in here if display_name(r).lower() == folder_name(folder).lower()]
+    return max(named or here, key=lambda r: r["last_seen"]) if here else successor(folder)
 
 
 def leads(rec):
@@ -667,6 +675,34 @@ def set_members(cwd, spaces):
             task_message(None, cwd, f"Your user changed your spaces in the web UI: {said}.")
         log("members", tilde_path(cwd), "->", ", ".join(spaces) or "(none)")
     return 200, {"cwd": cwd, "spaces": spaces}
+
+
+def set_agent_space(sid, space):
+    """You put one agent in a space (or clear it, back to its folder's), in the web UI. Only that agent moves, and is
+    told; it keeps the space through /clear and restarts, since it's kept for the agent, not the session. Unassigned
+    (the default space) is a space you can put it in, whatever its folder's is."""
+    space = clean_space(space)
+    if space in ("unassigned", "none"):
+        space = DEFAULT_SPACE
+    with lock:
+        rec = sessions.get(sid)
+        if rec is None or not rec.get("agent"):
+            return 404, {"error": "that agent isn't running"}
+        chosen = config.setdefault("agent_spaces", {})
+        if space:
+            chosen[rec["agent"]] = space
+        else:
+            chosen.pop(rec["agent"], None)
+        config["sessions"].get(sid, {}).pop("started_in", None)
+        save_config()
+    forget_spaces()
+    with lock:
+        now = space_of(rec)[0]
+        where = "out of every space: you're unassigned, with the other agents in no space" if now == DEFAULT_SPACE else f"to the {now} space"
+        task_message(None, rec.get("cwd", ""), f"Your user moved you {where}. You now see and message its agents, and they see you. Other agents in your folder stay where they are.", prefer=rec)
+        note_lone_leads()
+        log("agent space", display_name(rec), "->", space or "(its folder's)")
+    return 200, {"id": sid, "space": now}
 
 
 def set_folder_space(cwd, space):
@@ -2596,6 +2632,7 @@ def agent_for(rec, old=None):
     before = a.get("sid") if a.get("sid") != rec["id"] else None
     a.update(name=display_name(rec), reg=rec.get("name") or "", cwd=rec.get("cwd", ""), sid=rec["id"], seen=now)
     rec["agent"] = agent_of[rec["id"]] = aid
+    rec.pop("_space", None)  # worked out before it knew which agent it is; an agent's own space now counts
     return a, before
 
 
@@ -5012,7 +5049,8 @@ class Handler(BaseHTTPRequestHandler):
             if not browser or self.key_ok():
                 return self.reply(403, {"error": "a folder's space is set in the web UI"})
             b = self.body()
-            code, out = set_folder_space(str(b.get("cwd") or ""), b.get("space"))
+            # With an agent's id, that agent alone; without, the folder (agents opened there later, and any not placed).
+            code, out = set_agent_space(str(b["id"]), b.get("space")) if b.get("id") else set_folder_space(str(b.get("cwd") or ""), b.get("space"))
             return self.reply(code, out)
         if len(rest) == 3 and rest[0] == "spaces" and rest[2] == "parent" and method == "POST":
             if not browser or self.key_ok():
