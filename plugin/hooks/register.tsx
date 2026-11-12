@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.9.7'
+const DAEMON_VERSION = '0.9.8'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -1405,9 +1405,11 @@ async function offerFeedback($: EngineInterface) {
   feedbackTool = true
 }
 
-// An organisation's managed plugin can send prompt.compose past every user plugin. Claude Code then reports peerlink's
-// hook as skipped on every prompt, though the guidance already rides on the prompt instead (skippedContext). Seeing
-// that once, peerlink turns its own setting off, which reloads it without the hook; the setting is in /config.
+// An organisation's managed plugin can send prompt.compose and prompt.context past every user plugin. Claude Code then
+// reports peerlink's hooks as skipped, though what they carry already rides on the prompt instead (skippedContext).
+// Seeing compose skipped once (it runs for every request, so one finished turn without it is proof), peerlink turns its
+// own setting off, which reloads it without either hook; prompt.context fires too rarely to prove anything by itself,
+// and the plugin that skips one has been seen to skip both. The setting is in /config.
 async function composeBypassed($: EngineInterface) {
   if (composeOff || composeRan || turnsSinceLoad < 1) return
   composeOff = true
@@ -1415,8 +1417,8 @@ async function composeBypassed($: EngineInterface) {
   const key = rows.find(r => /^peerlink(@[^.]*)?\.system_prompt$/.test(r.key))?.key ?? 'peerlink.system_prompt'
   const out: any = await $.config.set({ key, value: false } as any).catch((err: unknown) => ({ deny: String(err) }))
   $.ui.log(out?.deny
-    ? `peerlink: another plugin skips its system-prompt hook; it couldn't turn the hook off (${out.deny}), so the notice may repeat. Its guidance still reaches the agent on each prompt.`
-    : "peerlink: another plugin skips its system-prompt hook, so peerlink turned that hook off (/config: peerlink's system_prompt). Its guidance reaches the agent on the prompt instead.", { to: 'debug' })
+    ? `peerlink: another plugin skips its prompt hooks; it couldn't turn them off (${out.deny}), so the notice may repeat. Its guidance still reaches the agent on each prompt.`
+    : "peerlink: another plugin skips its prompt hooks, so peerlink turned them off (/config: peerlink's system_prompt). Its guidance reaches the agent on the prompt instead.", { to: 'debug' })
 }
 
 export const register: Register = (on, options) => {
@@ -1729,6 +1731,7 @@ export const register: Register = (on, options) => {
 
   // A conversation's first context, and again after compaction or /clear: what this agent still owes peers and
   // waits on, so a reset context doesn't drop a commitment.
+  if (useCompose)
   on('prompt.context', async ($, e, next) => {
     contextRan = true
     const out = await next(e)

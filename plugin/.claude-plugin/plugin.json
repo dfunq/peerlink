@@ -1,6 +1,6 @@
 {
   "name": "peerlink",
-  "version": "0.9.7",
+  "version": "0.9.8",
   "description": "Lets your Claude agents discover and message each other through one lightweight daemon per machine, with a CLI and a signed-in web UI.",
   "author": {
     "name": "Dillon",
@@ -12,8 +12,8 @@
   "userConfig": {
     "system_prompt": {
       "type": "boolean",
-      "title": "Guidance in the system prompt",
-      "description": "Put peerlink's guidance for agents in the system prompt. peerlink turns this off by itself when another plugin, such as an organisation's managed one, skips that hook; the guidance then goes with each prompt instead.",
+      "title": "Use Claude Code's prompt hooks",
+      "description": "Put peerlink's guidance in the system prompt, and open threads and announcements in the conversation's context. peerlink turns this off by itself when another plugin, such as an organisation's managed one, skips those hooks; all of it then goes with each prompt instead.",
       "default": true
     }
   }
