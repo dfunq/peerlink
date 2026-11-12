@@ -413,7 +413,7 @@ function agentPanel(x,others=[]){const sc=cfg.sessions?.[x.id]||{};const setSpac
   const led=leadOf[x.space];
   const role=x.leads?`Leads the <b>${esc(x.space)}</b> space${x.parent?` inside <b>${esc(x.parent)}</b>`:''} <span class="mut">· ${how}</span>`:`Member${led?` · led by ${esc(led.name)}${led.live?'':' (offline)'}`:''}`;
   // Only you, here, pick a lead: the daemon refuses it from agents and bots.
-  const leadBtn=x.remote||!x.space||x.space==='default'?'':x.leads?`<button class="ghost small" data-clearlead="${esc(x.space)}">Clear lead</button>`:`<button class="ghost small" data-makelead="${esc(x.space)}" data-cwd="${esc(x.cwd)}">${led?'Make lead instead of '+esc(led.name):'Make lead of '+esc(x.space)}</button>`;
+  const leadBtn=x.remote||!x.space||x.space==='default'?'':x.leads?`<button class="ghost small" data-clearlead="${esc(x.space)}">Clear lead</button>`:`<button class="ghost small" data-makelead="${esc(x.space)}" data-cwd="${esc(x.cwd)}" data-id="${esc(x.id)}">${led?'Make lead instead of '+esc(led.name):'Make lead of '+esc(x.space)}</button>`;
   const opt=(v,t)=>`<option value="${v}" ${wake===v?'selected':''}>${t}</option>`;
   const tab=x.remote?'about':panelTab;
   return `<div class="card panel${x.leads?' is-lead':''}">
@@ -750,7 +750,7 @@ document.addEventListener('change',async e=>{const t=e.target;if(!t.dataset.sple
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-makelead],[data-clearlead]');if(!b)return;e.stopPropagation();
   const space=b.dataset.makelead||b.dataset.clearlead;
   if(b.dataset.clearlead&&!confirm(`Clear the lead of ${space}? Work sent to the space won't reach anyone until you pick a new lead.`))return;
-  const r=await post(`/api/spaces/${encodeURIComponent(space)}/lead`,{cwd:b.dataset.cwd||''});if(r.error)alert(r.error);refresh(true)});
+  const r=await post(`/api/spaces/${encodeURIComponent(space)}/lead`,{cwd:b.dataset.cwd||'',id:b.dataset.makelead?b.dataset.id||'':''});if(r.error)alert(r.error);refresh(true)});
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-clearctx]');if(!b)return;
   const x=livePeers.find(p=>p.id===b.dataset.clearctx);if(!confirm(`Clear ${x?x.name:'this agent'}'s context? It starts a fresh conversation after the turn it's in.`))return;
   const r=await post(`/api/sessions/${encodeURIComponent(b.dataset.clearctx)}/clear`);if(r.error)alert(r.error);else{const m=$('#clearmsg');if(m)m.textContent='Asked: it clears after its current turn.'}});
