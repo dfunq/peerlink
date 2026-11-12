@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.14"
+VERSION = "0.9.15"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -579,14 +579,17 @@ def note_lone_leads():
         cwd = next(iter(cwds))
         # A lead you set always wins. An implicit lead elsewhere gives way once its folder has been quiet a while, or
         # at once when its agent has moved to another space.
+        # A lead you cleared stays cleared until you pick one: the space's last agent doesn't take it back.
         folder, how = space_lead(space)
-        if folder == cwd or how == "set":
+        if folder == cwd or how == "set" or ((config.get("space_leads") or {}).get(space) or {}).get("how") == "none":
             continue
         moved = any(is_live(r) and r.get("cwd") == folder for r in sessions.values())
         if folder and not moved and now - folder_seen.get(folder, DAEMON_START) < LEAD_GRACE_S:
             continue
         config.setdefault("space_leads", {})[space] = {"cwd": cwd, "how": "only", "ts": time.time()}
         save_config()
+        # Told, as a lead you pick is: else it learns it leads only when it's told it no longer does.
+        task_message(None, cwd, f"You now lead the {space} space, as the only agent in it. Work sent to the space comes to you: decide which agent owns it, delegate with send_message, and report the outcome to whoever asked.")
         log("lead", space, "->", cwd, "(only agent)")
 
 
@@ -607,7 +610,7 @@ def set_lead(space, cwd, sid=""):
         if cwd:
             chosen[space] = {"cwd": cwd, "how": "set", "ts": time.time(), **({"agent": pick["agent"]} if pick and pick.get("agent") else {})}
         else:
-            chosen.pop(space, None)
+            chosen[space] = {"cwd": "", "how": "none", "ts": time.time()}
         save_config()
         new, new_rec = space_lead(space)[0], lead_rec(space)
         # Within one folder the lead can still change hands: from the agent going by its name to another there.
