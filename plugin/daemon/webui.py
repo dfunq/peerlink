@@ -217,7 +217,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <a href="#settings" data-nav="settings">Settings</a>
 <a href="#controls" data-nav="controls">Controls</a>
 </nav>
-<main><div id="limitbar" style="display:none" class="small"></div><div id="stalebar" style="display:none" class="small"></div><div id="offline">Can't reach the peerlink daemon. This page reconnects once it's back.</div><div id="signedout">Signed out. Run <span class="mono">/peerlink web</span> in any agent to sign in again.</div>
+<main><div id="limitbar" style="display:none" class="small"></div><div id="stalebar" style="display:none" class="small"></div><div id="offline"><span id="offwhy">Can't reach the peerlink daemon. This page reconnects once it's back.</span></div><div id="signedout">Signed out. Run <span class="mono">/peerlink web</span> in any agent to sign in again.</div>
 
 <section id="agents"><h1>Agents</h1><p class="lead">Your live agents, by space. Click one to see or change it.</p>
 <div class="msgbar"><span class="seg" role="group" aria-label="Layout"><button class="ghost small" data-alayout="chart">Chart</button><button class="ghost small" data-alayout="list">List</button></span>
@@ -516,7 +516,7 @@ let lastView='',lastPanel='';
 let lastSnap=null,streamOk=false,live=null;
 async function refresh(force,snap){
   if(signedOut)return;
-  if(!snap){snap=await api('/api/snapshot');lastSnap=snap}
+  if(!snap){snap=await api('/api/snapshot');if(snap.error&&!snap.status)throw new Error('!'+snap.error);lastSnap=snap}
   const {status:st,peers:p,messages:m,tasks:tk,issues:fb,inbox:ib}=snap;
   allTasks=tk.tasks||[];allFeedback=fb.issues||[];inbox=ib.items||[];allSched=snap.schedules?.schedules||[];
   const lim=st.limit;$('#limitbar').style.display=lim?'block':'none';
@@ -1150,7 +1150,7 @@ document.addEventListener('change',async e=>{const id=ruleOf(e);if(!id)return;co
   if(r&&r.error)alert(r.error);t.blur();loadRules()});
 window.addEventListener('hashchange',()=>{if(location.hash==='#spaces')loadRules()});
 setInterval(()=>{if(location.hash==='#spaces'&&!document.hidden)loadRules()},5000);
-async function loadCfg(){cfg=await api('/api/config');const f=$('#cfg');
+async function loadCfg(){cfg=await api('/api/config');if(cfg.error&&cfg.max_hops===undefined)throw new Error('!'+cfg.error);const f=$('#cfg');
   panels({swake:true,sctx:true,sapprove:true,ssee:false,sguide:false,slimits:false,sremote:!!(cfg.remotes||[]).length});
   for(const el of f.elements){if(!el.name)continue;const v=cfg[el.name];
     if(el.type==='checkbox')el.checked=!!v;else if(el.name==='remotes')el.value=(v||[]).join('\n');else el.value=v??''}
@@ -1164,6 +1164,12 @@ $('#cfg').addEventListener('submit',async e=>{e.preventDefault();const f=e.targe
   cfg=r;$('#saved').textContent='Saved '+new Date().toLocaleTimeString()});
 // Poll every 2 s; while the daemon is unreachable say so, back off to 10 s, and pick up again once it's back.
 let misses=0;
+// The daemon answered, but with an error: say what it said, since "can't reach" would send you looking in the wrong place.
+function offline(e){const m=String(e?.message||'');
+  $('#offwhy').textContent=m.startsWith('!')?`The peerlink daemon is running but couldn't build this page: ${m.slice(1)}. The reason is also in daemon.log, in peerlink's folder.`
+    :e instanceof TypeError&&!/fetch|network|load/i.test(m)?`This page hit an error drawing itself: ${m}. Reload it; if it stays, report it.`
+    :"Can't reach the peerlink daemon. This page reconnects once it's back.";
+  $('#offline').style.display='block'}
 function connect(){if(!window.EventSource||signedOut)return;live?.close();live=new EventSource('/api/stream');
   live.onopen=()=>{streamOk=true};
   live.onmessage=e=>{const d=JSON.parse(e.data);lastSnap=d;
@@ -1174,9 +1180,9 @@ function connect(){if(!window.EventSource||signedOut)return;live?.close();live=n
 // With the stream up, tick only redraws now and then, so "idle 12m" stays true; without it, it polls.
 async function tick(){
   try{if(streamOk&&lastSnap)await refresh(true,lastSnap);else{await refresh();if(misses){misses=0;$('#offline').style.display='none';await loadCfg();await refresh(true)}}}
-  catch(e){if(!signedOut){misses++;$('#offline').style.display='block'}}
+  catch(e){if(!signedOut){misses++;offline(e)}}
   if(signedOut){live?.close();return}
   setTimeout(tick,streamOk?30000:misses?10000:2000)}
-show();loadCfg().then(()=>refresh(true)).then(()=>{if(location.hash==='#discord')location.hash='#channels';else if(location.hash==='#channels'){loadDiscord();loadTelegram();loadSlack()}}).catch(()=>{misses=1;$('#offline').style.display='block'}).finally(()=>{connect();setTimeout(tick,2000)});
+show();loadCfg().then(()=>refresh(true)).then(()=>{if(location.hash==='#discord')location.hash='#channels';else if(location.hash==='#channels'){loadDiscord();loadTelegram();loadSlack()}}).catch(e=>{misses=1;offline(e)}).finally(()=>{connect();setTimeout(tick,2000)});
 </script></body></html>
 """
