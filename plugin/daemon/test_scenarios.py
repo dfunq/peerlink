@@ -169,6 +169,19 @@ class ScenarioTest(unittest.TestCase):
         helper.expect("And invoices?")
         self.assertNotIn("And invoices?", app.texts())
 
+    def test_a_lead_you_clear_stays_cleared_and_a_lone_agent_is_told_it_leads(self):
+        rig = self.rig()
+        solo = rig.agent("solo", space="acme")
+        solo.poll()
+        solo.expect("You now lead the acme space, as the only agent in it")
+        self.assertEqual(rig.user("GET", "/api/peers")["leads"]["acme"]["name"], "solo")
+        rig.user("POST", "/api/spaces/acme/lead", {"cwd": ""})
+        solo.expect("You no longer lead the acme space: it has no lead now")
+        for _ in range(3):
+            solo.poll()
+        self.assertNotIn("acme", rig.user("GET", "/api/peers")["leads"])
+        self.assertEqual(sum("as the only agent in it" in t for t in solo.texts()), 1)
+
     def test_an_agent_is_the_same_agent_after_claude_code_restarts_even_sharing_a_folder(self):
         rig = self.rig()
         lead = rig.agent("lead", space="acme")
