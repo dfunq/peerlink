@@ -18,7 +18,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
-VERSION = "0.9.8"
+VERSION = "0.9.19"
 PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 HEARTBEAT_S = 2.0
 WAIT_BEAT_S = 0.5  # how often the daemon is asked while a caller waits in inbox
@@ -89,6 +89,8 @@ class Daemon:
         self.user_names = {"user", "you"}  # what the daemon reads as your user: their Inbox, which voice must not fill
         self.limit = 0
         self.registered = False
+        self.wrong = ""    # why this peer's tools refuse while it's in another space than --space, else empty
+        self.shown = name  # the name the daemon gave it, as the web UI lists it
 
     def call(self, method, path, body=None, timeout=5):
         try:
@@ -121,15 +123,34 @@ class Daemon:
         })
         if code != 200:
             raise Refused(f"registering as {self.name} failed: {out.get('error', code)}")
-        space = (out.get("config") or {}).get("space", "")
-        if self.want_space and space != self.want_space:
-            raise Refused(f"{self.cwd} is in space '{space}', not '{self.want_space}': put that folder in the space in the web UI, or pass --cwd for one that is")
         if out.get("name") != self.name:
             log(f"the daemon named this peer {out.get('name')}, not {self.name}: another peer holds the name, or the folder has a nickname")
+        self.shown = out.get("name") or self.name
         self.registered = True
-        self.space = space
+        self.check_space(out.get("config") or {})
         self.refresh_limit()
-        log(f"registered as {out.get('name')} in space {space}")
+        log(f"registered as {self.shown} in space {self.space}")
+
+    def check_space(self, cfg):
+        """In the wrong space, the peer stays registered, so you can find it in the web UI and move it, but every tool
+        refuses until you do: it picks the move up on its next heartbeat. Exiting instead left nothing to move."""
+        if "space" not in cfg:
+            return
+        space, was = cfg.get("space") or "", self.wrong
+        self.space = space
+        if not self.want_space or space == self.want_space:
+            self.wrong = ""
+            if was:
+                log(f"now in space {space}: tools work again")
+            return
+        if cfg.get("space_source") == "agent":
+            why = f"this peer, {self.shown}, is set to space '{space}' in the web UI"
+        else:
+            why = f"its folder, {self.cwd}, is in space '{space}'"
+        self.wrong = (f"peerlink: {why}, not '{self.want_space}'. In the web UI, open Agents, pick {self.shown} and set its "
+                      f"space to {self.want_space}; this endpoint picks that up within seconds. Until then its tools refuse.")
+        if self.wrong != was:
+            log(self.wrong)
 
     def refresh_limit(self):
         code, out = self.call("GET", "/api/config")
@@ -149,8 +170,11 @@ class Daemon:
             return
         if code != 200:
             return
+        self.check_space(out.get("config") or {})
         with self.lock:
             self.to_ack = [m for m in self.to_ack if m not in acks]
+            if self.wrong:
+                return  # unacked, they come again once it's in its space
             for m in out.get("inbox") or []:
                 mid = m.get("id")
                 if not mid or mid in self.read:
@@ -274,6 +298,8 @@ def handle(daemon, msg):
         name, args = params.get("name"), params.get("arguments") or {}
         if name not in {t["name"] for t in TOOLS}:
             return err(-32602, f"unknown tool {name}")
+        if daemon.wrong:
+            return ok({"content": [{"type": "text", "text": daemon.wrong}], "isError": True})
         try:
             out = getattr(daemon, name)(args)
             return ok({"content": [{"type": "text", "text": json.dumps(out, ensure_ascii=False)}]})
@@ -339,7 +365,7 @@ def serve_http(daemon, port):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="peerlink as an MCP endpoint for clients outside Claude Code")
     ap.add_argument("--name", default=os.environ.get("PEERLINK_MCP_NAME"), help="the peer's name (or PEERLINK_MCP_NAME)")
-    ap.add_argument("--space", default=os.environ.get("PEERLINK_MCP_SPACE"), help="the space it must be in (or PEERLINK_MCP_SPACE): refuses to start elsewhere")
+    ap.add_argument("--space", default=os.environ.get("PEERLINK_MCP_SPACE"), help="the space it must be in (or PEERLINK_MCP_SPACE): elsewhere its tools refuse until you move it")
     ap.add_argument("--cwd", default=os.environ.get("PEERLINK_MCP_CWD") or os.getcwd(), help="the folder it acts from; its folder decides its space")
     ap.add_argument("--http", type=int, metavar="PORT", help="serve MCP over HTTP on 127.0.0.1 instead of stdio")
     ap.add_argument("--port", type=int, default=int(os.environ.get("PEERLINK_PORT", "7899")), help="the peerlink daemon's port")
