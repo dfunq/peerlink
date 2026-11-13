@@ -56,7 +56,7 @@ class FakeDaemon:
                 if self.path.endswith("/heartbeat"):
                     outer.acked += b.get("ack") or []
                     # Handed again until acked, like the real daemon.
-                    return self.reply({"inbox": [m for m in outer.inbox if m["id"] not in outer.acked]})
+                    return self.reply({"inbox": [m for m in outer.inbox if m["id"] not in outer.acked], "config": {"space": outer.space}})
                 if self.path == "/api/messages":
                     return self.reply({"id": "m9", "status": "queued"})
                 self.reply({"error": "nope"}, 404)
@@ -195,13 +195,19 @@ class EndpointTest(unittest.TestCase):
 
 
 class StartupTest(unittest.TestCase):
-    def test_refuses_the_wrong_space(self):
+    def test_in_the_wrong_space_it_stays_registered_refuses_tools_and_recovers_once_moved(self):
         d = FakeDaemon(space="default")
         self.addCleanup(d.stop)
         c = Client(d.port, "--space", "services")
-        self.assertNotEqual(c.p.wait(timeout=8), 0)
-        self.assertIn("services", c.p.stderr.read())
-        c.p.stdin.close(); c.p.stdout.close(); c.p.stderr.close()
+        self.addCleanup(c.close)
+        c.rpc("initialize", {"protocolVersion": "2025-06-18"})
+        bad, text = c.tool("list_peers")
+        self.assertTrue(bad)
+        self.assertIn("'default', not 'services'", text)
+        self.assertIn("open Agents, pick voice", text)
+        self.assertIsNone(c.p.poll())  # still running, so the web UI lists it
+        d.space = "services"  # you moved it in the web UI
+        self.assertTrue(wait_for(lambda: not c.tool("list_peers")[0]))
 
     def test_name_is_required(self):
         env = {k: v for k, v in os.environ.items() if k != "PEERLINK_MCP_NAME"}
