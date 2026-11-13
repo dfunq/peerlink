@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.9.17'
+const DAEMON_VERSION = '0.9.18'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -165,6 +165,7 @@ let turnsSinceLoad = 0
 let composeOff = false
 let sentGuidance = ''
 let sentThreads = false
+let contextTokens = 0 // the context's size at the last prompt, to tell a compaction by
 let contextFor = ''
 let manualSummaryAt = -Infinity
 // A summary is due outside the usual cadence: a task this agent owned just closed, or its work went quiet.
@@ -1066,7 +1067,13 @@ async function skippedContext($: EngineInterface) {
   const out: string[] = []
   // A /clear or resume is a new conversation under a new id: it hasn't seen any of it.
   const id = await $.session.id().catch(() => sessionId)
-  if (id !== contextFor) {
+  // A compacted conversation keeps the system prompt, but the prompt that carried what the skipped hooks would have
+  // sent is summarized away. The org plugin that skips those hooks skips session.compact too (and Claude Code says so
+  // after every compaction), so compaction is read from the context instead: under half of what it held last prompt.
+  const tokens = (await $.session.usage().catch(() => undefined))?.context?.tokens ?? 0
+  const compacted = tokens > 0 && tokens < contextTokens / 2
+  if (tokens > 0) contextTokens = tokens
+  if (id !== contextFor || compacted) {
     contextFor = id
     sentGuidance = ''
     sentThreads = false
@@ -1769,17 +1776,6 @@ export const register: Register = (on, options) => {
       if (!text) return composed
       return { sections: [...composed.sections, { id: 'peerlink:guidance', scope: 'session', text }] }
     })
-
-  // A compacted conversation keeps the system prompt, but the prompt that carried what the skipped hooks would have
-  // sent is summarized away: send it again.
-  on('session.compact', async ($, e, next) => {
-    const out = await next(e)
-    if ((e as any).agentId === undefined) {
-      sentGuidance = ''
-      sentThreads = false
-    }
-    return out
-  })
 
   on('tool.call', { tool: 'mcp__peerlink__list_peers' }, async $ => text(await listPeers($, true))).catch(daemonDown)
 
