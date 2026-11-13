@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.9.17', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.9.18', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (state.forget && path.endsWith('/heartbeat') && 'busy' in body) {
       state.forget = false
       return { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'unknown agent; register again' }) } }
@@ -79,7 +79,8 @@ function engine(on: any, { turns = 0, percent = 85, readme = '', claudeMd = '', 
   on('session.model', () => ({ value: 'opus' }))
   // The account's rate-limit windows, as the last API response reported them.
   const limits: { kind: string; percentUsed: number; resetsAt?: string }[] = []
-  on('session.usage', () => ({ value: { context: { window: 200000, tokens: percent * 2000, percent }, rateLimits: limits } }))
+  const usage = { percent }
+  on('session.usage', () => ({ value: { context: { window: 200000, tokens: usage.percent * 2000, percent: usage.percent }, rateLimits: limits } }))
   on('session.turns', () => ({ value: turns }))
   // The transcript: what the plugin's own prompts put there follows the first prompt.
   const said: { role: string; text: string; toolUses: unknown[] }[] = [{ role: 'user', text: 'build the invoice page', toolUses: [] }]
@@ -144,7 +145,7 @@ function engine(on: any, { turns = 0, percent = 85, readme = '', claudeMd = '', 
       calls.model++
       return { value: { isAnswered: true, text, usage: {} } }
     })
-  return { clock, calls, answer, writes, ids, pinned, git, where, woke, submits, limits, tools, ran }
+  return { clock, calls, answer, writes, ids, pinned, git, where, woke, submits, limits, tools, ran, usage }
 }
 
 test('the model is told about peers beside the prompt, again only when who is there changes', async ($, on) => {
@@ -189,6 +190,22 @@ test("when an org plugin skips peerlink's compose and context hooks, the role, g
   for (let i = 0; i < 10; i++) await settle()
   const third: any = await $.prompt.submit({ text: 'next' })
   expect(third.context.join('\n')).toContain('Deploy freeze until 5pm')
+})
+
+test("when the skipped hooks' guidance rode on a prompt, it is sent again once the conversation is compacted", async ($, on) => {
+  const { usage } = engine(on, { percent: 60 })
+  fakeDaemon(on, 1, null, [], { space: 'acme', space_source: 'set', space_from: '', role: 'Owns the web app.' })
+  await $.session.start(START)
+  await settle()
+  const first: any = await $.prompt.submit({ text: 'add an invoice page' })
+  expect(first.context.join('\n')).toContain('Owns the web app.')
+  usage.percent = 70
+  const second: any = await $.prompt.submit({ text: 'now style it' })
+  expect((second.context ?? []).join('\n')).not.toContain('Owns the web app.')
+  // Compaction: the context drops to a fraction of what it was, and no session.compact hook is needed to see it.
+  usage.percent = 12
+  const third: any = await $.prompt.submit({ text: 'next' })
+  expect(third.context.join('\n')).toContain('Owns the web app.')
 })
 
 test('past the context size the user set, the agent is asked once to save and clear, on its next prompt', async ($, on) => {
@@ -997,7 +1014,7 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.9.17 · daemon 0.9.17 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.9.18 · daemon 0.9.18 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the space is listed once', async ($, on) => {
@@ -1030,7 +1047,7 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.9.17')
+  expect(reg.plugin).toBe('0.9.18')
 })
 
 test('an agent registers again under the folder it started in, wherever the host has moved its root since', async ($, on) => {
@@ -1132,7 +1149,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.9.18', true], ['0.9.17', false]] as const)
+for (const [installed, reloads] of [['0.9.19', true], ['0.9.18', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     const daemon = fakeDaemon(on)
