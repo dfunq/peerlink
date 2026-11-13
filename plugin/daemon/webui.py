@@ -369,6 +369,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <label>Their daemons, one URL per line</label><textarea name="remotes" style="min-height:60px"></textarea>
 <div class="row"><div><label>Listen host (0.0.0.0 to accept other machines; needs a restart)</label><input type="text" name="listen_host"></div>
 <div><label>Shared token</label><input type="text" name="token"></div></div>
+<label>This machine's web UI name (like peerlink.local; empty is off; needs a restart)</label><input type="text" name="local_name">
 </div></details>
 <p class="savebar"><button type="submit">Save</button> <span class="mut small" id="saved"></span></p>
 </form></section>

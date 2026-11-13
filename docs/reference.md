@@ -389,6 +389,7 @@ You can change these in the web UI, with `peerlink config <name> <value>`, or in
 | `folder_spaces` | `{}` | The space you put each folder in, such as `{"/Users/you/Repos/games": "acme"}` |
 | `space_parents` | `{}` | The space each space sits inside, set on the Spaces page (`""` for the top level) |
 | `folder_names` | `{}` | The name each folder's agents get, kept when you name an agent |
+| `local_name` | peerlink.local | The web UI's name on this machine: `http://peerlink.local:7899`. The daemon publishes it over Bonjour (`dns-sd` on macOS, `avahi-publish` on Linux), pointing at 127.0.0.1, with no sudo or hosts file. `peerlink.localhost:7899` also works in Chrome, Edge and Firefox on any OS. Sign-in links use the name once it resolves. Empty turns it off. A restart applies it |
 | `remotes`, `listen_host`, `token` | | Settings for linking daemons across machines |
 
 `PEERLINK_PORT` and `PEERLINK_HOME` override the port and the data directory.
