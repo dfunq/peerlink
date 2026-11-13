@@ -176,6 +176,18 @@ class RecordsTest(unittest.TestCase):
             peerlinkd.nudge_stale_tasks(t["updated"] + 5 * day)
         self.assertEqual(self.inbox("core"), [])
 
+    def test_an_ask_older_than_the_messages_kept_in_memory_can_still_be_closed_by_its_senders_folder(self):
+        # sky asked on Discord, then restarted (a new session id) and 500+ messages went by: the ask is only in the log.
+        old = self.send("sky", to="core", text="Move the folder back?", expects_reply=True, options=["Moved it", "Later"])["id"]
+        peerlinkd.messages[:] = [m for m in peerlinkd.messages if m["id"] != old]
+        peerlinkd.sessions["s-sky2"] = {"id": "s-sky2", "name": "sky", "cwd": "/x/sky", "last_seen": peerlinkd.time.time()}
+        try:
+            self.assertEqual(peerlinkd.close_threads("s-other", [old]), (200, {"closed": [], "not_yours": [old]}))
+            self.assertEqual(peerlinkd.close_threads("s-sky2", [old]), (200, {"closed": [old]}))
+            self.assertTrue(peerlinkd.logged({old})[old]["handled"])
+        finally:
+            peerlinkd.sessions.pop("s-sky2", None)
+
     def test_a_message_its_agent_is_holding_isnt_handed_out_again(self):
         self.send("sky", to="core", text="FYI: the freeze is over.")
         first = peerlinkd.take_inbox("s-core", track=True)
@@ -189,6 +201,22 @@ class RecordsTest(unittest.TestCase):
         self.assertEqual([x["id"] for x in peerlinkd.take_inbox("s-core", track=True)], [mid])  # it stopped saying so: a reload lost it
         peerlinkd.ack("s-core", [mid])
         self.assertEqual(peerlinkd.handed["s-core"], {})
+
+
+class LocalNameTest(unittest.TestCase):
+    def test_the_web_ui_answers_to_its_local_name_and_nothing_a_page_could_pick(self):
+        keep = peerlinkd.config.get("local_name")
+        try:
+            p = peerlinkd.PORT
+            peerlinkd.config["local_name"] = "peerlink.local"
+            self.assertEqual(peerlinkd.web_hosts(), {f"{h}:{p}" for h in ("127.0.0.1", "localhost", "[::1]", "peerlink.local", "peerlink.localhost")})
+            for bad in ("evil.com", "peerlink.local.evil.com", "", "peer link.local"):
+                peerlinkd.config["local_name"] = bad
+                self.assertEqual(peerlinkd.local_name(), "")
+                self.assertEqual(peerlinkd.web_hosts(), {f"{h}:{p}" for h in ("127.0.0.1", "localhost", "[::1]")})
+            self.assertEqual(peerlinkd.link_host(), "127.0.0.1")  # no name: links stay on 127.0.0.1
+        finally:
+            peerlinkd.config["local_name"] = keep
 
 
 if __name__ == "__main__":

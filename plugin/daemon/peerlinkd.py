@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.22"
+VERSION = "0.9.23"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -49,6 +49,7 @@ CODE = _h.hexdigest()[:16]
 HOME = os.environ.get("PEERLINK_HOME", os.path.expanduser("~/.peerlink"))
 CONFIG_PATH = os.path.join(HOME, "config.json")
 PID_PATH = os.path.join(HOME, "daemon.pid")
+NAME_PID_PATH = os.path.join(HOME, "local-name.pid")
 LOG_PATH = os.path.join(HOME, "daemon.log")
 MESSAGES_PATH = os.path.join(HOME, "messages.jsonl")
 ISSUES_PATH = os.path.join(HOME, "issues.jsonl")
@@ -187,6 +188,7 @@ DEFAULT_CONFIG = {
     "folder_names": {},
     "remotes": [],
     "listen_host": "127.0.0.1",
+    "local_name": "peerlink.local",  # the web UI's name on this machine, published over Bonjour; empty is off; a restart applies it
     "token": "",
 }
 
@@ -272,6 +274,66 @@ def rotate_key():
 
 def sign(payload, secret):
     return hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+
+
+def local_name():
+    """The name this machine's web UI answers to besides 127.0.0.1 and localhost, like peerlink.local."""
+    name = str(config.get("local_name") or "").strip().lower().rstrip(".")
+    return name if re.fullmatch(r"[a-z0-9-]+(\.[a-z0-9-]+)*\.(local|localhost)", name) else ""
+
+
+def web_hosts():
+    hosts = {"127.0.0.1", "localhost", "[::1]"}
+    if local_name():
+        hosts |= {local_name(), local_name().rsplit(".", 1)[0] + ".localhost"}
+    return {f"{h}:{PORT}" for h in hosts}
+
+
+def name_resolves(name):
+    """True when name reaches this machine: a sign-in link may use it then."""
+    try:
+        return all(a[4][0] in ("127.0.0.1", "::1") for a in socket.getaddrinfo(name, PORT, proto=socket.IPPROTO_TCP))
+    except (OSError, UnicodeError):
+        return False
+
+
+def publish_name():
+    """Publish local_name for this machine over Bonjour (macOS dns-sd, or avahi on Linux), pointing at 127.0.0.1, so
+    http://peerlink.local:7899 opens the web UI. No sudo and no hosts file; the helper ends when the daemon does. A
+    .localhost name needs nothing: browsers send it to this machine themselves."""
+    name = local_name()
+    try:
+        with open(NAME_PID_PATH) as f:
+            pid = int(f.read().strip())
+        comm = subprocess.run(["ps", "-p", str(pid), "-o", "comm="], capture_output=True, text=True, timeout=5).stdout
+        if os.path.basename(comm.strip()) in ("dns-sd", "avahi-publish"):
+            os.kill(pid, signal.SIGTERM)  # a helper left by a daemon that was killed
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    if not name.endswith(".local"):
+        return None
+    if shutil.which("dns-sd"):
+        cmd = ["dns-sd", "-P", name.split(".")[0], "_http._tcp", "local", str(PORT), name, "127.0.0.1"]
+    elif shutil.which("avahi-publish"):
+        cmd = ["avahi-publish", "-a", "-R", name, "127.0.0.1"]
+    else:
+        log("local name: no dns-sd or avahi-publish here, so", name, "isn't published; use 127.0.0.1")
+        return None
+    try:
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                start_new_session=True)
+    except OSError as err:
+        log("local name: could not publish", name, "-", err)
+        return None
+    with open(NAME_PID_PATH, "w") as f:
+        f.write(str(proc.pid))
+    log("local name:", f"http://{name}:{PORT}")
+    return proc
+
+
+def link_host():
+    name = local_name()
+    return name if name and name_resolves(name) else "127.0.0.1"
 
 
 def mint_link(secret, host="127.0.0.1"):
@@ -1018,9 +1080,10 @@ def party(m, side):
     return who if who.startswith("discord:") else "n:" + str(m.get(side + "_name") or who).lower()
 
 
-def conversation(a, b, limit=500):
-    """Every message between two parties still in the log (this file and the one before it), oldest first."""
-    pair, by_id = {a, b}, {}
+def logged(want=None):
+    """Every message still in the log (this file and the one before it), by id, with its later updates applied.
+    With want, only those ids."""
+    by_id = {}
     for path in (MESSAGES_PATH + ".1", MESSAGES_PATH):
         try:
             with open(path) as f:
@@ -1029,12 +1092,20 @@ def conversation(a, b, limit=500):
                         entry = json.loads(line)
                     except ValueError:
                         continue
+                    if want is not None and entry.get("id") not in want:
+                        continue
                     if "text" in entry:
                         by_id[entry["id"]] = entry
                     elif entry.get("id") in by_id:
                         by_id[entry["id"]].update(entry)
         except OSError:
             continue
+    return by_id
+
+
+def conversation(a, b, limit=500):
+    """Every message between two parties still in the log (this file and the one before it), oldest first."""
+    pair, by_id = {a, b}, logged()
     out = [m for m in by_id.values() if {party(m, "from"), party(m, "to")} == pair or (a == b and party(m, "from") == party(m, "to") == a)]
     return sorted(out, key=lambda m: m.get("ts", 0))[-limit:]
 
@@ -2882,7 +2953,11 @@ def close_threads(sid, ids):
         want = {str(i).strip() for i in ids if str(i).strip()}
         if not want:
             return 400, {"error": "give the ids to close, like m123"}
-        mine = [m for m in messages if m["id"] in want and ({m.get("from"), m.get("from_cwd"), m.get("to"), m.get("to_cwd")} & me)]
+        found = {m["id"]: m for m in messages if m["id"] in want}
+        # Only the newest messages are kept in memory; an older ask (its buttons still live on Discord) is in the log.
+        if want - set(found):
+            found.update(logged(want - set(found)))
+        mine = [m for m in found.values() if {m.get("from"), m.get("from_cwd"), m.get("to"), m.get("to_cwd")} & me]
         for m in mine:
             m["handled"] = m["inbox_done"] = True
             append_log({"id": m["id"], "handled": True, "inbox_done": True})
@@ -4642,7 +4717,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def host_ok(self):
         # A page on another site that rebinds its DNS to 127.0.0.1 still sends its own Host.
-        return self.headers.get("Host", "") in (f"127.0.0.1:{PORT}", f"localhost:{PORT}", f"[::1]:{PORT}")
+        return self.headers.get("Host", "").lower() in web_hosts()
 
     def web_session(self):
         for part in self.headers.get("Cookie", "").split(";"):
@@ -4711,7 +4786,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(404, {"error": "not found"})
 
         if rest == ["web", "link"] and method == "POST" and self.key_ok():
-            return self.reply(200, {"url": mint_link(key[0]), "expires_in_s": LINK_TTL_S})
+            return self.reply(200, {"url": mint_link(key[0], link_host()), "expires_in_s": LINK_TTL_S})
 
         if rest == ["web", "logout"] and method == "POST":
             with lock:
@@ -5302,10 +5377,17 @@ def serve():
         f.write(str(os.getpid()))
     signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=server.shutdown).start())
     threading.Thread(target=reaper, daemon=True).start()
+    named = publish_name()
     log(f"peerlink {VERSION} on http://{config['listen_host']}:{PORT} (pid {os.getpid()})")
     try:
         server.serve_forever()
     finally:
+        if named:
+            named.terminate()
+            try:
+                os.remove(NAME_PID_PATH)
+            except OSError:
+                pass
         if os.path.exists(PID_PATH):
             os.remove(PID_PATH)
 
