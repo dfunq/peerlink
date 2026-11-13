@@ -380,6 +380,22 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <p class="mut small" id="ctlmsg"></p></section>
 </main></div>
 <script>
+// The page redraws itself every few seconds. A redraw never replaces what you're changing: a part of the page holding
+// the field you're in, or one you've changed and not saved yet, is left alone until you save or leave it. Saving
+// (a form's submit, or a button) lets the next redraws through.
+const unsaved=el=>el.matches('input,textarea')?(el.type==='checkbox'||el.type==='radio'?el.checked!==el.defaultChecked:el.value!==el.defaultValue)
+  :el.matches('select')?[...el.options].some(o=>o.selected!==o.defaultSelected):false;
+let paintFreeUntil=0;
+const holdPaint=box=>{if(Date.now()<paintFreeUntil)return false;const a=document.activeElement;
+  if(a&&a!==document.body&&box.contains(a)&&a.matches('input:not([type=button]):not([type=submit]),textarea,select'))return true;
+  return [...box.querySelectorAll('input:not([type=hidden]):not([type=button]):not([type=submit]),textarea,select')].some(unsaved)};
+{const d=Object.getOwnPropertyDescriptor(Element.prototype,'innerHTML');
+ Object.defineProperty(Element.prototype,'innerHTML',{configurable:true,get(){return d.get.call(this)},
+  set(v){if(this.isConnected&&this.closest('main')&&holdPaint(this))return;d.set.call(this,v)}})}
+document.addEventListener('submit',()=>{paintFreeUntil=Date.now()+4000},true);
+// Outside a form with a Save button, a field is applied as soon as it changes (most save then; filters redraw).
+document.addEventListener('change',e=>{if(!e.target.closest('form'))paintFreeUntil=Date.now()+4000},true);
+document.addEventListener('click',e=>{if(e.target.closest('button,a,[data-dflag]'))paintFreeUntil=Date.now()+4000},true);
 const $=s=>document.querySelector(s);let cfg={},editing=false,sel='';
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 // Markdown as agents write it, made safe: everything is escaped first, then a small set of marks become tags.
