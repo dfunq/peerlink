@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.9.23'
+const DAEMON_VERSION = '0.9.24'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -672,6 +672,10 @@ async function limitCheck($: EngineInterface, reason: string) {
   failure = ''
   if (!sessionId) return false
   if (reason !== 'error' && reason !== 'aborted' && limit) {
+    // A turn already under way when the limit hit finishes on Claude Code's short grace allowance: that's no sign the
+    // account works again, and lifting on it hands every held message out into turns that die at once.
+    const windows = (await $.session.usage().catch(() => undefined))?.rateLimits ?? []
+    if (windows.some(w => w.percentUsed >= 100)) return false
     limit = null
     void call($, 'POST', `/api/sessions/${sessionId}/limit`, { lifted: true }).catch(() => undefined)
     return false
