@@ -385,7 +385,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 // (a form's submit, or a button) lets the next redraws through.
 const unsaved=el=>el.matches('input,textarea')?(el.type==='checkbox'||el.type==='radio'?el.checked!==el.defaultChecked:el.value!==el.defaultValue)
   :el.matches('select')?[...el.options].some(o=>o.selected!==o.defaultSelected):false;
-let paintFreeUntil=0;
+let paintFreeUntil=0,pageVersion='';
 const holdPaint=box=>{if(Date.now()<paintFreeUntil)return false;const a=document.activeElement;
   if(a&&a!==document.body&&box.contains(a)&&a.matches('input:not([type=button]):not([type=submit]),textarea,select'))return true;
   return [...box.querySelectorAll('input:not([type=hidden]):not([type=button]):not([type=submit]),textarea,select')].some(unsaved)};
@@ -394,7 +394,8 @@ const holdPaint=box=>{if(Date.now()<paintFreeUntil)return false;const a=document
   set(v){if(this.isConnected&&this.closest('main')&&holdPaint(this))return;d.set.call(this,v)}})}
 document.addEventListener('submit',()=>{paintFreeUntil=Date.now()+4000},true);
 // Outside a form with a Save button, a field is applied as soon as it changes (most save then; filters redraw).
-document.addEventListener('change',e=>{if(!e.target.closest('form'))paintFreeUntil=Date.now()+4000},true);
+const settle=el=>{if(el.matches('select'))[...el.options].forEach(o=>o.defaultSelected=o.selected);else if(el.type==='checkbox'||el.type==='radio')el.defaultChecked=el.checked;else if('defaultValue' in el)el.defaultValue=el.value};
+document.addEventListener('change',e=>{if(e.target.closest('form'))return;paintFreeUntil=Date.now()+4000;settle(e.target)},true);
 document.addEventListener('click',e=>{if(e.target.closest('button,a,[data-dflag]'))paintFreeUntil=Date.now()+4000},true);
 const $=s=>document.querySelector(s);let cfg={},editing=false,sel='';
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -463,7 +464,7 @@ function agentPanel(x,others=[]){const sc=cfg.sessions?.[x.id]||{};const setSpac
     <label>Space<input name="space" type="text" list="spacenames" value="${esc(setSpace)}" placeholder="${x.space_source==='file'?esc(x.space)+' (from its .peerlink)':x.space_source==='started'?esc(x.space)+' (started for it)':'unassigned'}"><span class="hint">For this agent only: others in its folder stay where they are. It keeps it after /clear and restarts.${x.space_source==='agent'?' Leave it empty to go back to its folder\'s space.':''}</span>
     ${x.space&&x.space!=='default'?`<button type="button" class="ghost small" data-unassign="${esc(x.id)}" data-who="${esc(x.name)}" data-lead="${x.leads?esc(x.space):''}" data-folder="${esc(x.cwd)}" style="margin-top:6px">Unassign from ${esc(x.space)}</button>`:''}</label>
     <details class="adv"${(x.also||[]).length?' open':''}><summary>Also in other spaces</summary>
-    <label>Also a member of<input name="also" type="text" value="${esc((x.also||[]).join(', '))}" placeholder="none"><span class="hint">Rarely needed: more spaces it sees and messages, on top of its own. Separate with commas.</span></label></details>
+    <label>Also a member of<input name="also" type="text" value="${esc((x.also||[]).join(', '))}" placeholder="none"><span class="hint">Rarely needed: more spaces it sees and messages, on top of its own. For this agent only. Separate with commas.</span></label></details>
     <datalist id="spacenames">${Object.keys(leadOf).concat(livePeers.map(p=>p.space)).filter((n,i,a)=>n&&n!=='default'&&a.indexOf(n)===i).sort().map(n=>`<option value="${esc(n)}">`).join('')}</datalist>
     <div><button type="submit">Save</button> <span id="agentmsg" class="small"></span></div></form>`:tab==='controls'?`<form id="agentform" data-id="${esc(x.id)}" data-wake="${wake}" data-muted="${x.muted?'1':''}" data-auto="${x.auto_approve?'1':''}">
     <label>When a message arrives<select name="wake">${opt('default','Use the default')}${opt('on','Start a turn')}${opt('off','Wait for the next prompt')}</select></label>
@@ -555,6 +556,8 @@ async function refresh(force,snap){
   $('#limitbar').innerHTML=lim?`<b>⏸️ Usage limit reached</b> (${lim.resets_at?'resets '+new Date(lim.resets_at*1000).toLocaleString([], {weekday:'short',hour:'numeric',minute:'2-digit'}):'no reset time given'}; hit by ${esc(lim.by)}). Agents hold their messages and schedules wait. <button class="ghost small" data-limresume>Resume now</button> after switching accounts.`:'';
   const view=JSON.stringify([p.peers.map(({last_seen_s,...x})=>x),p.leads,m.messages.map(x=>[x.id,x.status]),allTasks.map(t=>[t.id,t.status,t.owner,t.note]),allFeedback.map(f=>[f.id,f.status,f.note]),inbox.map(i=>i.id),allSched.map(c=>[c.id,c.status,c.runs,c.note]),sel,panelTab,cfg.sessions]);
   if(view===lastView&&!force)return;lastView=view;
+  // A new peerlink version brings a new page: load it once nothing on this one is being changed.
+  if(pageVersion&&st.version!==pageVersion&&!holdPaint(document.querySelector('main')))location.reload();pageVersion=pageVersion||st.version;
   $('#hostline').textContent=`${st.host} · daemon ${st.version}`;
   $('#browsers').textContent=`${st.browsers} signed in · links work once and expire after 60 s`;
   $('#keypath').textContent=st.home+'/key';
@@ -968,7 +971,7 @@ document.addEventListener('submit',async e=>{if(e.target.id!=='agentform')return
   if(has('space')&&v('space')!==d.space&&!sureToMove(d,v('space')||'its folder\'s space')){msg.textContent='Not saved';return}
   if(has('space')&&v('space')!==d.space){const r=await post('/api/folders/space',{cwd:d.cwd,id,space:v('space')});if(r.error)errs.push(r.error)}
   const also=has('also')?v('also').split(',').map(t=>t.trim()).filter(Boolean):[];
-  if(has('also')&&also.join(', ')!==d.also){const r=await post('/api/members',{cwd:d.cwd,spaces:also});if(r.error)errs.push(r.error)}
+  if(has('also')&&also.join(', ')!==d.also){const r=await post('/api/members',{cwd:d.cwd,id,spaces:also});if(r.error)errs.push(r.error)}
   editing=false;lastPanel='';await refresh(true);
   const m2=$('#agentmsg');if(m2){m2.className='small '+(errs.length?'err':'ok');m2.textContent=errs.length?errs.join(' '):'Saved'}});
 document.addEventListener('click',async e=>{const t=e.target.closest('button');if(!t)return;

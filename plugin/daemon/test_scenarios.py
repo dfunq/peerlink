@@ -194,6 +194,22 @@ class ScenarioTest(unittest.TestCase):
         self.assertEqual(ops.peers(), {})
         self.assertEqual(sorted(app.peers()), ["helper"])
 
+    def test_adding_one_agent_to_another_space_leaves_the_others_in_its_folder(self):
+        rig = self.rig()
+        shared = rig.folder("app", space="acme")
+        app, helper = rig.agent("app", folder=shared), rig.agent("helper", folder=shared)
+        ops = rig.agent("ops", space="infra")
+        rig.user("POST", "/api/members", {"cwd": shared, "id": helper.sid, "spaces": ["infra"]})
+        helper.expect("you're now also a member of infra")
+        self.assertNotIn("member", " ".join(app.texts()))
+        also = {p["name"]: p.get("also", []) for p in rig.user("GET", "/api/peers")["peers"]}
+        self.assertEqual(also["helper"], ["infra"])
+        self.assertEqual(also["app"], [])
+        self.assertEqual(sorted(ops.peers()), ["helper"])
+        # Cleared, for that agent alone.
+        rig.user("POST", "/api/members", {"cwd": shared, "id": helper.sid, "spaces": []})
+        self.assertEqual(ops.peers(), {})
+
     def test_a_lead_you_clear_stays_cleared_and_a_lone_agent_is_told_it_leads(self):
         rig = self.rig()
         solo = rig.agent("solo", space="acme")

@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.21"
+VERSION = "0.9.22"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -648,32 +648,46 @@ def leads_view():
 
 
 def also_in(rec):
-    """Spaces you added this agent's folder to in the web UI, on top of its own, wherever the folder is."""
+    """Spaces you added this agent to in the web UI, on top of its own. Kept for the agent, like its space; a folder's
+    list (before 0.9.22, when they were kept by folder) still counts for an agent there without one of its own."""
     own = space_of(rec)[0]
-    return sorted(s for s in (config.get("space_members") or {}).get(rec.get("cwd") or "", []) if s != own)
+    mine = (config.get("agent_members") or {}).get(rec.get("agent") or "")
+    spaces = mine if mine is not None else (config.get("space_members") or {}).get(rec.get("cwd") or "", [])
+    return sorted(s for s in spaces if s != own)
 
 
-def set_members(cwd, spaces):
-    """You set the spaces an agent's folder is also a member of (none clears it). The agents there are told."""
+def set_members(cwd, spaces, sid=""):
+    """You set the spaces an agent is also a member of (none clears it). With its id, that agent alone, and only it is
+    told; agents sharing its folder keep theirs. Without one (older pages), the folder's list."""
     cwd = os.path.abspath(os.path.expanduser(cwd)) if cwd else ""
-    if not cwd:
-        return 400, {"error": "say which agent's folder"}
     spaces = sorted({clean_space(s) for s in spaces} - {"", DEFAULT_SPACE})
+    rec = None
     with lock:
-        members = config.setdefault("space_members", {})
-        old = members.get(cwd, [])
-        if spaces:
-            members[cwd] = spaces
+        if sid:
+            rec = sessions.get(sid)
+            if rec is None or not rec.get("agent"):
+                return 404, {"error": "that agent isn't running"}
+            cwd = rec.get("cwd") or ""
+            old = also_in(rec)
+            config.setdefault("agent_members", {})[rec["agent"]] = spaces
+        elif not cwd:
+            return 400, {"error": "say which agent"}
         else:
-            members.pop(cwd, None)
+            members = config.setdefault("space_members", {})
+            old = members.get(cwd, [])
+            if spaces:
+                members[cwd] = spaces
+            else:
+                members.pop(cwd, None)
         save_config()
         added, dropped = sorted(set(spaces) - set(old)), sorted(set(old) - set(spaces))
         if added or dropped:
             said = "; ".join(filter(None, [
                 f"you're now also a member of {', '.join(added)}: you see and message its agents, and they see you" if added else "",
                 f"you're no longer a member of {', '.join(dropped)}" if dropped else ""]))
-            task_message(None, cwd, f"Your user changed your spaces in the web UI: {said}.")
-        log("members", tilde_path(cwd), "->", ", ".join(spaces) or "(none)")
+            task_message(None, cwd, f"Your user changed your spaces in the web UI: {said}.", **({"prefer": rec} if rec else {}))
+        log("members", display_name(rec) if rec else tilde_path(cwd), "->", ", ".join(spaces) or "(none)")
+    forget_spaces()
     return 200, {"cwd": cwd, "spaces": spaces}
 
 
@@ -5063,7 +5077,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(403, {"error": "an agent's spaces are set in the web UI"})
             body = self.body()
             spaces = body.get("spaces")
-            code, out = set_members(str(body.get("cwd") or ""), spaces if isinstance(spaces, list) else [])
+            code, out = set_members(str(body.get("cwd") or ""), spaces if isinstance(spaces, list) else [], str(body.get("id") or ""))
             return self.reply(code, out)
         if rest == ["web", "send"] and method == "POST":
             # Only you, in the browser: it goes out in your name.
