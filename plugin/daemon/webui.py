@@ -441,11 +441,11 @@ function agentPanel(x,others=[]){const sc=cfg.sessions?.[x.id]||{};const setSpac
    ${x.remote?'':`<div class="ptiles"><div><span class="k small">Context</span><b>${x.context??'?'}%</b>${x.context!=null?`<span class="cmeter${x.context>=80?' hi':x.context>=50?' mid':''}"><i style="width:${Math.min(100,x.context)}%"></i></span>`:''}</div>
      <div><span class="k small">Sent / hour</span><b${x.sent_hour>=20?' style="color:var(--warn)"':''}>${x.sent_hour||0}</b></div><div><span class="k small">Open tasks</span><b>${x.open_tasks||0}</b></div></div>`}
    ${x.remote?'':`<div class="ptabs">${[['about','Agent'],['tasks','Tasks'+(x.open_tasks?' · '+x.open_tasks:'')],['details','Details'],['controls','Controls']].map(([k,t])=>`<button class="${tab===k?'on':''}" data-ptab="${k}">${t}</button>`).join('')}</div>`}
-   ${tab==='tasks'?panelTasks(x):tab==='details'?`<form id="agentform" data-id="${esc(x.id)}" data-nick="${esc(sc.nickname||'')}" data-space="${esc(setSpace)}" data-role="${esc(sc.role||'')}" data-cwd="${esc(x.cwd)}" data-also="${esc((x.also||[]).join(', '))}">
+   ${tab==='tasks'?panelTasks(x):tab==='details'?`<form id="agentform" data-id="${esc(x.id)}" data-nick="${esc(sc.nickname||'')}" data-space="${esc(setSpace)}" data-role="${esc(sc.role||'')}" data-cwd="${esc(x.cwd)}" data-who="${esc(x.name)}" data-lead="${x.leads?esc(x.space):''}" data-also="${esc((x.also||[]).join(', '))}">
     <label>Name<input name="nickname" type="text" value="${esc(sc.nickname||'')}" placeholder="${esc(x.name)}"><span class="hint">What other agents call it. Kept for this folder.</span></label>
     <label>Role<textarea name="role" rows="3" placeholder="${x.folder_role?'From the folder: '+esc(x.folder_role):'What this agent is here for, e.g. Owns the billing API: invoices, payments, the Stripe webhook.'}">${esc(sc.role||'')}</textarea><span class="hint">For this agent only, kept across /clear and resume. The agent gets it as its brief, and other agents see it.${x.folder_role?' Leave it empty to use the role: in its folder\'s .peerlink.':' A role: line in a folder\'s .peerlink is the role of every agent there without one of its own.'}</span></label>
     <label>Space<input name="space" type="text" list="spacenames" value="${esc(setSpace)}" placeholder="${x.space_source==='file'?esc(x.space)+' (from its .peerlink)':x.space_source==='started'?esc(x.space)+' (started for it)':'unassigned'}"><span class="hint">For this agent only: others in its folder stay where they are. It keeps it after /clear and restarts.${x.space_source==='agent'?' Leave it empty to go back to its folder\'s space.':''}</span>
-    ${x.space&&x.space!=='default'?`<button type="button" class="ghost small" data-unassign="${esc(x.id)}" style="margin-top:6px">Unassign from ${esc(x.space)}</button>`:''}</label>
+    ${x.space&&x.space!=='default'?`<button type="button" class="ghost small" data-unassign="${esc(x.id)}" data-who="${esc(x.name)}" data-lead="${x.leads?esc(x.space):''}" data-folder="${esc(x.cwd)}" style="margin-top:6px">Unassign from ${esc(x.space)}</button>`:''}</label>
     <details class="adv"${(x.also||[]).length?' open':''}><summary>Also in other spaces</summary>
     <label>Also a member of<input name="also" type="text" value="${esc((x.also||[]).join(', '))}" placeholder="none"><span class="hint">Rarely needed: more spaces it sees and messages, on top of its own. Separate with commas.</span></label></details>
     <datalist id="spacenames">${Object.keys(leadOf).concat(livePeers.map(p=>p.space)).filter((n,i,a)=>n&&n!=='default'&&a.indexOf(n)===i).sort().map(n=>`<option value="${esc(n)}">`).join('')}</datalist>
@@ -835,7 +835,11 @@ document.addEventListener('click',async e=>{if(!e.target.closest('[data-notify]'
   else alert('Notifications are blocked for this page. Allow them in the browser\'s site settings.');
   renderInbox()});
 // Out of its space, whatever its folder's is: it joins the agents in no space.
+// Moving an agent that leads its space hands the lead on, and agents sharing a folder look alike: say which one moves.
+const sureToMove=(d,to)=>{const lead=d.lead,where=to&&to!=='unassigned'?`to ${to}`:'out of every space';
+  return confirm(lead?`Move ${d.who} ${where}? It leads ${lead}: another agent will lead it instead, and ${d.who} loses its peers there.`:`Move ${d.who} (${d.folder||d.cwd}) ${where}? Other agents in its folder stay where they are.`)};
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-unassign]');if(!b)return;e.preventDefault();
+  if(!sureToMove(b.dataset,'unassigned'))return;
   const r=await post('/api/folders/space',{id:b.dataset.unassign,space:'unassigned'});if(r.error)alert(r.error);editing=false;lastPanel='';refresh(true)});
 document.addEventListener('click',e=>{const b=e.target.closest('[data-alayout]');if(!b)return;aLayout=b.dataset.alayout;try{localStorage.setItem('peerlink.alayout',aLayout)}catch{};show();refresh(true)});
 const keep=(k,v)=>{try{localStorage.setItem('peerlink.'+k,v)}catch{}};
@@ -945,6 +949,7 @@ document.addEventListener('submit',async e=>{if(e.target.id!=='agentform')return
   if(has('role')&&v('role')!==d.role)patch.role=v('role');
   msg.className='small';msg.textContent='Saving…';
   if(Object.keys(patch).length){const r=await post(`/api/sessions/${encodeURIComponent(id)}/config`,patch);if(r.error)errs.push(r.error);else cfg.sessions=r.sessions}
+  if(has('space')&&v('space')!==d.space&&!sureToMove(d,v('space')||'its folder\'s space')){msg.textContent='Not saved';return}
   if(has('space')&&v('space')!==d.space){const r=await post('/api/folders/space',{cwd:d.cwd,id,space:v('space')});if(r.error)errs.push(r.error)}
   const also=has('also')?v('also').split(',').map(t=>t.trim()).filter(Boolean):[];
   if(has('also')&&also.join(', ')!==d.also){const r=await post('/api/members',{cwd:d.cwd,spaces:also});if(r.error)errs.push(r.error)}
