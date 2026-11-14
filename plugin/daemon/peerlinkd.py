@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.24"
+VERSION = "0.9.25"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -2757,6 +2757,21 @@ def continuation(sid, name="", cwd=""):
     return max(named, key=lambda r: r["last_seen"]) if named else None
 
 
+def name_folder(rec, nickname):
+    """Naming an agent in the web UI names its folder too, so the next agent there takes the name, unless other agents
+    are live in that folder: then the folder keeps its name, and whatever is sent to the folder (a Discord channel
+    mapped to it, say) still goes to the agent it went to, not to one renamed beside it."""
+    cwd = rec.get("cwd")
+    if not cwd or any(r["id"] != rec["id"] and r.get("cwd") == cwd and is_live(r) for r in sessions.values()):
+        return False
+    names = config.setdefault("folder_names", {})
+    if nickname:
+        names[cwd] = nickname
+    else:
+        names.pop(cwd, None)
+    return True
+
+
 def successor(cwd):
     """The live agent in a folder: who gets what's sent to the folder rather than to one agent. Where agents share it,
     the one going by the folder's name (its lead, say, not the agents it started), else the most recently seen."""
@@ -5013,12 +5028,8 @@ class Handler(BaseHTTPRequestHandler):
                 if "role" in b:
                     cur["role"] = str(b["role"] or "").strip()[:ROLE_MAX]
                 rec = sessions.get(sid)
-                if rec and rec.get("cwd") and "nickname" in b:
-                    names = config.setdefault("folder_names", {})
-                    if b["nickname"]:
-                        names[rec["cwd"]] = b["nickname"]
-                    else:
-                        names.pop(rec["cwd"], None)
+                if rec and "nickname" in b:
+                    name_folder(rec, b["nickname"])
                 save_config()
             forget_spaces()
             with lock:
