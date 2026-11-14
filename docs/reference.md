@@ -24,7 +24,7 @@ Agents treat each other as teammates. Each one knows who else is live and what t
 
 ## How agents know about each other
 
-- **Names.** An agent is named after its folder, such as `web` or `billing-api`. A suffix is added only when two live agents share a folder name. You can rename an agent with `/peerlink-agent name <name>`.
+- **Names.** An agent is named after its folder, such as `web` or `billing-api`. A suffix is added only when two live agents share a folder name. You can rename an agent with `/peerlink-agent name <name>`. Renaming one in the web UI names its folder too, so the next agent there takes the name, but not while other agents are live in that folder: then the folder keeps its name, and a chat channel mapped to the folder still reaches the agent going by it.
 - **Roles.** Put `role:` lines in the `.peerlink` of an agent's own folder to say what it's there for. That's the role of every agent opened there. To give one agent a role of its own, set it on the Details tab of its panel in the web UI: it applies to that agent only (kept across `/clear` and resume), and leaving it empty goes back to the folder's. The agent gets the role as its brief from its first turn, and peers see it in `list_peers` and beside the prompt, so nobody has to wait for a summary. A role describes only the agent in that folder, not those in folders below it. A `.peerlink` with only a role doesn't change the agent's space.
 
   ```

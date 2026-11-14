@@ -219,5 +219,27 @@ class LocalNameTest(unittest.TestCase):
             peerlinkd.config["local_name"] = keep
 
 
+class FolderNameTest(unittest.TestCase):
+    def test_renaming_one_of_several_agents_in_a_folder_leaves_the_folder_and_its_channel_with_the_lead(self):
+        now = peerlinkd.time.time()
+        keep = dict(peerlinkd.config.get("folder_names") or {})
+        lead = {"id": "s-lead", "name": "repo", "cwd": "/x/repo", "last_seen": now - 5}
+        worker = {"id": "s-work", "name": "repo", "cwd": "/x/repo", "last_seen": now}
+        peerlinkd.sessions.update({"s-lead": lead, "s-work": worker})
+        try:
+            peerlinkd.config["sessions"].setdefault("s-work", {})["nickname"] = worker["name"] = "repo-worker"
+            self.assertFalse(peerlinkd.name_folder(worker, "repo-worker"))
+            self.assertEqual(peerlinkd.folder_name("/x/repo"), "repo")
+            self.assertEqual(peerlinkd.successor("/x/repo")["id"], "s-lead")  # Discord mapped to the folder reaches the lead
+            peerlinkd.sessions.pop("s-lead")
+            self.assertTrue(peerlinkd.name_folder(worker, "repo-worker"))  # alone there, the folder takes its name
+            self.assertEqual(peerlinkd.folder_name("/x/repo"), "repo-worker")
+        finally:
+            for sid in ("s-lead", "s-work"):
+                peerlinkd.sessions.pop(sid, None)
+                peerlinkd.config["sessions"].pop(sid, None)
+            peerlinkd.config["folder_names"] = keep
+
+
 if __name__ == "__main__":
     unittest.main()
