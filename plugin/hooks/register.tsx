@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.9.25'
+const DAEMON_VERSION = '0.9.26'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -120,6 +120,12 @@ let nudgedFor = ''
 // Messages that reached the session, so one the daemon hands out again isn't shown twice; and acks it hasn't taken yet.
 const placed = new Set<string>()
 let unacked: string[] = []
+// Messages acked because their prompt's turn seemed to start, checked against the transcript a minute on: a turn
+// that wasn't theirs (one Claude Code runs of its own, say) can look like it, and the message would be lost without
+// a word. One not there is put to the agent again, once.
+const unverified = new Map<string, { m: PeerMessage; at: number; sid: string }>()
+const reput = new Set<string>()
+const VERIFY_AFTER_MS = 60_000
 // A prompt submitted to start a turn, acked only once the turn starts: one Claude Code takes before it's ready (an
 // agent seconds old) is lost without a word, so with no turn after STARTED_WITHIN_MS it's put to the agent again.
 let submitted: { batch: PeerMessage[]; at: number } | undefined
@@ -496,8 +502,9 @@ let wakeTimer = false
 
 // Tells the daemon these messages reached the session. Until it hears, it hands them out again, so one lost to a
 // reload or a prompt that never started a turn still arrives. A failed call is retried with the next heartbeat.
-function acked($: EngineInterface, batch: PeerMessage[]) {
+function acked($: EngineInterface, batch: PeerMessage[], verify = false) {
   const ids = batch.map(m => m.id)
+  if (verify) for (const m of batch) if (m.text && !reput.has(m.id)) unverified.set(m.id, { m, at: -1, sid: sessionId })
   for (const id of ids) placed.add(id)
   if (placed.size > 500) for (const id of [...placed].slice(0, placed.size - 500)) placed.delete(id)
   void call($, 'POST', `/api/sessions/${sessionId}/ack`, { ids })
@@ -621,8 +628,35 @@ function turnStarted($: EngineInterface, text: unknown) {
   }
   // A turn you started by typing isn't the one the prompt asked for.
   if (!submitted || (typeof text === 'string' && text && !submitted.batch.some(m => text.includes(m.id)))) return
-  acked($, submitted.batch)
+  acked($, submitted.batch, true)
   submitted = undefined
+}
+
+async function verifyLanded($: EngineInterface) {
+  if (!unverified.size || busy) return
+  const now = await $.clock.now()
+  for (const [id, v] of unverified) {
+    if (v.sid !== sessionId) unverified.delete(id)  // a /clear: that conversation is gone, and so is the question
+    else if (v.at < 0) v.at = now
+  }
+  const due = [...unverified.values()].filter(v => now - v.at >= VERIFY_AFTER_MS)
+  if (!due.length) return
+  const said = await $.session.messages().catch(() => undefined)
+  if (!said) return
+  const texts = (said as any[]).filter(m => m.role === 'user' && typeof m.text === 'string').map(m => m.text as string)
+  const lost: PeerMessage[] = []
+  for (const v of due) {
+    unverified.delete(v.m.id)
+    if (!texts.some(t => t.includes(v.m.id))) lost.push(v.m)
+  }
+  if (!lost.length) return
+  for (const m of lost) {
+    placed.delete(m.id)
+    reput.add(m.id)
+  }
+  if (reput.size > 500) for (const id of [...reput].slice(0, reput.size - 500)) reput.delete(id)
+  $.ui.log(`peerlink: ${lost.map(m => m.id).join(', ')} never reached this session: putting ${lost.length === 1 ? 'it' : 'them'} to the agent again.`)
+  pending = [...lost.map(m => ({ ...m, wake: true })), ...pending.filter(p => !lost.some(m => m.id === p.id))]
 }
 
 async function resubmitLost($: EngineInterface) {
@@ -781,6 +815,7 @@ async function poll($: EngineInterface) {
   }
   pending.push(...inbox.filter(m => m.kind !== 'announcement'))
   await resubmitLost($)
+  await verifyLanded($).catch(() => undefined)
   if (cfg && before !== cfg.poll_interval_ms) startPolling($)
   void reloadIfUpdated($)
   showStatus($)
