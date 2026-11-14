@@ -188,6 +188,8 @@ label{display:block;margin:8px 0 4px;font-size:12px;color:var(--mut)}
 .row{display:flex;gap:12px;flex-wrap:wrap}.row>div{flex:1 1 180px}
 button{background:var(--acc);color:#fff;border:0;border-radius:6px;padding:7px 14px;font:inherit;cursor:pointer}
 button.ghost{background:transparent;color:var(--fg);border:1px solid var(--line)}
+dialog.ask{border:1px solid var(--line);border-radius:12px;background:var(--card);color:var(--fg);padding:18px 20px 16px;width:min(440px,calc(100vw - 32px));box-shadow:0 12px 40px rgba(0,0,0,.28)}dialog.ask::backdrop{background:rgba(0,0,0,.35)}
+dialog.ask p{margin:0 0 16px;line-height:1.5;overflow-wrap:anywhere}dialog.ask .acts{display:flex;justify-content:flex-end;gap:8px}dialog.ask button.bad{background:var(--bad)}
 button:hover:not(:disabled){filter:brightness(1.06)}button.ghost:hover:not(:disabled){border-color:var(--mut);filter:none}button:disabled{opacity:.55;cursor:default}
 :focus-visible{outline:2px solid var(--acc);outline-offset:2px}input:focus-visible,select:focus-visible,textarea:focus-visible{outline-offset:0;border-color:var(--acc)}
 .fl{display:inline-flex;gap:6px;align-items:center;white-space:nowrap}.fl label{margin:0}
@@ -381,6 +383,18 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <p class="mut small" id="ctlmsg"></p></section>
 </main></div>
 <script>
+// The page's own dialog for a yes-or-no or a notice, in place of the browser's confirm() and alert() boxes. The button
+// says what happens ("Delete", "Move"), and a destructive one is red; Escape or a click outside answers no.
+function ask(text,{ok,tell:only}={}){return new Promise(done=>{
+  const verb=ok||(only?'OK':(text.match(/^[A-Z][a-z]+/)||['OK'])[0]),bad=!only&&/^(Delete|Clear|End|Cancel|Disconnect|Stop|Rotate|Sign|Unassign|Remove)$/.test(verb);
+  const d=document.createElement('dialog');d.className='ask';
+  d.innerHTML=`<p></p><div class="acts">${only?'':`<button type="button" class="ghost" value="no">${verb==='Cancel'?'Keep':'Cancel'}</button>`}<button type="button" value="yes"${bad?' class="bad"':''}></button></div>`;
+  d.querySelector('p').textContent=text;d.querySelector('[value=yes]').textContent=verb;
+  const end=v=>{if(!d.open)return;d.close();d.remove();done(v)};
+  d.addEventListener('click',e=>{const b=e.target.closest('button');if(b)end(b.value==='yes');else if(e.target===d)end(false)});
+  d.addEventListener('cancel',e=>{e.preventDefault();end(false)});
+  document.body.append(d);d.showModal();d.querySelector(bad?'[value=no]':'[value=yes]').focus()})}
+const tell=text=>ask(String(text),{tell:true});
 // The page redraws itself every few seconds. A redraw never replaces what you're changing: a part of the page holding
 // the field you're in, or one you've changed and not saved yet, is left alone until you save or leave it. Saving
 // (a form's submit, or a button) lets the next redraws through.
@@ -729,11 +743,11 @@ document.addEventListener('submit',async e=>{const f=e.target.closest('[data-sch
   if(r.error){f.querySelector('[data-schedmsg]').textContent=r.error;return}
   schedEdit='';refresh(true)});
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-schedok]');if(!b)return;
-  const r=await post('/api/inbox',{kind:'approval',id:b.dataset.schedok,action:b.dataset.act});if(r.error)alert(r.error);refresh(true)});
+  const r=await post('/api/inbox',{kind:'approval',id:b.dataset.schedok,action:b.dataset.act});if(r.error)tell(r.error);refresh(true)});
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-schedon]');if(!b)return;
-  const r=await post(`/api/schedules/${encodeURIComponent(b.dataset.schedon)}/enable`);if(r.error)alert(r.error);refresh(true)});
+  const r=await post(`/api/schedules/${encodeURIComponent(b.dataset.schedon)}/enable`);if(r.error)tell(r.error);refresh(true)});
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-schedcancel]');if(!b)return;
-  if(!confirm(`Cancel ${b.dataset.schedcancel}?`))return;const r=await post(`/api/schedules/${encodeURIComponent(b.dataset.schedcancel)}/cancel`);if(r.error)alert(r.error);refresh(true)});
+  if(!await ask(`Cancel ${b.dataset.schedcancel}?`))return;const r=await post(`/api/schedules/${encodeURIComponent(b.dataset.schedcancel)}/cancel`);if(r.error)tell(r.error);refresh(true)});
 document.addEventListener('submit',async e=>{if(e.target.id!=='schedform')return;e.preventDefault();const f=e.target,v=n=>f.elements[n].value.trim();
   const w=v('when'),cron=/^\S+\s+\S+\s+\S+\s+\S+\s+\S+$/.test(w)&&!/^in\s/i.test(w)&&!/^\d{4}-/.test(w);
   const r=await post('/api/schedules',{agent:v('target'),prompt:v('prompt'),prompt_file:v('prompt_file'),...(cron?{cron:w}:{at:w}),start:f.elements.start.checked});
@@ -778,23 +792,23 @@ function renderInbox(){
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-iact]');if(!b)return;const row=b.closest('[data-iid]');
   const text=row.querySelector('[data-itext]')?.value||'';
   if(b.dataset.iact==='reply'&&!text.trim()){row.querySelector('[data-itext]').focus();return}
-  if(b.dataset.iact==='approve'&&!/^c\d+$/.test(row.dataset.iid)&&!confirm('Start a new Claude Code session in that folder?'))return;
+  if(b.dataset.iact==='approve'&&!/^c\d+$/.test(row.dataset.iid)&&!await ask('Start a new Claude Code session in that folder?'))return;
   const r=await post('/api/inbox',{kind:row.dataset.ikind,id:row.dataset.iid,action:b.dataset.iact,text});
-  if(r.error)alert(r.error);document.activeElement?.blur();refresh(true)});
+  if(r.error)tell(r.error);document.activeElement?.blur();refresh(true)});
 document.addEventListener('change',async e=>{const t=e.target;if(!t.dataset.splead&&!t.dataset.spparent)return;
   const r=t.dataset.spparent?await post(`/api/spaces/${encodeURIComponent(t.dataset.spparent)}/parent`,{parent:t.value})
     :await post(`/api/spaces/${encodeURIComponent(t.dataset.splead)}/lead`,{cwd:t.value});
-  if(r.error)alert(r.error);lastView='';refresh(true)});
+  if(r.error)tell(r.error);lastView='';refresh(true)});
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-makelead],[data-clearlead]');if(!b)return;e.stopPropagation();
   const space=b.dataset.makelead||b.dataset.clearlead;
-  if(b.dataset.clearlead&&!confirm(`Clear the lead of ${space}? Work sent to the space won't reach anyone until you pick a new lead.`))return;
-  const r=await post(`/api/spaces/${encodeURIComponent(space)}/lead`,{cwd:b.dataset.cwd||'',id:b.dataset.makelead?b.dataset.id||'':''});if(r.error)alert(r.error);refresh(true)});
+  if(b.dataset.clearlead&&!await ask(`Clear the lead of ${space}? Work sent to the space won't reach anyone until you pick a new lead.`))return;
+  const r=await post(`/api/spaces/${encodeURIComponent(space)}/lead`,{cwd:b.dataset.cwd||'',id:b.dataset.makelead?b.dataset.id||'':''});if(r.error)tell(r.error);refresh(true)});
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-clearctx]');if(!b)return;
-  const x=livePeers.find(p=>p.id===b.dataset.clearctx);if(!confirm(`Clear ${x?x.name:'this agent'}'s context? It starts a fresh conversation after the turn it's in.`))return;
-  const r=await post(`/api/sessions/${encodeURIComponent(b.dataset.clearctx)}/clear`);if(r.error)alert(r.error);else{const m=$('#clearmsg');if(m)m.textContent='Asked: it clears after its current turn.'}});
+  const x=livePeers.find(p=>p.id===b.dataset.clearctx);if(!await ask(`Clear ${x?x.name:'this agent'}'s context? It starts a fresh conversation after the turn it's in.`))return;
+  const r=await post(`/api/sessions/${encodeURIComponent(b.dataset.clearctx)}/clear`);if(r.error)tell(r.error);else{const m=$('#clearmsg');if(m)m.textContent='Asked: it clears after its current turn.'}});
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-terminate]');if(!b)return;
-  const x=livePeers.find(p=>p.id===b.dataset.terminate);if(!confirm(`End ${x?x.name:'this agent'}? Its session closes after the turn it's in.`))return;
-  const r=await post(`/api/sessions/${encodeURIComponent(b.dataset.terminate)}/terminate`);if(r.error)alert(r.error);refresh(true)});
+  const x=livePeers.find(p=>p.id===b.dataset.terminate);if(!await ask(`End ${x?x.name:'this agent'}? Its session closes after the turn it's in.`))return;
+  const r=await post(`/api/sessions/${encodeURIComponent(b.dataset.terminate)}/terminate`);if(r.error)tell(r.error);refresh(true)});
 document.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target.matches?.('#inboxlist [data-itext]')){e.preventDefault();e.target.closest('[data-iid]').querySelector('[data-iact]').click()}});
 // Feedback: newest first; accepting one opens a task for peerlink's maintainer.
 let allFeedback=[];
@@ -819,10 +833,10 @@ function renderFeedback(){
     ||`<div class="empty">${allFeedback.length?'Nothing here.':'No feedback yet.'}</div>`}
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-fact]');if(!b)return;const row=b.closest('[data-fb]');
   const r=await post('/api/issues/'+encodeURIComponent(row.dataset.fb),{status:b.dataset.fact,note:row.querySelector('[data-fnote]').value});
-  if(r.error)alert(r.error);document.activeElement?.blur();refresh(true)});
+  if(r.error)tell(r.error);document.activeElement?.blur();refresh(true)});
 document.addEventListener('change',async e=>{const t=e.target;
   if(t.id==='fstatus'||t.id==='ftype'){renderFeedback();return}
-  if(t.dataset.fnote!==undefined){const r=await post('/api/issues/'+encodeURIComponent(t.closest('[data-fb]').dataset.fb),{note:t.value});if(r.error)alert(r.error);t.blur();refresh(true)}});
+  if(t.dataset.fnote!==undefined){const r=await post('/api/issues/'+encodeURIComponent(t.closest('[data-fb]').dataset.fb),{note:t.value});if(r.error)tell(r.error);t.blur();refresh(true)}});
 // Tasks: one row each, its subtasks under it. The Tasks page and an agent's Tasks tab share the row.
 let allTasks=[],panelTab='about';
 const TSTATE={open:'open',in_progress:'in progress',done:'done',failed:'failed',cancelled:'cancelled'};
@@ -850,17 +864,17 @@ var aLayout=pref('alayout','list');
 const notifyOn=()=>pref('notify','')==='1'&&window.Notification&&Notification.permission==='granted';
 document.addEventListener('click',async e=>{if(!e.target.closest('[data-notify]'))return;
   if(notifyOn()){try{localStorage.setItem('peerlink.notify','')}catch{}}
-  else if(!window.Notification)alert('This browser has no desktop notifications.');
+  else if(!window.Notification)tell('This browser has no desktop notifications.');
   else if(await Notification.requestPermission()==='granted'){try{localStorage.setItem('peerlink.notify','1')}catch{}}
-  else alert('Notifications are blocked for this page. Allow them in the browser\'s site settings.');
+  else tell('Notifications are blocked for this page. Allow them in the browser\'s site settings.');
   renderInbox()});
 // Out of its space, whatever its folder's is: it joins the agents in no space.
 // Moving an agent that leads its space hands the lead on, and agents sharing a folder look alike: say which one moves.
 const sureToMove=(d,to)=>{const lead=d.lead,where=to&&to!=='unassigned'?`to ${to}`:'out of every space';
-  return confirm(lead?`Move ${d.who} ${where}? It leads ${lead}: another agent will lead it instead, and ${d.who} loses its peers there.`:`Move ${d.who} (${d.folder||d.cwd}) ${where}? Other agents in its folder stay where they are.`)};
+  return ask(lead?`Move ${d.who} ${where}? It leads ${lead}: another agent will lead it instead, and ${d.who} loses its peers there.`:`Move ${d.who} (${d.folder||d.cwd}) ${where}? Other agents in its folder stay where they are.`)};
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-unassign]');if(!b)return;e.preventDefault();
-  if(!sureToMove(b.dataset,'unassigned'))return;
-  const r=await post('/api/folders/space',{id:b.dataset.unassign,space:'unassigned'});if(r.error)alert(r.error);editing=false;lastPanel='';refresh(true)});
+  if(!await sureToMove(b.dataset,'unassigned'))return;
+  const r=await post('/api/folders/space',{id:b.dataset.unassign,space:'unassigned'});if(r.error)tell(r.error);editing=false;lastPanel='';refresh(true)});
 document.addEventListener('click',e=>{const b=e.target.closest('[data-alayout]');if(!b)return;aLayout=b.dataset.alayout;try{localStorage.setItem('peerlink.alayout',aLayout)}catch{};show();refresh(true)});
 const keep=(k,v)=>{try{localStorage.setItem('peerlink.'+k,v)}catch{}};
 let tLayout=pref('tlayout','board'),dragging=null;const openCards=new Set();
@@ -914,10 +928,10 @@ document.addEventListener('dragover',e=>{const t=target(e);document.querySelecto
 document.addEventListener('dragend',()=>{dragging=null;$('#tdrop').classList.remove('on');document.querySelectorAll('.can,.over,.dragging').forEach(x=>x.classList.remove('can','over','dragging'));renderTasks()});
 document.addEventListener('drop',async e=>{const t=target(e),task=dragging;if(!t||!task)return;e.preventDefault();dragging=null;
   let body;
-  if(t.dataset.dropcwd){if(!confirm(`Hand task ${task.id} to ${t.textContent}? ${task.owner} is told to stop.`))return;body={owner:t.dataset.dropcwd}}
-  else{const st=dropAction(task,t.dataset.col);if(st==='cancelled'&&!confirm(`Cancel task ${task.id}? Its owner is told to stop.`))return;body={status:st}}
+  if(t.dataset.dropcwd){if(!await ask(`Hand task ${task.id} to ${t.textContent}? ${task.owner} is told to stop.`))return;body={owner:t.dataset.dropcwd}}
+  else{const st=dropAction(task,t.dataset.col);if(st==='cancelled'&&!await ask(`Cancel task ${task.id}? Its owner is told to stop.`))return;body={status:st}}
   // expect: refused if the owner changed the task since the board was drawn, so its own update is never overridden.
-  const r=await post('/api/tasks/'+encodeURIComponent(task.id),{...body,expect:task.status});if(r.error)alert(r.error);refresh(true)});
+  const r=await post('/api/tasks/'+encodeURIComponent(task.id),{...body,expect:task.status});if(r.error)tell(r.error);refresh(true)});
 function panelTasks(x){
   const mine=allTasks.filter(t=>t.owner_cwd&&t.owner_cwd===x.cwd),asked=allTasks.filter(t=>t.requester?.id===x.id||(x.cwd&&t.requester?.cwd===x.cwd));
   const sec=(title,list,none)=>`<div class="k small">${title}</div>${list.length?byLive(list).map(t=>taskRow(t,false)).join(''):`<div class="small mut">${none}</div>`}`;
@@ -928,12 +942,12 @@ function panelTasks(x){
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-ptab],[data-tact]');if(!b)return;
   if(b.dataset.ptab){panelTab=b.dataset.ptab;editing=false;refresh(true);return}
   const id=b.closest('[data-task]').dataset.task,was=allTasks.find(t=>t.id===id)?.status;
-  if(b.dataset.tact==='cancelled'&&!confirm(`Cancel task ${id}? Its owner is told to stop.`))return;
-  const r=await post('/api/tasks/'+encodeURIComponent(id),{status:b.dataset.tact,expect:was});if(r.error)alert(r.error);refresh(true)});
+  if(b.dataset.tact==='cancelled'&&!await ask(`Cancel task ${id}? Its owner is told to stop.`))return;
+  const r=await post('/api/tasks/'+encodeURIComponent(id),{status:b.dataset.tact,expect:was});if(r.error)tell(r.error);refresh(true)});
 document.addEventListener('change',async e=>{const t=e.target;
   if(['tstatus','towner','treq','tspace','tgroup'].includes(t.id)){if(t.id==='tgroup')keep('tgroup',t.value);renderTasks();return}
   if(t.dataset.treassign!==undefined&&t.value){const id=t.closest('[data-task]').dataset.task;
-    const r=await post('/api/tasks/'+encodeURIComponent(id),{owner:t.value});if(r.error)alert(r.error);t.blur();refresh(true)}});
+    const r=await post('/api/tasks/'+encodeURIComponent(id),{owner:t.value});if(r.error)tell(r.error);t.blur();refresh(true)}});
 // You, to an agent or a space's lead, from the panel's message box or the Tasks page's New task form.
 // The panel's note outlives the redraw a send causes.
 let sentNote={};
@@ -969,7 +983,7 @@ document.addEventListener('submit',async e=>{if(e.target.id!=='agentform')return
   if(has('role')&&v('role')!==d.role)patch.role=v('role');
   msg.className='small';msg.textContent='Saving…';
   if(Object.keys(patch).length){const r=await post(`/api/sessions/${encodeURIComponent(id)}/config`,patch);if(r.error)errs.push(r.error);else cfg.sessions=r.sessions}
-  if(has('space')&&v('space')!==d.space&&!sureToMove(d,v('space')||'its folder\'s space')){msg.textContent='Not saved';return}
+  if(has('space')&&v('space')!==d.space&&!await sureToMove(d,v('space')||'its folder\'s space')){msg.textContent='Not saved';return}
   if(has('space')&&v('space')!==d.space){const r=await post('/api/folders/space',{cwd:d.cwd,id,space:v('space')});if(r.error)errs.push(r.error)}
   const also=has('also')?v('also').split(',').map(t=>t.trim()).filter(Boolean):[];
   if(has('also')&&also.join(', ')!==d.also){const r=await post('/api/members',{cwd:d.cwd,id,spaces:also});if(r.error)errs.push(r.error)}
@@ -980,8 +994,8 @@ document.addEventListener('click',async e=>{const t=e.target.closest('button');i
   if(t.dataset.close!==undefined){sel='';editing=false;refresh(true);return}
   const act=t.dataset.act;if(!act)return;
   if(act==='logout'){await post('/api/web/logout');location.reload()}
-  if(act==='logout-all'&&confirm('Sign out every browser, including this one?')){await post('/api/web/logout',{all:true});location.reload()}
-  if(act==='rotate'&&confirm('Rotate the key? Every browser is signed out; agents pick up the new key by themselves.')){await post('/api/key/rotate');location.reload()}
+  if(act==='logout-all'&&await ask('Sign out every browser, including this one?')){await post('/api/web/logout',{all:true});location.reload()}
+  if(act==='rotate'&&await ask('Rotate the key? Every browser is signed out; agents pick up the new key by themselves.')){await post('/api/key/rotate');location.reload()}
   if(act==='restart'){await post('/api/restart');$('#ctlmsg').textContent='Restarting…';setTimeout(()=>location.reload(),2500)}});
 // -- Discord: the setup walkthrough and the channel-to-agent mapping --------
 let dState=null,dGuilds=null,dDraft=null,dBusy=false;
@@ -1090,15 +1104,15 @@ document.addEventListener('change',e=>{const t=e.target;if(!dDraft)return;
   if(t.dataset.dact==='enabled')api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({enabled:t.checked})}).then(()=>loadDiscord())});
 document.addEventListener('click',async e=>{const t=e.target.closest('button');if(!t||!dDraft&&!t.dataset.dact)return;
   if(t.dataset.dremove!==undefined){const r=dDraft.routes[+t.dataset.dremove];
-    if(r.channel_id&&(r.agents||[]).length&&!confirm(`Stop using ${chanName(r.channel_id)}? Its agents no longer hear or post there.`))return;
+    if(r.channel_id&&(r.agents||[]).length&&!await ask(`Stop using ${chanName(r.channel_id)}? Its agents no longer hear or post there.`))return;
     dDraft.routes.splice(+t.dataset.dremove,1);saveMap()}
   if(t.dataset.dunagent){const [i,j]=t.dataset.dunagent.split(':').map(Number);dDraft.routes[i].agents.splice(j,1);saveMap()}
   if(t.dataset.dflag){const [i,j,f]=t.dataset.dflag.split(':');const a=dDraft.routes[+i].agents[+j];a[f]=!a[f];saveMap()}
-  if(t.dataset.dtest){const r=await post('/api/discord/test',{channel_id:t.dataset.dtest});t.textContent=r.error?'Failed':'Sent ✓';if(r.error)alert(r.error)}
+  if(t.dataset.dtest){const r=await post('/api/discord/test',{channel_id:t.dataset.dtest});t.textContent=r.error?'Failed':'Sent ✓';if(r.error)tell(r.error)}
   const a=t.dataset.dact;if(!a)return;
   if(a==='addroute'){dDraft.routes.push({channel_id:'',agents:[]});renderDiscord()}
   if(a==='refresh'){const r=await api('/api/discord/channels?fresh=1');dGuilds=r.guilds||[];renderDiscord()}
-  if(a==='forget'&&confirm('Disconnect the Discord bot? The channel mapping is kept.')){await api('/api/discord',{method:'DELETE'});dGuilds=null;await loadDiscord()}
+  if(a==='forget'&&await ask('Disconnect the Discord bot? The channel mapping is kept.')){await api('/api/discord',{method:'DELETE'});dGuilds=null;await loadDiscord()}
   if(a==='reconnect'){await post('/api/discord/reconnect');setTimeout(()=>loadDiscord(),2000)}
   if(a==='check')await loadDiscord(true);
 });
@@ -1142,7 +1156,7 @@ document.addEventListener('change',e=>{const t=e.target;
 document.addEventListener('click',async e=>{const t=e.target.closest('button');if(!t)return;
   if(t.dataset.tallow){await api('/api/telegram',{method:'PUT',headers:J,body:JSON.stringify({allow:t.dataset.tallow})});loadTelegram()}
   if(t.dataset.tdismiss){await api('/api/telegram',{method:'PUT',headers:J,body:JSON.stringify({dismiss:t.dataset.tdismiss})});loadTelegram()}
-  if(t.dataset.tact==='forget'&&confirm('Disconnect the Telegram bot? The chat mapping and allowed people are kept.')){await api('/api/telegram',{method:'DELETE'});loadTelegram()}});
+  if(t.dataset.tact==='forget'&&await ask('Disconnect the Telegram bot? The chat mapping and allowed people are kept.')){await api('/api/telegram',{method:'DELETE'});loadTelegram()}});
 // -- Slack: the app's two tokens, who may talk to it, and the conversations it is in --------------------
 let sState=null,sBusy=false,sShown=null;
 async function loadSlack(){const before=JSON.stringify(sState?.chats||{});sState=await api('/api/slack');renderSlack();
@@ -1176,7 +1190,7 @@ document.addEventListener('change',e=>{const t=e.target;
 document.addEventListener('click',async e=>{const t=e.target.closest('button');if(!t)return;
   if(t.dataset.sallow){await api('/api/slack',{method:'PUT',headers:J,body:JSON.stringify({allow:t.dataset.sallow})});loadSlack()}
   if(t.dataset.sdismiss){await api('/api/slack',{method:'PUT',headers:J,body:JSON.stringify({dismiss:t.dataset.sdismiss})});loadSlack()}
-  if(t.dataset.sact==='forget'&&confirm('Disconnect the Slack app? The channel mapping and allowed people are kept.')){await api('/api/slack',{method:'DELETE'});loadSlack()}});
+  if(t.dataset.sact==='forget'&&await ask('Disconnect the Slack app? The channel mapping and allowed people are kept.')){await api('/api/slack',{method:'DELETE'});loadSlack()}});
 // Someone messaging the bot, or a chat it joins, shows up without a reload.
 setInterval(()=>{if(location.hash==='#channels'&&tState?.configured&&!document.hidden)loadTelegram()},4000);
 setInterval(()=>{if(location.hash==='#channels'&&!document.hidden&&(sState?.configured||!sState))loadSlack()},4000);
@@ -1204,11 +1218,11 @@ document.addEventListener('submit',async e=>{if(e.target.id!=='ruleform')return;
 document.addEventListener('click',async e=>{const id=ruleOf(e);if(!id)return;const b=e.target.closest('button');if(!b)return;let r;
   if(b.dataset.ruleok)r=await post('/api/inbox',{kind:'approval',id,action:b.dataset.ruleok});
   else if(b.dataset.ruleset)r=await post('/api/rules/'+encodeURIComponent(id),{status:b.dataset.ruleset});
-  else if(b.dataset.ruledel!==undefined){if(!confirm('Delete this rule? Agents stop getting it from their next prompt.'))return;r=await post('/api/rules/'+encodeURIComponent(id),{delete:true})}
-  if(r&&r.error)alert(r.error);b.blur();loadRules();refresh(true)});
+  else if(b.dataset.ruledel!==undefined){if(!await ask('Delete this rule? Agents stop getting it from their next prompt.'))return;r=await post('/api/rules/'+encodeURIComponent(id),{delete:true})}
+  if(r&&r.error)tell(r.error);b.blur();loadRules();refresh(true)});
 document.addEventListener('change',async e=>{const id=ruleOf(e);if(!id)return;const t=e.target;
   const r=t.dataset.ruletext!==undefined?await post('/api/rules/'+encodeURIComponent(id),{text:t.value}):t.dataset.rulespace!==undefined?await post('/api/rules/'+encodeURIComponent(id),{space:t.value}):null;
-  if(r&&r.error)alert(r.error);t.blur();loadRules()});
+  if(r&&r.error)tell(r.error);t.blur();loadRules()});
 window.addEventListener('hashchange',()=>{if(location.hash==='#rules')loadRules()});
 // On the Rules page every 5s; elsewhere every minute, for the count in the nav.
 let rulesAt=0;loadRules().catch(()=>{});
