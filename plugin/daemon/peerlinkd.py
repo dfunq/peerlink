@@ -29,7 +29,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.27"
+VERSION = "0.9.28"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -3588,10 +3588,12 @@ def save_spawns():
 
 
 def spawn_told(sp, text):
-    """Tell the agent that asked how its request went. Called with the lock held."""
+    """Tell the agent that asked how its request went: that agent while it runs, not whichever goes by its folder's
+    name (another agent sharing the folder never asked). Called with the lock held."""
     req = sp["requester"]
     if req.get("cwd"):
-        task_message({"id": sp["id"]}, req["cwd"], text)
+        asker = sessions.get(req.get("id") or "")
+        task_message({"id": sp["id"]}, req["cwd"], text, prefer=asker if asker and is_live(asker) else None)
 
 
 def request_spawn(body):
@@ -3731,7 +3733,9 @@ def decide_spawn(sid, approve, via):
                 msg["to"], msg["to_name"] = f"spawn:{sid}", f"the agent starting for {sid}"
                 inboxes.setdefault(msg["to"], []).append(msg)
                 record(msg)
-                spawn_told(sp, f"Your user approved {sid}: an agent is starting in {sp['dir']} {how}, and your first prompt is waiting for it ({msg['id']}).")
+                approved = (f"{sid} was approved automatically (your user lets this folder's agents start agents without asking)"
+                            if via == "auto-approve" else f"Your user approved {sid}")
+                spawn_told(sp, f"{approved}: an agent is starting in {sp['dir']} {how}, and your first prompt is waiting for it ({msg['id']}).")
             save_spawns()
     else:
         with lock:

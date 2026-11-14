@@ -220,6 +220,9 @@ class LocalNameTest(unittest.TestCase):
 
 
 class FolderNameTest(unittest.TestCase):
+    def setUp(self):
+        peerlinkd.load_config()
+
     def test_renaming_one_of_several_agents_in_a_folder_leaves_the_folder_and_its_channel_with_the_lead(self):
         now = peerlinkd.time.time()
         keep = dict(peerlinkd.config.get("folder_names") or {})
@@ -243,3 +246,34 @@ class FolderNameTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class SpawnToldTest(unittest.TestCase):
+    def setUp(self):
+        peerlinkd.load_config()
+
+    def test_word_of_a_started_agent_goes_to_the_agent_that_asked_not_the_one_going_by_its_folder(self):
+        folder = tempfile.mkdtemp(prefix="peerlink-shared-")
+        now = peerlinkd.time.time()
+        keep = (dict(peerlinkd.config.get("folder_names") or {}), list(peerlinkd.config.get("auto_approve_folders") or []),
+                peerlinkd.launch, peerlinkd.save_spawns)
+        lead = {"id": "s-lead", "name": "repo", "cwd": folder, "last_seen": now - 5}
+        worker = {"id": "s-work", "name": "repo-worker", "cwd": folder, "last_seen": now}
+        peerlinkd.sessions.update({"s-lead": lead, "s-work": worker})
+        peerlinkd.config["folder_names"] = {**keep[0], folder: os.path.basename(folder)}
+        lead["name"] = os.path.basename(folder)
+        peerlinkd.config["auto_approve_folders"] = [folder]
+        peerlinkd.launch = lambda sp: ("in tmux (tmux attach -t x)", None)
+        peerlinkd.save_spawns = lambda: None
+        peerlinkd.inboxes.clear()
+        try:
+            status, out = peerlinkd.request_spawn({"by": "s-work", "dir": folder, "purpose": "click-through", "first_prompt": "Run it."})
+            self.assertEqual((status, out["status"]), (200, "started"))
+            told = [m["text"] for m in peerlinkd.inboxes.get("s-work", [])]
+            self.assertTrue(any("was approved automatically" in t and "your first prompt is waiting" in t for t in told), told)
+            self.assertFalse(any("approved" in m["text"] for m in peerlinkd.inboxes.get("s-lead", [])))
+        finally:
+            peerlinkd.sessions.pop("s-lead", None)
+            peerlinkd.sessions.pop("s-work", None)
+            peerlinkd.config["folder_names"], peerlinkd.config["auto_approve_folders"] = keep[0], keep[1]
+            peerlinkd.launch, peerlinkd.save_spawns = keep[2], keep[3]
+            peerlinkd.inboxes.clear()
