@@ -19,6 +19,7 @@ import json
 import secrets
 import shutil
 import subprocess
+import tempfile
 import os
 import signal
 import socket
@@ -30,7 +31,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.37"
+VERSION = "0.9.38"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -224,23 +225,88 @@ web_sessions = {}  # cookie -> expiry; kept on disk, so a daemon restart doesn't
 WEB_SESSIONS_PATH = os.path.join(HOME, "web_sessions.json")
 
 
+def write_file(path, text, backup=True, mode=0o600):
+    """Write a state file so a crash at any point leaves the old file or the new one, whole, never a mix or nothing: a
+    tmp file of its own (two writers never share one), fsynced, then renamed over it, and the folder fsynced. With
+    backup, the file it replaces is kept as path.bak first, what read_json falls back to if this one is ever damaged."""
+    d = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=os.path.basename(path) + ".", suffix=".tmp")
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        if backup and os.path.exists(path):
+            try:
+                os.link(path, tmp + ".bak")  # the old file under a second name, then renamed into place: no gap
+                os.replace(tmp + ".bak", path + ".bak")
+            except OSError:
+                pass
+        os.replace(tmp, path)
+    except BaseException:
+        for t in (tmp, tmp + ".bak"):
+            try:
+                os.unlink(t)
+            except OSError:
+                pass
+        raise
+    try:
+        dfd = os.open(d, os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    except OSError:
+        pass
+
+
+def write_json(path, data, indent=None, backup=True):
+    write_file(path, json.dumps(data, indent=indent), backup)
+
+
+def read_json(path, default=None):
+    """A state file's JSON, or `default` when there is none. A damaged one is never just replaced with defaults: it's
+    kept as path.corrupt-<time>, said loudly in the log, and the last good copy (path.bak) is used if it reads."""
+    try:
+        with open(path) as f:
+            text = f.read()
+    except FileNotFoundError:
+        return default
+    except OSError as err:
+        log("STATE", path, "can't be read:", err)
+        return default
+    try:
+        return json.loads(text)
+    except ValueError as err:
+        kept = f"{path}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
+        try:
+            shutil.copy2(path, kept)
+        except OSError:
+            kept = "(couldn't keep a copy)"
+        try:
+            with open(path + ".bak") as f:
+                data = json.load(f)
+            log("STATE", path, "is damaged (", err, "): kept it as", kept, "and loaded the last good copy,", path + ".bak")
+            return data
+        except (OSError, ValueError):
+            log("STATE", path, "is damaged (", err, ") and has no good backup: kept it as", kept, "and started from defaults")
+            return default
+
+
 def save_web_sessions():
     now = time.time()
     live = {c: e for c, e in web_sessions.items() if e > now}
     try:
-        fd = os.open(WEB_SESSIONS_PATH + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            json.dump(live, f)
-        os.replace(WEB_SESSIONS_PATH + ".tmp", WEB_SESSIONS_PATH)
+        write_json(WEB_SESSIONS_PATH, live, backup=False)  # sign-ins you ended stay ended: no copy kept
     except OSError:
         pass
 
 
 def load_web_sessions():
     try:
-        with open(WEB_SESSIONS_PATH) as f:
-            web_sessions.update({c: float(e) for c, e in json.load(f).items() if float(e) > time.time()})
-    except (OSError, ValueError, AttributeError):
+        web_sessions.update({c: float(e) for c, e in (read_json(WEB_SESSIONS_PATH) or {}).items() if float(e) > time.time()})
+    except (ValueError, TypeError, AttributeError):
         pass
 
 
@@ -254,10 +320,7 @@ def read_key():
 
 def write_key():
     os.makedirs(HOME, exist_ok=True)
-    fd = os.open(KEY_PATH + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(secrets.token_hex(32))
-    os.replace(KEY_PATH + ".tmp", KEY_PATH)
+    write_file(KEY_PATH, secrets.token_hex(32), backup=False)  # a rotated key is gone, not kept as a backup
     return read_key()
 
 
@@ -368,11 +431,9 @@ def redeem(token):
 
 
 def load_dirs():
-    try:
-        with open(DIRS_PATH) as f:
-            dir_summaries.update(json.load(f))
-    except (OSError, ValueError):
-        pass
+    data = read_json(DIRS_PATH, {})
+    if isinstance(data, dict):
+        dir_summaries.update(data)
 
 
 def remember_dir(rec):
@@ -383,9 +444,7 @@ def remember_dir(rec):
     for cwd in [c for c, d in dir_summaries.items() if d["ts"] < cutoff]:
         dir_summaries.pop(cwd)
     try:
-        with open(DIRS_PATH + ".tmp", "w") as f:
-            json.dump(dir_summaries, f)
-        os.replace(DIRS_PATH + ".tmp", DIRS_PATH)
+        write_json(DIRS_PATH, dir_summaries)
     except OSError:
         pass
 
@@ -434,13 +493,9 @@ def config_value(name, value):
 
 def load_config():
     os.makedirs(HOME, exist_ok=True)
-    data = {}
-    if os.path.exists(CONFIG_PATH):
-        try:
-            with open(CONFIG_PATH) as f:
-                data = json.load(f)
-        except (OSError, ValueError) as err:
-            log("config unreadable, using defaults:", err)
+    data = read_json(CONFIG_PATH, {})
+    if not isinstance(data, dict):
+        data = {}
     merged = {**DEFAULT_CONFIG, **data}
     for k in DEFAULT_CONFIG:
         if config_value(k, merged[k])[1]:  # a bad value saved by an older daemon: back to the default
@@ -455,10 +510,8 @@ def load_config():
 
 
 def save_config():
-    tmp = f"{CONFIG_PATH}.{os.getpid()}.tmp"  # daemons starting together each write their own
-    with open(tmp, "w") as f:
-        json.dump(config, f, indent=2)
-    os.replace(tmp, CONFIG_PATH)
+    with lock:
+        write_json(CONFIG_PATH, config, indent=2)
 
 
 def session_cfg(sid):
@@ -1207,11 +1260,9 @@ agents_bot = [None]
 
 
 def load_discord():
-    try:
-        with open(DISCORD_PATH) as f:
-            discord.update(json.load(f))
-    except (OSError, ValueError):
-        pass
+    data = read_json(DISCORD_PATH, {})
+    if isinstance(data, dict):
+        discord.update(data)
     discord["routes"] = [clean_route(r) for r in discord.get("routes", []) if r.get("channel_id")]
     for key, defaults in (("telegram", TELEGRAM), ("slack", SLACK), ("agents", AGENTS)):
         own = discord.setdefault(key, {})
@@ -1260,10 +1311,8 @@ def entry_label(a):
 
 
 def save_discord():
-    fd = os.open(DISCORD_PATH + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        json.dump(discord, f, indent=2)
-    os.replace(DISCORD_PATH + ".tmp", DISCORD_PATH)
+    with lock:  # no other thread changes it mid-dump
+        write_json(DISCORD_PATH, discord, indent=2)
 
 
 def start_discord():
@@ -2880,12 +2929,11 @@ AGENT_KEPT_S = 60 * 86400
 
 def load_agents():
     try:
-        with open(AGENTS_PATH) as f:
-            data = json.load(f)
+        data = read_json(AGENTS_PATH, {})
         for a in data.get("agents", []):
             agents[a["id"]] = a
         agent_of.update({k: v for k, v in data.get("sessions", {}).items() if v in agents})
-    except (OSError, ValueError, KeyError, AttributeError):
+    except (KeyError, TypeError, AttributeError):
         pass
 
 
@@ -2893,9 +2941,7 @@ def save_agents():
     for gone in list(agent_of)[:-AGENT_SESSIONS_KEPT]:
         agent_of.pop(gone)
     try:
-        with open(AGENTS_PATH + ".tmp", "w") as f:
-            json.dump({"agents": list(agents.values()), "sessions": agent_of}, f)
-        os.replace(AGENTS_PATH + ".tmp", AGENTS_PATH)
+        write_json(AGENTS_PATH, {"agents": list(agents.values()), "sessions": agent_of})
     except OSError as err:
         log("could not save agents:", err)
 
@@ -3235,20 +3281,13 @@ TASK_CLOSED = ("done", "failed", "cancelled")
 
 
 def load_tasks():
-    try:
-        with open(TASKS_PATH) as f:
-            saved = json.load(f)
-    except (OSError, ValueError):
-        return
-    for t in saved:
+    for t in read_json(TASKS_PATH, []) or []:
         tasks[t["id"]] = t
         next_task[0] = max(next_task[0], int(t["id"][1:]) + 1)
 
 
 def save_tasks():
-    with open(TASKS_PATH + ".tmp", "w") as f:
-        json.dump(list(tasks.values()), f, indent=1)
-    os.replace(TASKS_PATH + ".tmp", TASKS_PATH)
+    write_json(TASKS_PATH, list(tasks.values()), indent=1)
 
 
 def new_task(msg, requester, parent_task=""):
@@ -3605,17 +3644,14 @@ RULE_MAX = 600
 
 def load_rules():
     try:
-        with open(RULES_PATH) as f:
-            for x in json.load(f):
-                rules[x["id"]] = x
-    except (OSError, ValueError, KeyError):
+        for x in read_json(RULES_PATH, []) or []:
+            rules[x["id"]] = x
+    except (KeyError, TypeError):
         pass
 
 
 def save_rules():
-    with open(RULES_PATH + ".tmp", "w") as f:
-        json.dump(list(rules.values()), f, indent=1)
-    os.replace(RULES_PATH + ".tmp", RULES_PATH)
+    write_json(RULES_PATH, list(rules.values()), indent=1)
 
 
 def rules_for(rec):
@@ -3788,17 +3824,14 @@ SPAWN_TTL_S = 24 * 3600
 
 def load_spawns():
     try:
-        with open(SPAWNS_PATH) as f:
-            for x in json.load(f):
-                spawns[x["id"]] = x
-    except (OSError, ValueError, KeyError):
+        for x in read_json(SPAWNS_PATH, []) or []:
+            spawns[x["id"]] = x
+    except (KeyError, TypeError):
         pass
 
 
 def save_spawns():
-    with open(SPAWNS_PATH + ".tmp", "w") as f:
-        json.dump(list(spawns.values()), f, indent=1)
-    os.replace(SPAWNS_PATH + ".tmp", SPAWNS_PATH)
+    write_json(SPAWNS_PATH, list(spawns.values()), indent=1)
 
 
 def spawn_told(sp, text):
@@ -4035,17 +4068,14 @@ def when_text(c):
 
 def load_schedules():
     try:
-        with open(SCHEDULES_PATH) as f:
-            for x in json.load(f):
-                schedules[x["id"]] = x
-    except (OSError, ValueError, KeyError):
+        for x in read_json(SCHEDULES_PATH, []) or []:
+            schedules[x["id"]] = x
+    except (KeyError, TypeError):
         pass
 
 
 def save_schedules():
-    with open(SCHEDULES_PATH + ".tmp", "w") as f:
-        json.dump(list(schedules.values()), f, indent=1)
-    os.replace(SCHEDULES_PATH + ".tmp", SCHEDULES_PATH)
+    write_json(SCHEDULES_PATH, list(schedules.values()), indent=1)
 
 
 def schedule_told(c, text):
@@ -4564,10 +4594,12 @@ def too_big(path, limit=LOG_MAX_BYTES):
 
 def rewrite_log(path, entries):
     """Keep `path` as path.1 and start it again with `entries`, one per line. Called with the lock held."""
-    with open(path + ".tmp", "w") as f:
-        f.writelines(json.dumps(e) + "\n" for e in entries)
-    os.replace(path, path + ".1")
-    os.replace(path + ".tmp", path)
+    try:  # the old log as path.1, while path stays whole until the new one replaces it
+        os.link(path, path + ".1.tmp")
+        os.replace(path + ".1.tmp", path + ".1")
+    except OSError:
+        shutil.copy2(path, path + ".1")
+    write_file(path, "".join(json.dumps(e) + "\n" for e in entries), backup=False)
 
 
 def ended_and_old(items, live, now):
@@ -4737,32 +4769,35 @@ class Handler(BaseHTTPRequestHandler):
                     info = discordlink.inspect_token(b["token"])
                 except discordlink.DiscordError as err:
                     return self.reply(400, {"error": str(err)})
-                discord.update({"token": b["token"].strip(), "app_id": info["app_id"], "user": info["user"], "enabled": True})
-            if "enabled" in b:
-                discord["enabled"] = bool(b["enabled"])
-            if "routes" in b:
-                discord["routes"] = [clean_route(r) for r in b["routes"] if r.get("channel_id")]
-            if "dm" in b:
-                discord["dm"] = b["dm"] or ""
-            for k in ("buttons", "files_out", "files_in"):
-                if k in b:
-                    discord[k] = bool(b[k])
-            if "max_file_mb" in b:
-                discord["max_file_mb"] = max(1, min(500, float(b["max_file_mb"] or 10)))
-            for k in ("trusted_bots", "allowed_users"):
-                if k in b:
-                    raw = b[k]
-                    ids = re.findall(r"\d{15,22}", raw if isinstance(raw, str) else " ".join(map(str, raw or [])))
-                    discord[k] = list(dict.fromkeys(ids))
-                    if bot:
-                        setattr(bot, k, set(discord[k]))
-            save_discord()
+            with lock:  # a PUT and a DELETE at once each see the other's change, and neither is lost
+                if "token" in b:
+                    discord.update({"token": b["token"].strip(), "app_id": info["app_id"], "user": info["user"], "enabled": True})
+                if "enabled" in b:
+                    discord["enabled"] = bool(b["enabled"])
+                if "routes" in b:
+                    discord["routes"] = [clean_route(r) for r in b["routes"] if r.get("channel_id")]
+                if "dm" in b:
+                    discord["dm"] = b["dm"] or ""
+                for k in ("buttons", "files_out", "files_in"):
+                    if k in b:
+                        discord[k] = bool(b[k])
+                if "max_file_mb" in b:
+                    discord["max_file_mb"] = max(1, min(500, float(b["max_file_mb"] or 10)))
+                for k in ("trusted_bots", "allowed_users"):
+                    if k in b:
+                        raw = b[k]
+                        ids = re.findall(r"\d{15,22}", raw if isinstance(raw, str) else " ".join(map(str, raw or [])))
+                        discord[k] = list(dict.fromkeys(ids))
+                        if bot:
+                            setattr(bot, k, set(discord[k]))
+                save_discord()
             if "token" in b or "enabled" in b:
                 start_discord()
             return self.reply(200, {"ok": True})
         if rest == [] and method == "DELETE":
-            discord.update({"token": "", "app_id": "", "user": ""})
-            save_discord()
+            with lock:
+                discord.update({"token": "", "app_id": "", "user": ""})
+                save_discord()
             start_discord()
             return self.reply(200, {"ok": True})
         if rest == ["channels"] and method == "GET":
@@ -5604,7 +5639,7 @@ def serve():
     # The port first: a daemon that loses it to another (an older one an agent started mid-upgrade) must touch
     # nothing on its way out, not the launcher, the chat bots or the Agents channel's port.
     try:
-        server = ThreadingHTTPServer((config["listen_host"], PORT), Handler)
+        server = agentslink.Server((config["listen_host"], PORT), Handler)  # a listen backlog of 64, not 5
     except OSError as err:
         log("another daemon holds port", PORT, "-", err)
         sys.exit(0)

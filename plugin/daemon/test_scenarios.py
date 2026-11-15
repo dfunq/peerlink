@@ -1,7 +1,9 @@
 """Whole scenarios on the rig (rig.py): the real daemon in its own process, several fake agents, a /clear and a
 restart. Run: python3 -m unittest discover -s plugin/daemon"""
 import os
+import json
 import sys
+import threading
 import time
 import unittest
 
@@ -31,6 +33,37 @@ class ScenarioTest(unittest.TestCase):
         self.assertEqual([(m["id"], m["text"]) for m in again], [(handed[0]["id"], "Deploy is blocked on you.")])
         rig.crash()  # acked this time: nothing comes back
         self.assertEqual(core.poll(), [])
+
+    def test_discord_settings_changed_at_once_lose_nothing(self):
+        rig = self.rig()
+        rig.signed_in()
+        errors = []
+
+        def change(i):
+            try:
+                if i % 5 == 4:
+                    code, out = rig.call("DELETE", "/api/discord", user=True)
+                else:
+                    field = ("allowed_users", "trusted_bots")[i % 2]
+                    code, out = rig.call("PUT", "/api/discord", {field: [str(10 ** 17 + i)], "max_file_mb": 1 + i}, user=True)
+                if code != 200:
+                    errors.append((i, code, out))
+            except Exception as e:  # a reset or a 500 from a write racing another
+                errors.append((i, repr(e)))
+        threads = [threading.Thread(target=change, args=(i,)) for i in range(40)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(15)
+        self.assertEqual(errors, [])
+        rig.user("PUT", "/api/discord", {"allowed_users": ["123456789012345678"], "trusted_bots": ["223456789012345678"]})
+        with open(os.path.join(rig.home, "discord.json")) as f:
+            saved = json.load(f)  # whole JSON, whatever the order the writes landed in
+        self.assertEqual((saved["allowed_users"], saved["trusted_bots"]), (["123456789012345678"], ["223456789012345678"]))
+        self.assertEqual([n for n in os.listdir(rig.home) if n.endswith(".tmp")], [])
+        rig.crash()  # and it reads back after a kill -9
+        got = rig.user("GET", "/api/discord")
+        self.assertEqual((got["allowed_users"], got["trusted_bots"]), (["123456789012345678"], ["223456789012345678"]))
 
     def team(self, rig):
         """A lead at the top, a lead of a space inside it, and that space's worker: the chain work is relayed along."""
