@@ -695,7 +695,11 @@ async function refresh(force,snap){
   const picked=p.peers.find(x=>x.id===sel);
   const panel=picked?agentPanel(picked,p.peers.filter(y=>y.id!==picked.id&&y.cwd===picked.cwd&&y.space===picked.space)):'';
   // Never redraw the panel under someone editing it.
-  if(panel!==lastPanel&&!(editing&&picked&&$('#agentform')?.dataset.id===picked.id)){$('#detail').innerHTML=panel;lastPanel=panel}
+  if(panel!==lastPanel&&!(editing&&picked&&$('#agentform')?.dataset.id===picked.id)){
+    // A section you opened stays open when the panel is drawn again (a busy agent's record changes every few seconds).
+    const opened=[...document.querySelectorAll('#detail details[open] > summary')].map(s=>s.textContent);
+    $('#detail').innerHTML=panel;lastPanel=panel;
+    for(const d of document.querySelectorAll('#detail details'))if(opened.includes(d.querySelector(':scope > summary')?.textContent))d.open=true}
   // The open panel takes room beside the chart rather than covering part of it.
   document.body.classList.toggle('drawer',!!picked);
   // The default space is always listed: it's where every agent with no space set lands.
