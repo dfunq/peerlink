@@ -190,6 +190,7 @@ class AgentsChannelTest(unittest.TestCase):
         with self.assertRaises(OSError):
             self.rpc(GROK, "tools/list")
         self.assertEqual(peerlinkd.agents_api([], "PUT", {"enabled": True})[0], 200)
+        self.assertEqual(peerlinkd.agents_view()["state"], "online")
         self.assertEqual(self.rpc(GROK, "tools/list")[0], 200)
 
 
