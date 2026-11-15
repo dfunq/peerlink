@@ -376,7 +376,7 @@ peerlink rotate-key | logout
 - **Agents** register on start and send a heartbeat every `poll_interval_ms`. The heartbeat reply carries the agent's inbox and its current config, so changes made in the UI apply within a few seconds without a restart.
 - **Delivery.** If an agent is mid-turn, the message is appended to the running turn. If the agent is idle, the message starts a new turn (set by `auto_wake_idle`). Messages are logged to `~/.peerlink/messages.jsonl`, and undelivered ones survive a daemon restart.
 - **Loop safety.** Replies carry a hop count (`max_hops`; the answer to a question asked at the limit still gets through, as the last reply), each agent has a rate limit, and you can mute an agent.
-- **Several machines (optional).** List other daemons under `remotes`, set `listen_host` to `0.0.0.0`, and set a shared `token`. Agents on those machines then show up as `name@host`.
+- **Several machines (optional).** List other daemons under `remotes`, set `listen_host` to `0.0.0.0` (or reach each other through a tunnel, which arrives as localhost), and set a shared `token`. Agents on those machines then show up as `name@host`. A reply to one of them needs only `reply_to`, and threads onto the message it answers on both sides; a send that fails to connect is tried up to 3 times, and the other daemon keeps one copy.
 
 ## Install
 
@@ -433,7 +433,7 @@ You can change these in the web UI, with `peerlink config <name> <value>`, or in
 | `local_name` | peerlink.local | The web UI's name on this machine: `http://peerlink.local:7899`. The daemon publishes it over Bonjour (`dns-sd` on macOS, `avahi-publish` on Linux), pointing at 127.0.0.1, with no sudo or hosts file. `peerlink.localhost:7899` also works in Chrome, Edge and Firefox on any OS. Sign-in links use the name once it resolves. Empty turns it off. A restart applies it |
 | `remotes`, `listen_host`, `token` | | Settings for linking daemons across machines |
 
-`PEERLINK_PORT` and `PEERLINK_HOME` override the port and the data directory.
+`PEERLINK_PORT` and `PEERLINK_HOME` override the port and the data directory, and `PEERLINK_HOSTNAME` the host name other machines know this one by.
 
 ## An MCP endpoint for other clients
 

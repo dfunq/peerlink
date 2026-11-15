@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.9.39'
+const DAEMON_VERSION = '0.9.40'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -526,7 +526,31 @@ async function chase($: EngineInterface) {
   if (again.length) pending = [...again.map(m => ({ ...m, unanswered: true, wake: true })), ...pending]
 }
 
+// One delivery at a time. A heartbeat, the wake timer and a turn ending can all ask at once, and two runs past an
+// await would hand the session the same batch twice; one asked for meanwhile runs once the current one is done.
+let delivering = false
+let deliverAgain = false
 async function deliver($: EngineInterface) {
+  if (delivering) {
+    deliverAgain = true
+    return
+  }
+  delivering = true
+  try {
+    await deliverOnce($)
+  } finally {
+    delivering = false
+  }
+  if (deliverAgain) {
+    deliverAgain = false
+    await deliver($)
+  }
+}
+
+async function deliverOnce($: EngineInterface) {
+  // The clock first: from here to handing the batch over nothing waits, so no turn can start, and nothing can
+  // change the queue, between deciding and doing.
+  const now = await $.clock.now()
   if (pending.length === 0 || !cfg) {
     wakeAt = undefined
     return
@@ -579,7 +603,6 @@ async function deliver($: EngineInterface) {
   const fromYou = batch.some(m => m.wake !== false && (m.from === 'user' || m.from.startsWith('discord:')))
   const delay = (cfg.wake_delay_s ?? 15) * 1000
   if (!fromYou && delay > 0) {
-    const now = await $.clock.now()
     wakeAt ??= now + delay
     if (now < wakeAt) {
       if (!wakeTimer) {
@@ -596,7 +619,7 @@ async function deliver($: EngineInterface) {
   pending = []
   busy = true
   $.ui.toast(`Message from ${batch.map(m => m.from_name).join(', ')}`)
-  submitted = { batch, at: await $.clock.now() }
+  submitted = { batch, at: now }
   const res: any = await $.prompt.submit({ text: framed(batch) }).catch(err => ({ drop: String(err) }))
   if (res && 'drop' in res) {
     // No turn started (a hook dropped it, or the session wasn't taking prompts): don't sit "busy" with the messages

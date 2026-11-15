@@ -34,6 +34,41 @@ class ScenarioTest(unittest.TestCase):
         rig.crash()  # acked this time: nothing comes back
         self.assertEqual(core.poll(), [])
 
+    def test_an_answer_from_another_machine_threads_onto_the_question(self):
+        """T-550 (6): alice on host a asks bob on host b; bob answers with reply_to alone, and the answer comes back
+        to alice as the answer to her question, which no longer reads as waiting."""
+        ports = [__import__("rig").free_port() for _ in range(2)]
+        a = Rig(config={"token": "t0k", "remotes": [f"http://127.0.0.1:{ports[1]}"]}, env={"PEERLINK_HOSTNAME": "hosta"})
+        b = Rig(config={"token": "t0k", "remotes": [f"http://127.0.0.1:{ports[0]}"]}, env={"PEERLINK_HOSTNAME": "hostb"})
+        for rig, port in zip((a, b), ports):
+            rig.port = port
+            rig.env["PEERLINK_PORT"] = str(port)
+            rig.__enter__()
+            self.addCleanup(rig.__exit__, None, None, None)
+        alice, bob = a.agent("alice"), b.agent("bob")
+        alice.poll(), bob.poll()
+        sent = alice.send(to="bob@hostb", text="Is the build green?", expects_reply=True)
+        self.assertEqual(sent["to"], "bob@hostb")
+        q = bob.expect("Is the build green?")
+        self.assertEqual(q["from_name"], "alice@hosta")
+        self.assertEqual(a.call("GET", f"/api/sessions/{alice.sid}/threads")[1]["waiting"][0]["with"], "bob@hostb")
+        bob.send(reply_to=q["id"], text="Green.")  # no "to": reply_to says who
+        ans = alice.expect("Green.")
+        mine = {m["id"]: m for m in a.call("GET", "/api/messages")[1]["messages"]}
+        self.assertEqual(mine[ans["reply_to"]]["text"], "Is the build green?")
+        self.assertEqual(mine[ans["reply_to"]]["status"], "forwarded")
+        self.assertEqual(a.call("GET", f"/api/sessions/{alice.sid}/threads")[1]["waiting"], [])
+        # And alice's answer to that threads onto bob's message on b.
+        alice.send(reply_to=ans["id"], text="Thanks.")
+        back = bob.expect("Thanks.")
+        theirs = {m["id"]: m for m in b.call("GET", "/api/messages")[1]["messages"]}
+        self.assertEqual(theirs[back["reply_to"]]["text"], "Green.")
+        # A send tried again after a timeout that did arrive stays one message.
+        fwd = {"from": "x@hosta", "from_name": "x@hosta", "from_host": "hosta", "to": bob.sid, "text": "once", "origin_id": "m999"}
+        first, again = b.call("POST", "/api/messages", fwd)[1], b.call("POST", "/api/messages", fwd)[1]
+        self.assertEqual(first["id"], again["id"])
+        self.assertEqual(sum(m["text"] == "once" for m in bob.poll()), 1)
+
     def test_discord_settings_changed_at_once_lose_nothing(self):
         rig = self.rig()
         rig.signed_in()
