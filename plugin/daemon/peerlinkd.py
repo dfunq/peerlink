@@ -31,7 +31,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.39"
+VERSION = "0.9.40"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -73,7 +73,7 @@ LINK_TTL_S = 60
 WEB_SESSION_TTL_S = 12 * 3600
 COOKIE = "peerlink_session"
 PORT = int(os.environ.get("PEERLINK_PORT", "7899"))
-HOSTNAME = socket.gethostname().split(".")[0]
+HOSTNAME = os.environ.get("PEERLINK_HOSTNAME") or socket.gethostname().split(".")[0]  # set: two daemons on one machine, in tests
 # You, the person these agents work for: an agent reaches you as "user" or by your login name.
 USER_NAME = os.environ.get("USER") or os.path.basename(os.path.expanduser("~")) or "you"
 USER_ALIASES = {"user", "you", USER_NAME.lower()}
@@ -1026,15 +1026,12 @@ def set_busy(rec, busy):
     rec["busy"] = busy
 
 
-remote_cache = [0.0, []]  # when, peers: other machines are asked at most every 5 s, however many browsers watch
 
 
 def snapshot():
     """Everything the web UI shows, in one answer."""
     now = time.time()
-    if config.get("remotes") and now - remote_cache[0] > 5:
-        remote_cache[:] = [now, remote_peers()]
-    peers = local_peers() + (remote_cache[1] if config.get("remotes") else [])
+    peers = local_peers() + remote_peers()
     with lock:
         status = {"version": VERSION, "pid": os.getpid(), "host": HOSTNAME, "port": PORT,
                   "sessions": sum(1 for r in sessions.values() if is_live(r, now)), "queued": sum(len(b) for b in inboxes.values()),
@@ -1084,23 +1081,50 @@ def remote_call(base, path, body=None, timeout=2):
         return json.loads(resp.read() or b"{}")
 
 
-def remote_peers():
+REMOTE_CACHE_S = 5
+remote_cache = {}  # base -> (when, peers): another machine is asked at most every 5 s, however many browsers and agents ask
+remote_lock = threading.Lock()
+
+
+def one_remote(base):
     found = []
-    for base in config.get("remotes", []):
-        try:
-            for p in remote_call(base, "/api/peers?local=1").get("peers", []):
-                if not isinstance(p, dict):
-                    continue
-                # The web UI puts these in its markup unescaped, as the numbers they should be.
-                for k in ("context", "sent_hour", "open_tasks", "summary_ts"):
-                    if p.get(k) is not None and not isinstance(p[k], (int, float)) or isinstance(p.get(k), bool):
-                        p[k] = None if k in ("context", "summary_ts") else 0
-                p["task_ids"] = [str(i)[:12] for i in p.get("task_ids") or [] if isinstance(i, str)][:20] if isinstance(p.get("task_ids"), list) else []
-                p["remote"] = base
-                found.append(p)
-        except Exception as err:  # a remote being down is normal
-            log("remote", base, "unreachable:", err)
+    try:
+        for p in remote_call(base, "/api/peers?local=1").get("peers", []):
+            if not isinstance(p, dict):
+                continue
+            # The web UI puts these in its markup unescaped, as the numbers they should be.
+            for k in ("context", "sent_hour", "open_tasks", "summary_ts"):
+                if p.get(k) is not None and not isinstance(p[k], (int, float)) or isinstance(p.get(k), bool):
+                    p[k] = None if k in ("context", "summary_ts") else 0
+            p["task_ids"] = [str(i)[:12] for i in p.get("task_ids") or [] if isinstance(i, str)][:20] if isinstance(p.get("task_ids"), list) else []
+            p["remote"] = base
+            found.append(p)
+    except Exception as err:  # a remote being down is normal
+        log("remote", base, "unreachable:", err)
     return found
+
+
+def remote_peers(max_age=REMOTE_CACHE_S):
+    """The live agents on every remote, asked all at once (one slow machine costs its own timeout, not the sum), and
+    kept max_age seconds."""
+    bases = list(config.get("remotes", []))
+    now = time.time()
+    with remote_lock:
+        stale = [b for b in bases if b not in remote_cache or now - remote_cache[b][0] > max_age]
+    if stale:
+        got = {}
+        threads = [threading.Thread(target=lambda b=b: got.__setitem__(b, one_remote(b)), daemon=True) for b in stale]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        with remote_lock:
+            for b in stale:
+                remote_cache[b] = (now, got.get(b, []))
+    with remote_lock:
+        for b in [b for b in remote_cache if b not in bases]:
+            remote_cache.pop(b)
+        return [dict(p) for b in bases for p in remote_cache.get(b, (0, []))[1]]
 
 
 def resolve(to, spaces=None):
@@ -1148,33 +1172,106 @@ def party(m, side):
     return who if who.startswith("discord:") else "n:" + str(m.get(side + "_name") or who).lower()
 
 
+class LogIndex:
+    """Where each message's lines sit in the log (this file and the one before it), and which messages each pair of
+    parties exchanged, read on from where the last call stopped instead of parsing megabytes on every call. When a
+    rotation replaces either file (another inode, or shorter than what was read), both are indexed again."""
+
+    WHO = ("from", "to", "from_name", "to_name")
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.reset()
+        self.parsed = 0  # bytes read, for tests
+
+    def reset(self):
+        self.files = {}  # path -> {"ino", "pos", "at": id -> [offset, ...]}
+        self.who = {}  # id -> its from/to fields as they stand, later lines applied
+        self.pairs = {}  # frozenset of two parties -> ids that were ever between them
+
+    def paths(self):
+        return (MESSAGES_PATH + ".1", MESSAGES_PATH)
+
+    def refresh(self):
+        stats = {}
+        for path in self.paths():
+            try:
+                stats[path] = os.stat(path)
+            except OSError:
+                pass
+        if any(path not in stats or self.files[path]["ino"] != stats[path].st_ino or stats[path].st_size < self.files[path]["pos"]
+               for path in self.files) or (self.files and any(path not in self.files for path in stats)):
+            self.reset()
+        for path, st in stats.items():
+            ix = self.files.setdefault(path, {"ino": st.st_ino, "pos": 0, "at": {}})
+            if st.st_size > ix["pos"]:
+                self.read_on(path, ix, st.st_size)
+
+    def read_on(self, path, ix, size):
+        with open(path, "rb") as f:
+            f.seek(ix["pos"])
+            chunk = f.read(size - ix["pos"])
+        end = chunk.rfind(b"\n") + 1  # a line still being written waits for the next call
+        pos = ix["pos"]
+        for line in chunk[:end].splitlines(keepends=True):
+            try:
+                entry = json.loads(line)
+                mid = entry.get("id")
+            except (ValueError, AttributeError):
+                mid = None
+            if isinstance(mid, str) and ("text" in entry or mid in self.who):
+                ix["at"].setdefault(mid, []).append(pos)
+                if "text" in entry or any(k in entry for k in self.WHO):
+                    who = self.who[mid] = {**({} if "text" in entry else self.who[mid]),
+                                           **{k: entry[k] for k in self.WHO if k in entry}}
+                    self.pairs.setdefault(frozenset((party(who, "from"), party(who, "to"))), set()).add(mid)
+            pos += len(line)
+        self.parsed += end
+        ix["pos"] = pos
+
+    def read(self, want=None, pair=None):
+        """Messages by id with their later updates applied: those in want, or those between pair, or all of them."""
+        by_id = {}
+        with self.lock:
+            self.refresh()
+            if pair is not None:
+                want = self.pairs.get(pair, set())
+            for path in self.paths():
+                ix = self.files.get(path)
+                if ix is None:
+                    continue
+                ids = ix["at"].keys() if want is None else set(want) & ix["at"].keys()
+                try:
+                    with open(path, "rb") as f:
+                        for off in sorted(o for i in ids for o in ix["at"][i]):
+                            f.seek(off)
+                            try:
+                                entry = json.loads(f.readline())
+                            except ValueError:
+                                continue
+                            if "text" in entry:
+                                by_id[entry["id"]] = entry
+                            elif entry.get("id") in by_id:
+                                by_id[entry["id"]].update(entry)
+                except OSError:
+                    continue
+        if pair is not None:  # an id is filed under every pair it was ever between; keep where it ended up
+            by_id = {i: m for i, m in by_id.items() if frozenset((party(m, "from"), party(m, "to"))) == pair}
+        return by_id
+
+
+log_index = LogIndex()
+
+
 def logged(want=None):
     """Every message still in the log (this file and the one before it), by id, with its later updates applied.
     With want, only those ids."""
-    by_id = {}
-    for path in (MESSAGES_PATH + ".1", MESSAGES_PATH):
-        try:
-            with open(path) as f:
-                for line in f:
-                    try:
-                        entry = json.loads(line)
-                    except ValueError:
-                        continue
-                    if want is not None and entry.get("id") not in want:
-                        continue
-                    if "text" in entry:
-                        by_id[entry["id"]] = entry
-                    elif entry.get("id") in by_id:
-                        by_id[entry["id"]].update(entry)
-        except OSError:
-            continue
-    return by_id
+    return log_index.read(want=want)
 
 
 def conversation(a, b, limit=500):
     """Every message between two parties still in the log (this file and the one before it), oldest first."""
-    pair, by_id = {a, b}, logged()
-    out = [m for m in by_id.values() if {party(m, "from"), party(m, "to")} == pair or (a == b and party(m, "from") == party(m, "to") == a)]
+    out = log_index.read(pair=frozenset((a, b))).values()
     return sorted(out, key=lambda m: m.get("ts", 0))[-limit:]
 
 
@@ -2627,6 +2724,8 @@ def send(body):
                 target = {"id": f"folder:{parent['from_cwd']}", "cwd": parent["from_cwd"], "name": parent.get("from_name") or ""}
             else:
                 err = f"{parent.get('from_name') or 'the sender'} of {parent['id']} is no longer live and no agent runs in its folder now"
+        elif not to and parent and "@" in str(parent.get("from", "")) and (parent.get("to") in mine or parent.get("to_cwd") in mine):
+            to = parent["from"]  # from another machine: forward() takes it back there
         elif not to:
             err = "to is required unless reply_to names a message sent to you"
         elif word in ("space", "lead") or word.startswith(("space:", "lead:")):
@@ -2638,7 +2737,7 @@ def send(body):
 
     if target is None:
         if "@" in to or config.get("remotes"):
-            return forward(body, hops, spaces)
+            return forward({**body, "to": to}, hops, spaces, parent, sender_rec)
         return 404, {"error": f"no live peer '{to}'; call list_peers"}
 
     with lock:
@@ -2648,6 +2747,12 @@ def send(body):
             if str(to).strip().lower().startswith(("space", "lead")):
                 return 400, {"error": "you lead that space, so this would come back to you; to reach everyone in it, send with kind \"announcement\""}
             return 400, {"error": "that is you"}
+        # Another machine tried again after a send it thought failed: the copy that got here stands.
+        if not sender_rec and body.get("origin_id"):
+            dup = next((m for m in reversed(messages) if m.get("origin_id") == str(body["origin_id"])[:40]
+                        and m.get("from_host") == body.get("from_host")), None)
+            if dup:
+                return 200, {"id": dup["id"], "to": dup["to_name"], "status": dup["status"], "task": dup.get("task")}
         msg = {
             "id": f"m{next_msg[0]}",
             "ts": now,
@@ -2665,6 +2770,7 @@ def send(body):
             "reply_to": body.get("reply_to") or None,
             "hops": hops,
             "status": "queued",
+            **({"origin_id": str(body["origin_id"])[:40]} if not sender_rec and body.get("origin_id") else {}),
             "v": 2,  # logs older than this never recorded delivery, so they are not replayed
         }
         if last_word:
@@ -2900,34 +3006,72 @@ def file_pending_issues():
             log("pending issue", name, "unreadable:", err)
 
 
-def forward(body, hops, spaces):
+REMOTE_TRIES = 3
+
+
+def forward(body, hops, spaces, parent=None, sender_rec=None):
+    """Hand a message to an agent on another machine. A copy stays in this log, so its answer, which comes back with
+    reply_to set to that copy's id, threads onto it; reply_to going out is the id the other machine gave the message
+    being answered. A send that fails is tried again, and the other machine drops a second copy of one that got there."""
     to = body["to"]
     name, _, host = to.partition("@")
-    for p in remote_peers():
-        if (host and p["host"].lower() != host.lower()):
-            continue
-        shared = peer_reach(p) & spaces if spaces is not None else None
-        if spaces is not None and not shared:
-            continue
-        if name.lower() in (p["id"].lower(), p["name"].lower()) or p["id"].lower().startswith(name.lower()):
-            sender = sessions.get(body.get("from", ""))
-            fwd = {
-                **body,
-                "to": p["id"],
-                "hops": hops,
-                "reply_to": None,
-                "from": f"{body.get('from', '')}@{HOSTNAME}",
-                "from_name": f"{display_name(sender) if sender else body.get('from')}@{HOSTNAME}",
-                "from_host": HOSTNAME,
-                "space": min(shared) if shared else None,  # what daemons before 0.6 read
-                "spaces": sorted(spaces) if spaces is not None else None,
-            }
-            try:
-                res = remote_call(p["remote"], "/api/messages", fwd, timeout=5)
-                return 200, {**res, "to": f"{p['name']}@{p['host']}"}
-            except Exception as err:
-                return 502, {"error": f"remote {p['remote']} refused: {err}"}
+    for fresh in (False, True):  # a peer that just started isn't in the cache yet
+        for p in remote_peers(0 if fresh else REMOTE_CACHE_S):
+            if (host and p["host"].lower() != host.lower()):
+                continue
+            shared = peer_reach(p) & spaces if spaces is not None else None
+            if spaces is not None and not shared:
+                continue
+            if name.lower() in (p["id"].lower(), p["name"].lower()) or p["id"].lower().startswith(name.lower()):
+                return forward_to(p, body, hops, spaces, shared, parent, sender_rec)
     return 404, {"error": f"no live peer '{to}'; call list_peers"}
+
+
+def forward_to(p, body, hops, spaces, shared, parent, sender_rec):
+    sender = body.get("from", "")
+    with lock:
+        copy = {"id": f"m{next_msg[0]}", "ts": time.time(), "from": sender,
+                "from_name": display_name(sender_rec) if sender_rec else body.get("from_name") or sender, "from_host": HOSTNAME,
+                "to": f"{p['id']}@{p['host']}", "to_name": f"{p['name']}@{p['host']}",
+                "from_cwd": sender_rec.get("cwd", "") if sender_rec else "", "to_cwd": "",
+                "from_space": space_of(sender_rec)[0] if sender_rec else "", "to_space": "",
+                "text": str(body.get("text") or "")[:20000], "expects_reply": bool(body.get("expects_reply")) or body.get("kind") == "task",
+                "reply_to": parent["id"] if parent else None, "hops": hops, "status": "forwarding", "v": 2}
+        next_msg[0] += 1
+        record(copy)
+    fwd = {
+        **body,
+        "to": p["id"],
+        "hops": hops,
+        "reply_to": (parent or {}).get("origin_id") if (parent or {}).get("from_host") == p["host"] else None,
+        "origin_id": copy["id"],
+        "from": f"{sender}@{HOSTNAME}",
+        "from_name": f"{copy['from_name']}@{HOSTNAME}",
+        "from_host": HOSTNAME,
+        "space": min(shared) if shared else None,  # what daemons before 0.6 read
+        "spaces": sorted(spaces) if spaces is not None else None,
+    }
+    err = res = None
+    for attempt in range(REMOTE_TRIES):
+        try:
+            res = remote_call(p["remote"], "/api/messages", fwd, timeout=5)
+            break
+        except urllib.error.HTTPError as e:  # it answered: trying again would get the same answer
+            err = e
+            break
+        except Exception as e:
+            err = e
+            if attempt + 1 < REMOTE_TRIES:
+                time.sleep(0.5 * (attempt + 1))
+    if res is None:
+        with lock:
+            copy["status"] = "failed"
+        append_log({"id": copy["id"], "status": "failed"})
+        return 502, {"error": f"remote {p['remote']} refused: {err}"}
+    with lock:
+        copy.update(status="forwarded", origin_id=res.get("id"))
+    append_log({"id": copy["id"], "status": "forwarded", "origin_id": res.get("id")})
+    return 200, {**res, "to": f"{p['name']}@{p['host']}"}
 
 
 # A session id -> the one that continued it after a /clear or resume, so a reply to the old one finds the new.
@@ -3162,7 +3306,7 @@ def open_threads(rec, max_age=8 * 3600, limit=8):
             frm, to = ends(m, "from", "from_cwd"), ends(m, "to", "to_cwd")
             if mine(m, "to") and m.get("status") != "expired" and not any((a, b) in later for a in me for b in frm):
                 owes.append(gist(m, "from_name"))
-            if mine(m, "from") and not any((a, b) in later for a in to for b in me):
+            if mine(m, "from") and m.get("status") != "failed" and not any((a, b) in later for a in to for b in me):
                 waiting.append(gist(m, "to_name"))
         later.update((a, b) for a in ends(m, "from", "from_cwd") for b in ends(m, "to", "to_cwd"))
     owes.reverse()
@@ -3236,9 +3380,12 @@ def close_threads(sid, ids):
         if not want:
             return 400, {"error": "give the ids to close, like m123"}
         found = {m["id"]: m for m in messages if m["id"] in want}
-        # Only the newest messages are kept in memory; an older ask (its buttons still live on Discord) is in the log.
-        if want - set(found):
-            found.update(logged(want - set(found)))
+    # Only the newest messages are kept in memory; an older ask (its buttons still live on Discord) is in the log,
+    # read without holding the lock.
+    older = logged(want - set(found)) if want - set(found) else {}
+    with lock:
+        for mid, m in older.items():
+            found.setdefault(mid, next((k for k in messages if k["id"] == mid), m))
         mine = [m for m in found.values() if {m.get("from"), m.get("from_cwd"), m.get("to"), m.get("to_cwd")} & me]
         for m in mine:
             m["handled"] = m["inbox_done"] = True
@@ -5031,11 +5178,11 @@ class Handler(BaseHTTPRequestHandler):
         q = parse_qs(url.query)
         rest = parts[1:] if parts[:1] == ["api"] else None
 
-        if not self.is_local():
-            # Another machine's daemon: only peer discovery and message delivery.
-            if self.remote_ok() and (rest == ["peers"] and method == "GET" or rest == ["messages"] and method == "POST"):
-                pass
-            else:
+        # Another machine's daemon (or one reached through a tunnel, so from here): only peer discovery and message delivery.
+        remote_route = rest == ["peers"] and method == "GET" or rest == ["messages"] and method == "POST"
+        self.via_remote = not self.is_local() or (remote_route and not self.key_ok() and not self.web_session() and self.remote_ok())
+        if self.via_remote:
+            if not (self.remote_ok() and remote_route):
                 return self.reply(403, {"error": "forbidden"})
         elif not self.host_ok():
             return self.reply(403, {"error": "bad host"})
@@ -5057,7 +5204,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(302, "", "text/plain", {"Set-Cookie": attrs, "Location": "/"})
 
         browser = self.is_local() and self.web_session()
-        if self.is_local() and not (self.key_ok() or browser):
+        if self.is_local() and not self.via_remote and not (self.key_ok() or browser):
             if method == "GET" and url.path in ("/", "/index.html"):
                 return self.page(401, "Sign in", "Open the web UI with <code>/peerlink web</code> in Claude Code, or <code>peerlink web</code> in a shell. Each link works once.")
             return self.reply(401, {"error": "missing or wrong key"})
@@ -5488,7 +5635,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(200, {"messages": messages[-max(1, int(q.get("limit", ["100"])[0])):]})
             if method == "POST":
                 b = self.body()
-                if not self.is_local() and "@" not in str(b.get("from", "")):
+                if self.via_remote and "@" not in str(b.get("from", "")):
                     # Another machine's daemon forwards its agents as id@host; it can't speak as you or as a local agent.
                     return self.reply(403, {"error": "a remote message comes from id@host"})
                 code, res = send(b)
