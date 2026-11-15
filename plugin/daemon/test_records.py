@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -230,6 +231,133 @@ class RecordsTest(unittest.TestCase):
         self.assertEqual([m["id"] for m in peerlinkd.take_inbox("s-core")], [old])
         self.restart()
         self.assertEqual(peerlinkd.inboxes.get("s-core", []), [])
+
+
+class LogIndexTest(unittest.TestCase):
+    """SKY-550 (5): reading old messages from the log reads on from where the last read stopped, follows rotation, and
+    close_threads reads it without holding the lock."""
+
+    def setUp(self):
+        self.was = peerlinkd.MESSAGES_PATH, peerlinkd.log_index
+        peerlinkd.MESSAGES_PATH = os.path.join(tempfile.mkdtemp(prefix="peerlink-logindex-"), "messages.jsonl")
+        peerlinkd.log_index = peerlinkd.LogIndex()
+
+    def tearDown(self):
+        peerlinkd.MESSAGES_PATH, peerlinkd.log_index = self.was
+
+    def msg(self, i, frm="a", to="b", **more):
+        peerlinkd.append_log({"id": f"m{i}", "ts": i, "from": "s-" + frm, "from_name": frm, "to": "s-" + to,
+                              "to_name": to, "text": f"hi {i}", **more})
+
+    def test_a_read_parses_only_what_was_written_since_the_last_one(self):
+        for i in range(200):
+            self.msg(i, *(("a", "b") if i % 2 else ("a", "c")))
+        self.assertEqual(len(peerlinkd.conversation("n:a", "n:b")), 100)
+        size = os.path.getsize(peerlinkd.MESSAGES_PATH)
+        self.assertEqual(peerlinkd.log_index.parsed, size)
+        peerlinkd.append_log({"id": "m1", "handled": True})
+        self.msg(500)
+        self.assertTrue(peerlinkd.logged({"m1"})["m1"]["handled"])
+        self.assertEqual(len(peerlinkd.conversation("n:a", "n:b")), 101)
+        self.assertEqual(peerlinkd.log_index.parsed, os.path.getsize(peerlinkd.MESSAGES_PATH))  # only the new lines
+
+    def test_a_half_written_line_waits_and_a_rotation_is_read_again(self):
+        self.msg(1)
+        with open(peerlinkd.MESSAGES_PATH, "a") as f:
+            f.write('{"id": "m2", "ts": 2, "text": "half')
+        self.assertEqual(set(peerlinkd.logged()), {"m1"})
+        with open(peerlinkd.MESSAGES_PATH, "a") as f:
+            f.write(' done", "from": "s-a", "from_name": "a", "to": "s-b", "to_name": "b"}\n')
+        self.assertEqual(peerlinkd.logged({"m2"})["m2"]["text"], "half done")
+        with peerlinkd.lock:
+            peerlinkd.rewrite_log(peerlinkd.MESSAGES_PATH, [{**peerlinkd.logged({"m2"})["m2"], "handled": True}])
+        self.msg(3)
+        self.assertEqual(set(peerlinkd.logged()), {"m1", "m2", "m3"})
+        self.assertTrue(peerlinkd.logged({"m2"})["m2"]["handled"])
+        self.assertEqual([m["id"] for m in peerlinkd.conversation("n:a", "n:b")], ["m1", "m2", "m3"])
+
+    def test_a_message_whose_recipient_was_named_later_is_in_that_conversation(self):
+        self.msg(1, to="the agent starting for s7")
+        peerlinkd.append_log({"id": "m1", "to": "s-c", "to_name": "c"})  # the started agent took it
+        self.assertEqual([m["id"] for m in peerlinkd.conversation("n:a", "n:c")], ["m1"])
+        self.assertEqual(peerlinkd.conversation("n:a", "n:the agent starting for s7"), [])
+
+    def test_closing_an_old_thread_reads_the_log_without_the_lock(self):
+        peerlinkd.sessions["s-a"] = {"id": "s-a", "name": "a", "cwd": "/x/a", "last_seen": peerlinkd.time.time()}
+        self.addCleanup(peerlinkd.sessions.pop, "s-a", None)
+        self.msg(7)
+        held = []
+        real = peerlinkd.LogIndex.read
+
+        def read(index, *args, **kw):
+            held.append(peerlinkd.lock._is_owned())
+            return real(index, *args, **kw)
+
+        with unittest.mock.patch.object(peerlinkd.LogIndex, "read", read):
+            self.assertEqual(peerlinkd.close_threads("s-a", ["m7"]), (200, {"closed": ["m7"]}))
+        self.assertEqual(held, [False])
+        self.assertTrue(peerlinkd.logged({"m7"})["m7"]["handled"])
+
+
+class RemotesTest(unittest.TestCase):
+    """SKY-550 (6): other machines are asked at once and cached, and a send that fails is tried again."""
+
+    def setUp(self):
+        self.was = list(peerlinkd.config.get("remotes", []))
+        peerlinkd.config["remotes"] = ["http://r1", "http://r2", "http://r3"]
+        peerlinkd.remote_cache.clear()
+        self.addCleanup(peerlinkd.remote_cache.clear)
+        was = list(peerlinkd.messages)
+        peerlinkd.messages.clear()  # other tests' leftovers aren't whole messages
+        self.addCleanup(lambda: peerlinkd.messages.__setitem__(slice(None), was))
+
+    def tearDown(self):
+        peerlinkd.config["remotes"] = self.was
+
+    def test_remotes_are_asked_at_once_and_kept_for_a_few_seconds(self):
+        calls = []
+
+        def call(base, path, body=None, timeout=2):
+            calls.append(base)
+            peerlinkd.time.sleep(0.3)
+            return {"peers": [{"id": "p-" + base[-2:], "name": base[-2:], "host": base[-2:]}]}
+
+        with unittest.mock.patch.object(peerlinkd, "remote_call", call):
+            t = peerlinkd.time.time()
+            self.assertEqual([p["name"] for p in peerlinkd.remote_peers()], ["r1", "r2", "r3"])
+            self.assertLess(peerlinkd.time.time() - t, 0.6)  # one wait, not three
+            peerlinkd.remote_peers()
+            peerlinkd.snapshot()
+            self.assertEqual(len(calls), 3)  # from the cache
+            peerlinkd.remote_peers(0)
+            self.assertEqual(len(calls), 6)
+
+    def test_a_send_that_fails_is_tried_again_and_one_refused_is_not(self):
+        peerlinkd.config["remotes"] = ["http://r1"]
+        peerlinkd.remote_cache["http://r1"] = (peerlinkd.time.time(), [{"id": "p-bob", "name": "bob", "host": "r1", "remote": "http://r1"}])
+        sent = []
+
+        def call(base, path, body=None, timeout=2):
+            sent.append(body)
+            if len(sent) < 3:
+                raise peerlinkd.urllib.error.URLError("timed out")
+            return {"id": "m77", "status": "queued"}
+
+        with unittest.mock.patch.object(peerlinkd, "remote_call", call), unittest.mock.patch.object(peerlinkd.time, "sleep"):
+            code, out = peerlinkd.forward({"from": "s-x", "to": "bob@r1", "text": "hi"}, 0, None)
+        self.assertEqual((code, out["id"], len(sent)), (200, "m77", 3))
+        self.assertEqual({b["origin_id"] for b in sent}, {sent[0]["origin_id"]})  # the same message each time, for the far side to drop copies
+        copy = next(m for m in peerlinkd.messages if m["id"] == sent[0]["origin_id"])
+        self.assertEqual((copy["status"], copy["origin_id"], copy["to_name"]), ("forwarded", "m77", "bob@r1"))
+
+        def refuse(base, path, body=None, timeout=2):
+            sent.append(body)
+            raise peerlinkd.urllib.error.HTTPError(base, 403, "forbidden", {}, None)
+
+        sent.clear()
+        with unittest.mock.patch.object(peerlinkd, "remote_call", refuse):
+            code, _ = peerlinkd.forward({"from": "s-x", "to": "bob@r1", "text": "hi"}, 0, None)
+        self.assertEqual((code, len(sent)), (502, 1))
 
 
 class PeerCountTest(unittest.TestCase):

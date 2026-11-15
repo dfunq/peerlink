@@ -279,6 +279,34 @@ class AgentsChannelTest(unittest.TestCase):
         t.start()
         return t, box
 
+    def test_reply_and_post_files_are_read_on_and_kept_to_the_newest(self):
+        """SKY-550 (8): a read parses only what was added since the last one, and the files stop growing."""
+        keep = agentslink.KEEP_REPLIES, agentslink.KEEP_POSTS
+        agentslink.KEEP_REPLIES = agentslink.KEEP_POSTS = 8
+        self.addCleanup(lambda: setattr(agentslink, "KEEP_REPLIES", keep[0]) or setattr(agentslink, "KEEP_POSTS", keep[1]))
+        ids = [self.bot.keep("grok", f"reply {i}") for i in range(25)]
+        path = self.bot.store("grok")
+        with open(path) as f:
+            lines = f.read().splitlines()
+        self.assertLessEqual(len(lines), 10)  # rewritten down to 8 each time it passed 10
+        out, _ = self.call(GROK, "read_replies", {})
+        self.assertEqual(out["replies"][-1]["text"], "reply 24")
+        self.assertEqual([r["id"] for r in out["replies"]], ids[-len(lines):])
+        self.assertEqual(self.bot.files[path]["pos"], os.path.getsize(path))
+        # Read on, not again: a line added behind the cache's back is picked up by itself.
+        with open(path, "a") as f:
+            f.write(json.dumps({"id": "rx", "ts": time.time() + 1, "text": "late", "reply_to": None}) + "\n")
+        out, _ = self.call(GROK, "read_replies", {"since": ids[-1]})
+        self.assertEqual([r["text"] for r in out["replies"]], ["late"])
+        for i in range(25):
+            self.bot.post_to_skyforge("grok", {"text": f"post {i}"})
+        with open(self.bot.posts_path("grok")) as f:
+            self.assertLessEqual(len(f.read().splitlines()), 10)
+        posted = self.bot.posted("grok")
+        self.assertLessEqual(len(posted), 10)
+        newest = max(posted, key=posted.get)
+        self.assertEqual(self.call(GROK, "read_replies", {"since": newest})[1], None)  # a kept post still names a point in time
+
     def test_a_waiting_read_returns_as_soon_as_the_answer_comes(self):
         out, _ = self.call(GROK, "post_to_skyforge", {"text": "status?"})
         t, box = self.background(GROK, {"since": out["id"], "wait_s": 4})

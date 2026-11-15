@@ -38,6 +38,9 @@ PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 MAX_BODY = 64 * 1024
 MAX_TEXT = 4000
 MAX_REPLIES = 50
+# A client's reply and post files keep the newest of these; past a quarter more, they're rewritten down to them.
+KEEP_REPLIES = 1000
+KEEP_POSTS = 2000
 # read_replies(wait_s): a read may hold its request open until a reply comes. Cloudflare drops a proxied request that
 # goes 100 s without an answer, so waits stop short of that, and few may wait at once, so they can't use up the threads.
 MAX_WAIT_S = 90
@@ -219,6 +222,7 @@ class Bot:
         os.makedirs(os.path.join(self.dir, "replies"), mode=0o700, exist_ok=True)
         self.audit_path = os.path.join(self.dir, "audit.jsonl")
         self.mu = threading.Lock()
+        self.files = {}  # path -> {"ino", "pos", "items"}: what's been read of each reply and post file, read on from pos
         self.limiter = Limiter()
         self.arrived = threading.Condition()  # notified when a reply is kept, or the channel closes
         self.waiting = {}  # client -> reads holding their request open
@@ -291,45 +295,84 @@ class Bot:
         if files:
             entry["files"] = list(files)
         with self.mu:
-            fd = os.open(self.store(client), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-            with os.fdopen(fd, "a") as f:
-                f.write(json.dumps(entry) + "\n")
+            self.append(self.store(client), json.dumps(entry), KEEP_REPLIES, self.reply_line)
         with self.arrived:
             self.kept += 1
             self.arrived.notify_all()
         self.audit(client=client, event="reply", id=entry["id"], chars=len(entry["text"]))
         return entry["id"]
 
-    def replies(self, client):
-        out = []
+    @staticmethod
+    def reply_line(line):
         try:
-            with open(self.store(client)) as f:
-                for line in f:
-                    try:
-                        out.append(json.loads(line))
-                    except ValueError:
-                        pass
+            r = json.loads(line)
+            return r if isinstance(r, dict) and "id" in r else None
+        except ValueError:
+            return None
+
+    @staticmethod
+    def post_line(line):
+        mid, _, ts = line.strip().partition(" ")
+        try:
+            return (mid, float(ts))
+        except ValueError:
+            return None
+
+    def read_on(self, path, parse):
+        """What `path` holds, parsed a line at a time, reading only what was added since the last call. Called with
+        self.mu held. A file rewritten by compaction (another inode) or cut short is read again from the start."""
+        try:
+            st = os.stat(path)
         except OSError:
-            pass
-        return sorted(out, key=lambda r: r.get("ts", 0))
+            self.files.pop(path, None)
+            return []
+        c = self.files.get(path)
+        if c is None or c["ino"] != st.st_ino or st.st_size < c["pos"]:
+            c = self.files[path] = {"ino": st.st_ino, "pos": 0, "items": []}
+        if st.st_size > c["pos"]:
+            with open(path, "rb") as f:
+                f.seek(c["pos"])
+                chunk = f.read(st.st_size - c["pos"])
+            end = chunk.rfind(b"\n") + 1  # a line still being written waits for the next read
+            for line in chunk[:end].splitlines():
+                item = parse(line.decode("utf-8", "replace"))
+                if item is not None:
+                    c["items"].append(item)
+            c["pos"] += end
+        return c["items"]
+
+    def append(self, path, line, keep, parse):
+        """Add a line; past keep and a quarter, rewrite the file to its newest `keep` lines (a new file renamed over
+        it, so a reader sees the old one or the new one). Called with self.mu held."""
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a") as f:
+            f.write(line + "\n")
+        items = self.read_on(path, parse)
+        if len(items) <= keep + keep // 4:
+            return
+        tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+        newest = items[-keep:]
+        fmt = (lambda i: json.dumps(i)) if parse is self.reply_line else (lambda i: f"{i[0]} {i[1]}")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write("".join(fmt(i) + "\n" for i in newest))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        self.files.pop(path, None)
+
+    def replies(self, client):
+        with self.mu:
+            items = list(self.read_on(self.store(client), self.reply_line))
+        return sorted(items, key=lambda r: r.get("ts", 0))
 
     def posts_path(self, client):
         return os.path.join(self.dir, "replies", f"{client}.posts")
 
     def posted(self, client):
         """{id: ts} of the messages this client posted, so since and reply_to can name them."""
-        out = {}
-        try:
-            with open(self.posts_path(client)) as f:
-                for line in f:
-                    mid, _, ts = line.strip().partition(" ")
-                    try:
-                        out[mid] = float(ts)
-                    except ValueError:
-                        pass
-        except OSError:
-            pass
-        return out
+        with self.mu:
+            return dict(self.read_on(self.posts_path(client), self.post_line))
 
     # Tools
 
@@ -344,9 +387,7 @@ class Bot:
             raise Refused(f"{ref} isn't one of your replies (read_replies lists them)")
         mid = "p" + secrets.token_hex(6)
         with self.mu:
-            fd = os.open(self.posts_path(client), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-            with os.fdopen(fd, "a") as f:
-                f.write(f"{mid} {time.time()}\n")
+            self.append(self.posts_path(client), f"{mid} {time.time()}", KEEP_POSTS, self.post_line)
         # bot: True keeps it from working your Inbox; the label first means no "name:" or "Task:" prefix can steer it.
         self.on_message({"channel_id": f"agents:{client}", "message_id": mid, "author": client, "author_id": client,
                          "text": LABEL.format(name=client) + text, "dm": False, "mentioned": True, "ref": ref,
