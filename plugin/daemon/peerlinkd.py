@@ -30,7 +30,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.35"
+VERSION = "0.9.36"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -1364,8 +1364,14 @@ def agents_view():
                         for n, c in sorted(ag.get("clients", {}).items())]}
 
 
-def agents_api(rest, method, b):
-    """(code, body) for /api/agentchannel: the Agents channel and its clients."""
+def agents_admin(via, action, **entry):
+    """A change to who may call the Agents channel, in its audit log next to the calls themselves."""
+    agentslink.audit(HOME, log, admin=action, via=via, **entry)
+
+
+def agents_api(rest, method, b, via="web"):
+    """(code, body) for /api/agentchannel: the Agents channel and its clients. via says who asked, for the audit log:
+    "web" (your browser) or "key" (the CLI, or an agent holding the key)."""
     ag = discord["agents"]
     if rest == [] and method == "GET":
         return 200, agents_view()
@@ -1382,14 +1388,17 @@ def agents_api(rest, method, b):
             return 404, {"error": f"no registration waiting with code {code}"}
         if b.get("dismiss"):
             log("agents", "registration from", req["name"], "dismissed")
+            agents_admin(via, "dismiss", client=req["name"], code=code)
             return 200, agents_view()
-        out = agents_api(["clients"], "POST", {"name": req["name"], "token_sha256": req["token_sha256"]})
+        out = agents_api(["clients"], "POST", {"name": req["name"], "token_sha256": req["token_sha256"]}, via=None)
         if out[0] != 200:
             return out
         log("agents", "registration from", req["name"], "approved")
+        agents_admin(via, "approve", client=req["name"], code=code, ip=req.get("ip", ""))
         return 200, agents_view()
     if rest == [] and method == "PUT":
         with lock:
+            before = {k: ag.get(k) for k in ("registration", "default_to", "enabled", "port")}
             if "registration" in b:
                 ag["registration"] = bool(b["registration"])
             if "default_to" in b:
@@ -1405,6 +1414,9 @@ def agents_api(rest, method, b):
                     return 400, {"error": f"port is 1024-65535, and not the daemon's own {PORT}"}
                 ag["port"] = port
             save_discord()
+            changed = {k: ag.get(k) for k in before if ag.get(k) != before[k]}
+        if changed:
+            agents_admin(via, "channel", **changed)
         if "enabled" in b or "port" in b or "registration" in b:
             start_agents()
         return 200, agents_view()
@@ -1436,6 +1448,8 @@ def agents_api(rest, method, b):
                 discord["routes"].append({"channel_id": cid, "agents": [{"cwd": ag["default_to"], "name": "", "receives": True, "sends": False}]})
             save_discord()
         log("agents", "client", name, "added" if first or not b.get("replace") else "given a new token")
+        if via:  # an approval writes its own line
+            agents_admin(via, "add" if not b.get("replace") else "new-token", client=name, rate_per_min=rate)
         if first or not agents_bot[0]:
             start_agents()
         return 200, {"ok": True, "client": name, "channel_id": cid, "port": int(ag.get("port") or agentslink.PORT)}
@@ -1444,20 +1458,22 @@ def agents_api(rest, method, b):
         with lock:
             if name not in ag["clients"]:
                 return 404, {"error": f"no client {name}"}
+            change = {}
             if method == "DELETE":
                 ag["clients"].pop(name)
                 ag["chats"].pop(f"agents:{name}", None)
                 discord["routes"] = [r for r in discord["routes"] if r["channel_id"] != f"agents:{name}"]
             else:
                 if "enabled" in b:
-                    ag["clients"][name]["enabled"] = bool(b["enabled"])
+                    ag["clients"][name]["enabled"] = change["enabled"] = bool(b["enabled"])
                 if "rate_per_min" in b:
                     try:
-                        ag["clients"][name]["rate_per_min"] = max(1, min(int(b["rate_per_min"]), 120))
+                        ag["clients"][name]["rate_per_min"] = change["rate_per_min"] = max(1, min(int(b["rate_per_min"]), 120))
                     except (TypeError, ValueError):
                         return 400, {"error": "rate_per_min is a number"}
             save_discord()
         log("agents", "client", name, "revoked" if method == "DELETE" else "changed")
+        agents_admin(via, "revoke" if method == "DELETE" else "change", client=name, **change)
         if method == "DELETE" and not ag["clients"]:
             start_agents()
         return 200, {"ok": True}
@@ -5432,7 +5448,7 @@ class Handler(BaseHTTPRequestHandler):
             # Approving a registration is yours alone; turning one down (dismiss) is anyone's with the key.
             if method == "PUT" and rest == ["agentchannel"] and (not browser or self.key_ok()) and set(b) - {"enabled", "dismiss"}:
                 return self.reply(403, {"error": "approving registrations, the port and where clients land are set from the web UI"})
-            return self.reply(*agents_api(rest[1:], method, b))
+            return self.reply(*agents_api(rest[1:], method, b, via="web" if browser and not self.key_ok() else "key"))
         if rest and rest[0] == "slack":
             if method != "GET" and (not browser or self.key_ok()):
                 return self.reply(403, {"error": "Slack is set up from the web UI"})
