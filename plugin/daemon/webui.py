@@ -1204,7 +1204,8 @@ async function loadAgents(){const before=JSON.stringify((aState?.clients||[]).ma
   if(before!==JSON.stringify((aState.clients||[]).map(c=>c.name))&&dState){dGuilds=null;loadDiscord()}}
 function renderAgents(){const a=aState;if(!a||a.error===undefined&&!a.state)return;
   const label={online:'Online',off:'Turned off',error:'Error',unconfigured:'No clients'}[a.state]||a.state;
-  $('#agstatus').innerHTML=platState(a.clients.length>0,a.state,label,a.state==='online'&&`127.0.0.1:${a.port}`,a.error);
+  $('#agstatus').innerHTML=platState(a.clients.length>0||a.registration,a.state,label,a.state==='online'&&`127.0.0.1:${a.port}`,a.error)+((a.pending||[]).length?` <span class="pill warn">${a.pending.length} waiting</span>`:'');
+  panels({pagents:(a.pending||[]).length>0});
   if(dState&&a.state!==aShown){aShown=a.state;renderDiscord()}
   if(document.activeElement&&$('#agbody').contains(document.activeElement))return;
   const rows=a.clients.map(c=>`<div class="addline small"><b class="mono">${esc(c.name)}</b>
@@ -1215,8 +1216,15 @@ function renderAgents(){const a=aState;if(!a||a.error===undefined&&!a.state)retu
   $('#agbody').innerHTML=`<h2>Where new clients land</h2>
     <p class="meta">A new client is mapped to this agent, which receives its posts. Change one client's agents under <b>Channel ⇄ Agent Mappings</b>, below.</p>
     <div class="addline">${agentSelect(a.default_to,'data-agto style="flex:1;min-width:0"','Pick an agent…')}</div>
+    <h2>Asking to connect</h2>
+    <label class="check"><input type="checkbox" data-agact="registration" ${a.registration?'checked':''}> Accept registrations</label>
+    <p class="meta">A client sends its name and its token's hash to <span class="mono">/register</span> and gets a pairing code. Approve only a request whose code its owner told you themselves.</p>
+    ${(a.pending||[]).map(p=>`<div class="addline small"><b class="mono">${esc(p.name)}</b> <span class="mono">${esc(p.code)}</span>
+      <span class="mut">from ${esc(p.ip)}, ${ago(p.ts)} ago</span>
+      <button class="small" data-agapprove="${esc(p.code)}">Approve</button><button class="ghost small" data-agdismiss="${esc(p.code)}">Dismiss</button></div>`).join('')
+      ||`<p class="small mut">${a.registration?'Nobody waiting. This updates by itself.':'Registrations are off.'}</p>`}
     <h2>Clients</h2>${rows||'<p class="small mut">None yet.</p>'}
-    <p class="meta" style="margin-top:8px">Add one in a shell. The token stays in its file, made there if it doesn't exist (mode 600), and only its hash reaches peerlink:<br>
+    <p class="meta" style="margin-top:8px">Or add one in a shell. The token stays in its file, made there if it doesn't exist (mode 600), and only its hash reaches peerlink:<br>
     <span class="mono">peerlink agents add &lt;name&gt; --token-file &lt;file&gt;</span>. Revoke with <span class="mono">peerlink agents revoke &lt;name&gt;</span> or the button above.</p>
     <h2>Endpoint</h2>
     <p class="meta">MCP (Streamable HTTP) at <span class="mono">http://127.0.0.1:${a.port}/mcp</span>, health at <span class="mono">/healthz</span>, listening on this machine only: put a tunnel with its own access control in front of it. Every call is logged to <span class="mono">~/.peerlink/agents/audit.jsonl</span>.</p>
@@ -1225,9 +1233,13 @@ const agPut=(path,body)=>api('/api/agentchannel'+path,{method:'PUT',headers:J,bo
 document.addEventListener('change',e=>{const t=e.target;
   if(t.dataset.agto!==undefined)agPut('',{default_to:t.value}).then(()=>{t.blur();loadAgents()});
   if(t.dataset.agact==='enabled')agPut('',{enabled:t.checked}).then(loadAgents);
+  if(t.dataset.agact==='registration')agPut('',{registration:t.checked}).then(loadAgents);
   if(t.dataset.agon)agPut('/clients/'+encodeURIComponent(t.dataset.agon),{enabled:t.checked}).then(loadAgents);
   if(t.dataset.agrate)agPut('/clients/'+encodeURIComponent(t.dataset.agrate),{rate_per_min:+t.value}).then(()=>{t.blur();loadAgents()})});
 document.addEventListener('click',async e=>{const t=e.target.closest('button');if(!t)return;
+  if(t.dataset.agapprove&&await ask(`Approve the request with code ${t.dataset.agapprove}? Only if its owner told you that code themselves.`,{ok:'Approve'})){
+    const r=await agPut('',{approve:t.dataset.agapprove});if(r.error)tell(r.error);loadAgents()}
+  if(t.dataset.agdismiss){await agPut('',{dismiss:t.dataset.agdismiss});loadAgents()}
   if(t.dataset.agrevoke&&await ask(`Revoke ${t.dataset.agrevoke}? Its token stops working at once, and its chat's mapping is removed.`,{ok:'Revoke'})){
     await api('/api/agentchannel/clients/'+encodeURIComponent(t.dataset.agrevoke),{method:'DELETE'});loadAgents()}});
 setInterval(()=>{if(location.hash==='#channels'&&!document.hidden)loadAgents()},5000);

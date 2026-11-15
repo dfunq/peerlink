@@ -38,7 +38,8 @@ class AgentsChannelTest(unittest.TestCase):
         peerlinkd.load_config()
         peerlinkd.load_discord()
         self.port = free_port()
-        peerlinkd.discord["agents"].update({"enabled": True, "port": self.port, "default_to": "/r/hq", "clients": {}, "chats": {}})
+        peerlinkd.discord["agents"].update({"enabled": True, "port": self.port, "default_to": "/r/hq", "clients": {}, "chats": {},
+                                            "registration": False, "pending": []})
         peerlinkd.discord["routes"] = [{"channel_id": "123", "agents": [{"cwd": "/r/hq", "name": "", "receives": True, "sends": True}]}]
         now = time.time()
         peerlinkd.sessions.clear()
@@ -56,7 +57,7 @@ class AgentsChannelTest(unittest.TestCase):
         if peerlinkd.agents_bot[0]:
             peerlinkd.agents_bot[0].close()
         peerlinkd.agents_bot[0] = None
-        peerlinkd.discord["agents"].update({"clients": {}, "chats": {}, "default_to": ""})
+        peerlinkd.discord["agents"].update({"clients": {}, "chats": {}, "default_to": "", "registration": False, "pending": []})
         peerlinkd.discord["routes"] = []
         peerlinkd.sessions.clear()
         peerlinkd.inboxes.clear()
@@ -192,6 +193,50 @@ class AgentsChannelTest(unittest.TestCase):
         self.assertEqual(peerlinkd.agents_api([], "PUT", {"enabled": True})[0], 200)
         self.assertEqual(peerlinkd.agents_view()["state"], "online")
         self.assertEqual(self.rpc(GROK, "tools/list")[0], 200)
+
+
+    def register(self, body, ip="203.0.113.5"):
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/register", data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json", "CF-Connecting-IP": ip}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read() or b"{}")
+
+    def test_a_registration_waits_for_you_and_its_token_works_once_approved(self):
+        token = "r" * 43
+        self.assertEqual(self.register({"name": "pat", "token_sha256": sha(token)})[0], 404)  # closed by default
+        peerlinkd.agents_api([], "PUT", {"registration": True})
+        code, out = self.register({"name": "pat", "token_sha256": sha(token)})
+        self.assertEqual((code, out["status"]), (200, "pending"))
+        self.assertRegex(out["code"], r"^[A-Z2-9]{3}-[A-Z2-9]{3}$")
+        self.assertEqual(self.rpc(token, "tools/list")[0], 401)
+        view = peerlinkd.agents_view()
+        self.assertEqual([(p["name"], p["code"], p["ip"]) for p in view["pending"]], [("pat", out["code"], "203.0.113.5")])
+        self.assertNotIn("token_sha256", json.dumps(view))
+        self.assertEqual(peerlinkd.agents_api([], "PUT", {"approve": "ZZZ-ZZZ"})[0], 404)
+        self.assertEqual(peerlinkd.agents_api([], "PUT", {"approve": out["code"].lower()})[0], 200)
+        self.assertEqual(self.rpc(token, "tools/list")[0], 200)
+        self.assertEqual(peerlinkd.agents_view()["pending"], [])
+        # Taken names and tokens are refused; bad input says why.
+        self.assertEqual(self.register({"name": "grok", "token_sha256": sha("q" * 43)}, "203.0.113.6")[0], 409)
+        self.assertEqual(self.register({"name": "x", "token_sha256": "nope"}, "203.0.113.7")[0], 400)
+
+    def test_registrations_are_rate_limited_per_ip_and_can_be_dismissed(self):
+        peerlinkd.agents_api([], "PUT", {"registration": True})
+        codes = [self.register({"name": f"n{i}", "token_sha256": sha(f"{i}" * 40)})[0] for i in range(4)]
+        self.assertEqual(codes, [200, 200, 200, 429])
+        first = peerlinkd.agents_view()["pending"][0]["code"]
+        peerlinkd.agents_api([], "PUT", {"dismiss": first})
+        self.assertNotIn(first, [p["code"] for p in peerlinkd.agents_view()["pending"]])
+
+    def test_registration_alone_keeps_the_channel_listening(self):
+        for n in ("grok", "other"):
+            peerlinkd.agents_api(["clients", n], "DELETE", {})
+        self.assertIsNone(peerlinkd.agents_bot[0])
+        peerlinkd.agents_api([], "PUT", {"registration": True})
+        self.assertEqual(peerlinkd.agents_view()["state"], "online")
 
 
 class AgentsLinkTest(unittest.TestCase):
