@@ -30,7 +30,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.32"
+VERSION = "0.9.33"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -1189,6 +1189,8 @@ SLACK = {"token": "", "app_token": "", "user": "", "team": "", "enabled": True,
 # Only its token's sha256 is kept. Clients are added and revoked with `peerlinkd.py agents ...`; where a new one lands
 # (default_to) and the channel's switch are yours, from the web UI.
 AGENTS = {"enabled": True, "port": agentslink.PORT, "default_to": "",
+          "registration": False,  # whether POST /register takes requests, which you approve in the web UI
+          "pending": [],  # [{name, token_sha256, code, ip, ts}]: registrations waiting for you, newest first
           "clients": {},  # name -> {token_sha256, enabled, rate_per_min, added}
           "chats": {}}  # "agents:<name>" -> name, for the mapping's picker
 DISCORD_FILES = os.path.join(HOME, "files", "discord")  # what you attach on Discord, for the agent to read
@@ -1306,13 +1308,56 @@ def start_agents():
         old.close()
     agents_bot[0] = None
     ag = discord["agents"]
-    if ag.get("enabled", True) and ag.get("clients"):
-        agents_bot[0] = agentslink.Bot(lambda: discord["agents"], on_discord, log, HOME, int(ag.get("port") or agentslink.PORT))
+    if ag.get("enabled", True) and (ag.get("clients") or ag.get("registration")):
+        agents_bot[0] = agentslink.Bot(lambda: discord["agents"], on_discord, log, HOME, int(ag.get("port") or agentslink.PORT),
+                                       on_register=agents_register)
+
+
+REGISTRATION_TTL_S = 86400
+PENDING_MAX = 10
+
+
+def live_pending():
+    """Registrations still waiting, dropping those older than a day. Called with the lock held."""
+    now = time.time()
+    ag = discord["agents"]
+    ag["pending"] = [p for p in ag.get("pending") or [] if now - p.get("ts", 0) < REGISTRATION_TTL_S][:PENDING_MAX]
+    return ag["pending"]
+
+
+def agents_register(name, h, ip):
+    """A client's request to be let in, from POST /register: kept for you to approve in the web UI."""
+    if not agentslink.NAME_RE.match(name):
+        return 400, {"error": "name is lowercase letters, digits and dashes, starting with a letter (up to 31)"}
+    if not agentslink.HEX_RE.match(h):
+        return 400, {"error": "token_sha256 is the sha256 of your bearer token, as 64 hex characters: printf %s \"$TOKEN\" | shasum -a 256"}
+    with lock:
+        ag = discord["agents"]
+        if name in ag["clients"]:
+            return 409, {"error": f"{name} is already a client"}
+        if any(c["token_sha256"] == h for c in ag["clients"].values()):
+            return 409, {"error": "that token belongs to a client already: make a new one"}
+        pending = [p for p in live_pending() if p["name"] != name and p["token_sha256"] != h]
+        code = agentslink.pairing_code()
+        ag["pending"] = ([{"name": name, "token_sha256": h, "code": code, "ip": ip, "ts": time.time()}] + pending)[:PENDING_MAX]
+        save_discord()
+        land = ag.get("default_to") or ""
+        channel = approval_channel({"id": "", "cwd": land, "name": folder_name(land)}) if land and chat_ready() else ""
+    log("agents", "registration from", name, ip, "waits for you")
+    if channel:
+        post_async([(channel, f"🔑 An outside agent asks to connect on the Agents channel: **{name}** from {ip}, pairing code **{code}**. "
+                              f"If whoever runs it tells you that code, approve it in the web UI under Channels → Agents.", None)])
+    return 200, {"status": "pending", "name": name, "code": code,
+                 "next": "Tell the person who runs this peerlink your pairing code. Once they approve it, your bearer token works on /mcp. "
+                         "Until then it gets 401. The request expires in 24 hours."}
 
 
 def agents_view():
     ag, bot = discord["agents"], agents_bot[0]
+    with lock:
+        pending = [{k: p[k] for k in ("name", "code", "ip", "ts")} for p in live_pending()]
     return {"enabled": ag.get("enabled", True), "port": int(ag.get("port") or agentslink.PORT), "default_to": ag.get("default_to", ""),
+            "registration": bool(ag.get("registration")), "pending": pending,
             "state": bot.state if bot else ("off" if ag.get("clients") else "unconfigured"), "error": bot.error if bot else "",
             "clients": [{"name": n, "enabled": c["enabled"], "rate_per_min": c["rate_per_min"], "added": c["added"],
                          "mapped": any(r["channel_id"] == f"agents:{n}" and receivers(r) for r in discord.get("routes", []))}
@@ -1324,8 +1369,29 @@ def agents_api(rest, method, b):
     ag = discord["agents"]
     if rest == [] and method == "GET":
         return 200, agents_view()
+    if rest == [] and method == "PUT" and (b.get("approve") or b.get("dismiss")):
+        code = str(b.get("approve") or b.get("dismiss")).strip().upper()
+        if b.get("approve") and not ag.get("default_to"):
+            return 400, {"error": "say where new clients land first: pick an agent above"}
+        with lock:
+            req = next((p for p in live_pending() if p["code"] == code), None)
+            if req:
+                ag["pending"] = [p for p in ag["pending"] if p is not req]
+                save_discord()
+        if not req:
+            return 404, {"error": f"no registration waiting with code {code}"}
+        if b.get("dismiss"):
+            log("agents", "registration from", req["name"], "dismissed")
+            return 200, agents_view()
+        out = agents_api(["clients"], "POST", {"name": req["name"], "token_sha256": req["token_sha256"]})
+        if out[0] != 200:
+            return out
+        log("agents", "registration from", req["name"], "approved")
+        return 200, agents_view()
     if rest == [] and method == "PUT":
         with lock:
+            if "registration" in b:
+                ag["registration"] = bool(b["registration"])
             if "default_to" in b:
                 ag["default_to"] = os.path.abspath(os.path.expanduser(str(b["default_to"]))) if str(b["default_to"] or "").strip() else ""
             if "enabled" in b:
@@ -1339,7 +1405,7 @@ def agents_api(rest, method, b):
                     return 400, {"error": f"port is 1024-65535, and not the daemon's own {PORT}"}
                 ag["port"] = port
             save_discord()
-        if "enabled" in b or "port" in b:
+        if "enabled" in b or "port" in b or "registration" in b:
             start_agents()
         return 200, agents_view()
     if rest == ["clients"] and method == "POST":
