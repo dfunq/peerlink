@@ -232,6 +232,49 @@ class RecordsTest(unittest.TestCase):
         self.assertEqual(peerlinkd.inboxes.get("s-core", []), [])
 
 
+class PeerCountTest(unittest.TestCase):
+    """A heartbeat counts the agents that share a space with it, without building every peer's record (SKY-546)."""
+
+    def setUp(self):
+        peerlinkd.load_config()
+        self.keep = dict(peerlinkd.sessions), list(peerlinkd.messages)
+        peerlinkd.sessions.clear()
+        now = peerlinkd.time.time()
+        for i in range(40):
+            sid = f"pc-{i}"
+            peerlinkd.sessions[sid] = {"id": sid, "name": f"a{i}", "cwd": f"/x/a{i}", "last_seen": now - (400 if i % 9 == 0 else 0),
+                                       "space": ("top", "core", "loop")[i % 3]}
+        for i in range(300):  # a busy log: what building each peer's open threads walks through
+            peerlinkd.messages.append({"id": f"mpc{i}", "ts": now, "from": f"pc-{i % 40}", "to": f"pc-{(i + 1) % 40}",
+                                       "text": "x", "expects_reply": True, "v": 2, "status": "delivered"})
+
+    def tearDown(self):
+        peerlinkd.sessions.clear()
+        peerlinkd.sessions.update(self.keep[0])
+        peerlinkd.messages[:] = self.keep[1]
+
+    def old_count(self, sid):
+        with peerlinkd.lock:
+            mine = peerlinkd.reach(peerlinkd.sessions[sid])
+        return sum(1 for p in peerlinkd.local_peers() if p["id"] != sid and peerlinkd.peer_reach(p) & mine)
+
+    def test_the_count_is_the_same_and_far_cheaper(self):
+        for sid in peerlinkd.sessions:
+            self.assertEqual(peerlinkd.peer_count(sid), self.old_count(sid), sid)
+        self.assertEqual(peerlinkd.peer_count("nobody"), 0)
+        t = peerlinkd.time.perf_counter
+        t0 = t()
+        for _ in range(20):
+            self.old_count("pc-1")
+        old = (t() - t0) / 20
+        t0 = t()
+        for _ in range(20):
+            peerlinkd.peer_count("pc-1")
+        new = (t() - t0) / 20
+        print(f"\nheartbeat peer count, 40 agents: {old * 1000:.2f} ms before, {new * 1000:.3f} ms now")
+        self.assertLess(new * 5, old)
+
+
 class StateFileTest(unittest.TestCase):
     """State files are written whole or not at all, and a damaged one is kept and recovered, never just replaced."""
 
