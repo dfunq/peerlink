@@ -94,6 +94,14 @@ class Rig:
         self.stop()
         self.start()
 
+    def crash(self):
+        """kill -9 the daemon, so nothing in memory is saved, and start it again on the same home."""
+        self.proc.kill()
+        self.proc.wait(5)
+        self.proc = None
+        self.log.close()
+        self.start()
+
     def output(self):
         try:
             with open(os.path.join(self.home, "rig.log")) as f:

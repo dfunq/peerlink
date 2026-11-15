@@ -203,6 +203,35 @@ class RecordsTest(unittest.TestCase):
         self.assertEqual(peerlinkd.handed["s-core"], {})
 
 
+    def restart(self):
+        """The daemon dies (kill -9: nothing in memory is saved) and starts again from its log."""
+        peerlinkd.messages.clear()
+        peerlinkd.inboxes.clear()
+        peerlinkd.handed.clear()
+        peerlinkd.load_messages()
+
+    def test_a_message_handed_out_but_not_acked_survives_a_daemon_crash(self):
+        peerlinkd.append_log({"id": "m-old", "ts": peerlinkd.time.time(), "to": "s-core", "text": "from an older daemon",
+                              "status": "delivered", "v": 2})  # handed out before tracking existed: left alone
+        lost = self.send("chief", to="core", text="Deploy is blocked on you.")["id"]
+        kept = self.send("chief", to="core", text="FYI, all green.")["id"]
+        self.assertEqual({m["id"] for m in peerlinkd.take_inbox("s-core", track=True)}, {lost, kept})
+        peerlinkd.ack("s-core", [kept])  # the plugin got this one into the session; the daemon died before the other's ack
+        self.restart()
+        self.assertEqual([m["id"] for m in peerlinkd.inboxes.get("s-core", [])], [lost])
+        again = peerlinkd.take_inbox("s-core", track=True)
+        self.assertEqual([m["id"] for m in again], [lost])
+        self.assertEqual(again[0]["text"], "Deploy is blocked on you.")
+        peerlinkd.ack("s-core", [lost])
+        self.restart()  # acked now: a second restart hands nothing out
+        self.assertEqual(peerlinkd.inboxes.get("s-core", []), [])
+        # A plugin that doesn't ack never gets it twice either.
+        old = self.send("chief", to="core", text="no acks here")["id"]
+        self.assertEqual([m["id"] for m in peerlinkd.take_inbox("s-core")], [old])
+        self.restart()
+        self.assertEqual(peerlinkd.inboxes.get("s-core", []), [])
+
+
 class LocalNameTest(unittest.TestCase):
     def test_the_web_ui_answers_to_its_local_name_and_nothing_a_page_could_pick(self):
         keep = peerlinkd.config.get("local_name")
