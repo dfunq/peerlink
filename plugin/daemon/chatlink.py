@@ -1,12 +1,12 @@
 """What peerlink's chat platforms share: Discord, Telegram and Slack.
 
 A channel id says its platform: Discord's are bare digits, as they always were, Telegram's `tg:<chat id>` and
-Slack's `slack:<channel id>`. Each platform's module (discordlink, …) offers the same calls, and the daemon picks one
+Slack's `slack:<channel id>`, and an outside agent's on the Agents channel `agents:<client>`. Each platform's module (discordlink, …) offers the same calls, and the daemon picks one
 by the prefix: post, clear_buttons, answer_press, react, unreact, download.
 """
 
-NAMES = {"discord": "Discord", "telegram": "Telegram", "slack": "Slack"}
-PREFIXES = {"tg": "telegram", "slack": "slack"}
+NAMES = {"discord": "Discord", "telegram": "Telegram", "slack": "Slack", "agents": "Agents"}
+PREFIXES = {"tg": "telegram", "slack": "slack", "agents": "agents"}
 
 
 class ChatError(ValueError):

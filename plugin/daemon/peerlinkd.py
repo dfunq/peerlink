@@ -25,11 +25,12 @@ import socket
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.28"
+VERSION = "0.9.29"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -37,6 +38,7 @@ import chatlink  # noqa: E402  (beside this file; installs nothing)
 import discordlink  # noqa: E402
 import telegramlink  # noqa: E402
 import slacklink  # noqa: E402
+import agentslink  # noqa: E402
 from cronlib import cron_next, parse_cron  # noqa: E402,F401
 from webui import UI_HTML  # noqa: E402
 
@@ -1183,10 +1185,17 @@ SLACK = {"token": "", "app_token": "", "user": "", "team": "", "enabled": True,
          "trusted_bots": [],
          "chats": {},  # "slack:<id>" -> name, every conversation the app is in
          "strangers": []}
+# Agents outside this machine, over MCP (agentslink): each client is a chat, "agents:<name>", mapped like any other.
+# Only its token's sha256 is kept. Clients are added and revoked with `peerlinkd.py agents ...`; where a new one lands
+# (default_to) and the channel's switch are yours, from the web UI.
+AGENTS = {"enabled": True, "port": agentslink.PORT, "default_to": "",
+          "clients": {},  # name -> {token_sha256, enabled, rate_per_min, added}
+          "chats": {}}  # "agents:<name>" -> name, for the mapping's picker
 DISCORD_FILES = os.path.join(HOME, "files", "discord")  # what you attach on Discord, for the agent to read
 discord_bot = [None]
 telegram_bot = [None]
 slack_bot = [None]
+agents_bot = [None]
 
 
 def load_discord():
@@ -1196,10 +1205,11 @@ def load_discord():
     except (OSError, ValueError):
         pass
     discord["routes"] = [clean_route(r) for r in discord.get("routes", []) if r.get("channel_id")]
-    for key, defaults in (("telegram", TELEGRAM), ("slack", SLACK)):
+    for key, defaults in (("telegram", TELEGRAM), ("slack", SLACK), ("agents", AGENTS)):
         own = discord.setdefault(key, {})
         for k, v in defaults.items():
             own.setdefault(k, json.loads(json.dumps(v)))
+    discord["agents"]["clients"] = agentslink.clean_clients(discord["agents"].get("clients"))
 
 
 def clean_route(r):
@@ -1289,6 +1299,105 @@ def start_slack():
         bot.on_chat, bot.on_stranger = chat_seen("slack"), chat_stranger("slack")
 
 
+def start_agents():
+    """The Agents channel's MCP server, while it's switched on and has a client."""
+    old = agents_bot[0]
+    if old:
+        old.close()
+    agents_bot[0] = None
+    ag = discord["agents"]
+    if ag.get("enabled", True) and ag.get("clients"):
+        agents_bot[0] = agentslink.Bot(lambda: discord["agents"], on_discord, log, HOME, int(ag.get("port") or agentslink.PORT))
+
+
+def agents_view():
+    ag, bot = discord["agents"], agents_bot[0]
+    return {"enabled": ag.get("enabled", True), "port": int(ag.get("port") or agentslink.PORT), "default_to": ag.get("default_to", ""),
+            "state": bot.state if bot else ("off" if ag.get("clients") else "unconfigured"), "error": bot.error if bot else "",
+            "clients": [{"name": n, "enabled": c["enabled"], "rate_per_min": c["rate_per_min"], "added": c["added"],
+                         "mapped": any(r["channel_id"] == f"agents:{n}" and receivers(r) for r in discord.get("routes", []))}
+                        for n, c in sorted(ag.get("clients", {}).items())]}
+
+
+def agents_api(rest, method, b):
+    """(code, body) for /api/agentchannel: the Agents channel and its clients."""
+    ag = discord["agents"]
+    if rest == [] and method == "GET":
+        return 200, agents_view()
+    if rest == [] and method == "PUT":
+        with lock:
+            if "default_to" in b:
+                ag["default_to"] = os.path.abspath(os.path.expanduser(str(b["default_to"]))) if str(b["default_to"] or "").strip() else ""
+            if "enabled" in b:
+                ag["enabled"] = bool(b["enabled"])
+            if "port" in b:
+                try:
+                    port = int(b["port"])
+                except (TypeError, ValueError):
+                    return 400, {"error": "port is a number"}
+                if not 1024 <= port <= 65535 or port == PORT:
+                    return 400, {"error": f"port is 1024-65535, and not the daemon's own {PORT}"}
+                ag["port"] = port
+            save_discord()
+        if "enabled" in b or "port" in b:
+            start_agents()
+        return 200, agents_view()
+    if rest == ["clients"] and method == "POST":
+        name = str(b.get("name") or "").strip().lower()
+        h = str(b.get("token_sha256") or "").strip().lower()
+        if not agentslink.NAME_RE.match(name):
+            return 400, {"error": "a client name is lowercase letters, digits and dashes, starting with a letter (up to 31)"}
+        if not agentslink.HEX_RE.match(h):
+            return 400, {"error": "token_sha256 is the token's sha256, 64 hex characters (the token itself is never sent)"}
+        with lock:
+            clients, cid = ag["clients"], f"agents:{name}"
+            if name in clients and not b.get("replace"):
+                return 409, {"error": f"{name} is already a client: revoke it first, or replace its token"}
+            if any(c["token_sha256"] == h for n, c in clients.items() if n != name):
+                return 409, {"error": "that token belongs to another client"}
+            route = next((r for r in discord["routes"] if r["channel_id"] == cid), None)
+            if not route and not ag.get("default_to"):
+                return 400, {"error": "say where new clients land first: pick an agent's folder for the Agents channel in the web UI, under Channels"}
+            try:
+                rate = max(1, min(int(b.get("rate_per_min") or (clients.get(name) or {}).get("rate_per_min") or agentslink.POSTS_PER_MIN), 120))
+            except (TypeError, ValueError):
+                return 400, {"error": "rate_per_min is a number"}
+            first = not clients
+            clients[name] = {"token_sha256": h, "enabled": True, "rate_per_min": rate, "added": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+            ag["chats"][cid] = name
+            if not route:
+                # It lands with default_to's agent, which may answer it there but never starts a conversation (sends off).
+                discord["routes"].append({"channel_id": cid, "agents": [{"cwd": ag["default_to"], "name": "", "receives": True, "sends": False}]})
+            save_discord()
+        log("agents", "client", name, "added" if first or not b.get("replace") else "given a new token")
+        if first or not agents_bot[0]:
+            start_agents()
+        return 200, {"ok": True, "client": name, "channel_id": cid, "port": int(ag.get("port") or agentslink.PORT)}
+    if len(rest) == 2 and rest[0] == "clients" and method in ("PUT", "DELETE"):
+        name = rest[1]
+        with lock:
+            if name not in ag["clients"]:
+                return 404, {"error": f"no client {name}"}
+            if method == "DELETE":
+                ag["clients"].pop(name)
+                ag["chats"].pop(f"agents:{name}", None)
+                discord["routes"] = [r for r in discord["routes"] if r["channel_id"] != f"agents:{name}"]
+            else:
+                if "enabled" in b:
+                    ag["clients"][name]["enabled"] = bool(b["enabled"])
+                if "rate_per_min" in b:
+                    try:
+                        ag["clients"][name]["rate_per_min"] = max(1, min(int(b["rate_per_min"]), 120))
+                    except (TypeError, ValueError):
+                        return 400, {"error": "rate_per_min is a number"}
+            save_discord()
+        log("agents", "client", name, "revoked" if method == "DELETE" else "changed")
+        if method == "DELETE" and not ag["clients"]:
+            start_agents()
+        return 200, {"ok": True}
+    return 404, {"error": "not found"}
+
+
 def chat_seen(platform):
     """What a platform's bot calls with a chat it has heard from, or one renamed: it's kept for the mapping's picker."""
     def seen(channel_id, title):
@@ -1327,10 +1436,12 @@ def telegram_migrate(old, new):
 # Chat platforms: every post, reaction and button press goes through these, which pick the platform's module by the
 # channel id (chatlink): Discord's are bare digits, Telegram's "tg:<chat id>", Slack's "slack:<channel id>".
 ChatError = chatlink.ChatError
-CHAT_LINKS = {"discord": discordlink, "telegram": telegramlink, "slack": slacklink}
+CHAT_LINKS = {"discord": discordlink, "telegram": telegramlink, "slack": slacklink, "agents": agentslink}
 
 
 def chat_token(platform):
+    if platform == "agents":  # no token of its own: its clients each have one, checked by agentslink
+        return "local" if discord["agents"].get("clients") else ""
     return discord.get("token", "") if platform == "discord" else (discord.get(platform) or {}).get("token", "")
 
 
@@ -1345,7 +1456,7 @@ def chat_link(channel_id):
 def chat_bot(channel_id):
     """The running bot for the platform a channel is on, or None."""
     platform = chatlink.platform(channel_id)
-    bot = {"discord": discord_bot, "telegram": telegram_bot, "slack": slack_bot}.get(platform, [None])[0]
+    bot = {"discord": discord_bot, "telegram": telegram_bot, "slack": slack_bot, "agents": agents_bot}.get(platform, [None])[0]
     return bot if chat_token(platform) else None
 
 
@@ -1353,7 +1464,7 @@ def chat_ready(channel_id=""):
     """Whether the platform a channel is on is set up with its bot running; with no channel, whether any is."""
     if channel_id:
         return chat_bot(channel_id) is not None
-    return any(chat_bot(c) is not None for c in ("0", "tg:0", "slack:0"))
+    return any(chat_bot(c) is not None for c in ("0", "tg:0", "slack:0", "agents:x"))
 
 
 def chat_configured():
@@ -1412,11 +1523,20 @@ def discord_channel_label(channel_id):
     return f"#{name}" if name else chatlink.name(channel_id)
 
 
-def routes_for(cwd, name=""):
+def external(channel_id):
+    """Whether a chat is an outside agent's (the Agents channel), not yours."""
+    return chatlink.platform(channel_id) == "agents"
+
+
+def routes_for(cwd, name="", agents=False):
     """The channels an agent is mapped into, by its folder and name (a folder alone: any agent there): whether it
-    receives and sends there, and whether it's the first receiver (`master`), which gets messages that name nobody."""
+    receives and sends there, and whether it's the first receiver (`master`), which gets messages that name nobody.
+    An Agents channel counts only with agents=True: it is an outside agent's, so your approvals, questions and notices
+    never go there, and "discord" (any chat) never means it."""
     out = []
     for r in discord.get("routes", []):
+        if external(r["channel_id"]) and not agents:
+            continue
         a = next((a for a in r.get("agents", []) if entry_is(a, cwd, name)), None)
         if a:
             first = receivers(r)[:1]
@@ -1924,7 +2044,7 @@ def chat_target(word):
     """A chat `to` names: "discord", "telegram", "slack", "telegram#family", as (platform name or "" for any, "#channel" or "").
     None when it names no chat. "discord" is any platform, as it was before there were others."""
     head, sep, channel = word.partition("#")
-    if head not in ("discord", "telegram", "slack"):
+    if head not in ("discord", "telegram", "slack", "agents"):
         return None
     return ("" if head == "discord" else chatlink.NAMES[head]), ("#" + channel.lstrip("#") if sep else "")
 
@@ -1947,7 +2067,7 @@ def send_discord(sender_rec, to, text, parent, hops, options=None, files=None, e
     target = chat_target(to.strip().lower())
     if target is None:
         return None
-    mine = chats_matching([r for r in routes_for(sender_rec.get("cwd", ""), display_name(sender_rec)) if r["channel_id"] != "dm" and r["sends"]], target)
+    mine = chats_matching([r for r in routes_for(sender_rec.get("cwd", ""), display_name(sender_rec), agents=target[0] == "Agents") if r["channel_id"] != "dm" and r["sends"]], target)
     where = target[0] or "chat"
     if not mine:
         return 404, {"error": f"this agent isn't ticked to send in any {where} channel; the mapping is in the web UI, under Channels"}
@@ -4177,7 +4297,7 @@ def hit_limit(rec, body):
         lifting.clear()
         usage_limit.update({"since": usage_limit.get("since", now), "resets_at": resets or usage_limit.get("resets_at"),
                             "kind": str(body.get("kind") or usage_limit.get("kind") or ""), "by": display_name(rec)})
-        chans = [r for r in routes_for(rec.get("cwd", ""), display_name(rec)) if r["channel_id"] != "dm"] or discord.get("routes", [])
+        chans = [r for r in routes_for(rec.get("cwd", ""), display_name(rec)) if r["channel_id"] != "dm"] or [r for r in discord.get("routes", []) if not external(r["channel_id"])]
     log("limit", "hit by", display_name(rec), "resets", time.strftime("%H:%M", time.localtime(resets)) if resets else "unknown",
         f"({len(back)} message{'s' if len(back) != 1 else ''} put back)")
     if fresh and chans and chat_ready(chans[0]["channel_id"]):
@@ -4551,7 +4671,7 @@ class Handler(BaseHTTPRequestHandler):
         if rest == ["channels"] and method == "GET":
             # Telegram's and Slack's chats come as one more group each, the ones their bots know of.
             chats = [{"id": key, "name": chatlink.NAMES[key], "channels": sorted(({"id": k, "name": v} for k, v in discord[key]["chats"].items()), key=lambda c: c["name"].lower())}
-                     for key in ("telegram", "slack") if discord[key].get("token")]
+                     for key in ("telegram", "slack", "agents") if chat_token(key)]
             if not discord.get("token"):
                 return self.reply(200, {"guilds": chats})
             # ↻ Refresh asks Discord itself (fresh=1), and what it says replaces the gateway's view.
@@ -5238,6 +5358,12 @@ class Handler(BaseHTTPRequestHandler):
             if method != "GET" and (not browser or self.key_ok()):
                 return self.reply(403, {"error": "Telegram is set up from the web UI"})
             return self.telegram_api(rest[1:], method)
+        if rest and rest[0] == "agentchannel":
+            # Clients (who) may be added and revoked by a caller with the key, the way your services agent keeps their
+            # tokens; the channel's switch, its port and where new clients land (default_to) are yours, from the browser.
+            if method == "PUT" and rest == ["agentchannel"] and (not browser or self.key_ok()):
+                return self.reply(403, {"error": "the Agents channel is set up from the web UI"})
+            return self.reply(*agents_api(rest[1:], method, self.body() if method in ("POST", "PUT") else {}))
         if rest and rest[0] == "slack":
             if method != "GET" and (not browser or self.key_ok()):
                 return self.reply(403, {"error": "Slack is set up from the web UI"})
@@ -5378,6 +5504,7 @@ def serve():
     start_discord()
     start_telegram()
     start_slack()
+    start_agents()
     try:
         write_launcher()
     except OSError as err:
@@ -5564,6 +5691,80 @@ def cli_logs(args):
         print("no log yet")
 
 
+def cli_agents(args):
+    """peerlink agents add NAME --token-file FILE [--rate N] [--replace] | revoke NAME | off NAME | on NAME | list"""
+    usage = ("usage: peerlink agents add NAME --token-file FILE [--rate N] [--replace]\n"
+             "       peerlink agents revoke NAME | off NAME | on NAME | list")
+    if not args or args[0] not in ("add", "revoke", "off", "on", "list"):
+        print(usage)
+        return 2
+    sub, rest = args[0], args[1:]
+
+    def call(method, path, body=None):
+        try:
+            return 200, local_call(method, path, body)
+        except urllib.error.HTTPError as err:
+            try:
+                return err.code, json.loads(err.read() or b"{}")
+            except ValueError:
+                return err.code, {"error": err.reason}
+        except (urllib.error.URLError, OSError) as err:
+            return 0, {"error": f"the daemon isn't reachable ({err})"}
+
+    if sub == "list":
+        code, out = call("GET", "/api/agentchannel")
+        if code != 200:
+            print(out.get("error"), file=sys.stderr)
+            return 1
+        print(f"Agents channel: {out['state']} on 127.0.0.1:{out['port']}, new clients land with {out['default_to'] or '(not set)'}")
+        for c in out["clients"]:
+            print(f"  {c['name']:<20} {'on ' if c['enabled'] else 'off'}  {c['rate_per_min']}/min  added {c['added']}{'' if c['mapped'] else '  (no agent receives it)'}")
+        return 0
+    if not rest or rest[0].startswith("-"):
+        print(usage)
+        return 2
+    name = rest[0]
+    if sub == "add":
+        opts = dict(zip(rest[1::2], rest[2::2]))
+        path = os.path.expanduser(opts.get("--token-file", ""))
+        if not path:
+            print(usage)
+            return 2
+        # The token stays in its file: only its sha256 goes to the daemon.
+        if os.path.exists(path):
+            with open(path) as f:
+                token = f.read().strip()
+            if len(token) < 32 or any(ch.isspace() for ch in token):
+                print(f"{path}: a token is one line of at least 32 characters", file=sys.stderr)
+                return 1
+            made = False
+        else:
+            token, made = secrets.token_urlsafe(32), True
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(token + "\n")
+        body = {"name": name, "token_sha256": hashlib.sha256(token.encode()).hexdigest(), "replace": "--replace" in rest}
+        if "--rate" in opts:
+            body["rate_per_min"] = opts["--rate"]
+        code, out = call("POST", "/api/agentchannel/clients", body)
+        if code != 200:
+            print(out.get("error"), file=sys.stderr)
+            return 1
+        print(f"added {name} ({out['channel_id']}); its token is in {path}{' (made now, mode 600)' if made else ''}")
+        return 0
+    if sub == "revoke":
+        code, out = call("DELETE", f"/api/agentchannel/clients/{name}")
+        verb = "revoked: its token is refused from the next request on"
+    else:
+        code, out = call("PUT", f"/api/agentchannel/clients/{name}", {"enabled": sub == "on"})
+        verb = "switched " + sub
+    if code != 200:
+        print(out.get("error"), file=sys.stderr)
+        return 1
+    print(f"{name} {verb}")
+    return 0
+
+
 COMMANDS = {
     "web": (cli_web, "open the web UI with a one-time sign-in link (--print to only print it)"),
     "status": (cli_status, "daemon version, agents, queued messages"),
@@ -5579,6 +5780,7 @@ COMMANDS = {
     "rotate-key": (cli_rotate, "new key: signs out every browser, invalidates links"),
     "logout": (cli_logout, "sign out every browser"),
     "logs": (cli_logs, "the end of the daemon log"),
+    "agents": (cli_agents, "the Agents channel's clients: add NAME --token-file F, revoke NAME, off/on NAME, list"),
     "serve": (lambda a: serve(), "run in the foreground"),
     "fingerprint": (lambda a: print(CODE), "the fingerprint of this daemon's code"),
 }
