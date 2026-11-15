@@ -58,6 +58,8 @@ An agent's space belongs to its folder, so every agent opened there is in it, ac
 
 **Also in other spaces.** Rarely needed: under **Also in other spaces** on the Details tab, you can make an agent a member of more spaces on top of its own. It sees and messages their agents, and they see it. On the Agents page it stays in its own space, with a badge for each extra one, such as `+acme`. It's kept for its folder (`space_members` in the config). Only you can set it, in the web UI: an agent can't add itself to a space.
 
+**Linked agents.** To let two agents talk without changing anyone's space, open one on the Agents page and list the other under **Linked with other agents** on its Details tab. The two then see each other in `list_peers` and message each other, whatever spaces they're in, and both are told. Nobody else's reach changes, and announcements still go by space. A link is kept for the agents (`agent_links` in the config), so it lasts through `/clear` and restarts. It works between agents on this machine. On the Agents page each shows a badge such as `↔core`. Only you can set links, in the web UI.
+
 Space names are lowercased. Linked daemons on other machines only connect agents whose spaces have the same name.
 
 ### Spaces inside spaces

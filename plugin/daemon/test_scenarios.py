@@ -293,6 +293,42 @@ class ScenarioTest(unittest.TestCase):
         rig.user("POST", "/api/members", {"cwd": shared, "id": helper.sid, "spaces": []})
         self.assertEqual(ops.peers(), {})
 
+    def test_two_agents_you_link_message_each_other_across_spaces_and_nobody_else_does(self):
+        rig = self.rig()
+        core, other = rig.agent("core", space="core"), rig.agent("other", space="core")
+        services = rig.agent("services", space="mac")
+        code, out = services.send(ok=False, to="core", text="before")
+        self.assertEqual(code, 409)
+        # Only you, in the browser.
+        code, _ = rig.call("POST", "/api/links", {"id": services.sid, "names": ["core"]})
+        self.assertEqual(code, 403)
+        rig.user("POST", "/api/links", {"id": services.sid, "names": ["core"]})
+        services.expect("Your user linked you with core")
+        core.expect("Your user linked you with services")
+        self.assertEqual(sorted(services.peers()), ["core"])
+        self.assertIn("services", core.peers())
+        self.assertNotIn("services", other.peers())
+        services.send(to="core", text="the key is ready")
+        core.expect("the key is ready")
+        core.send(to="services", text="thanks")
+        services.expect("thanks")
+        code, _ = services.send(ok=False, to="other", text="not linked")
+        self.assertEqual(code, 409)
+        links = {p["name"]: p.get("links", []) for p in rig.user("GET", "/api/peers")["peers"]}
+        self.assertEqual((links["services"], links["core"], links["other"]), (["core"], ["services"], []))
+        # The agent's, not the session's: kept through a /clear.
+        core.clear()
+        self.assertEqual(sorted(services.peers()), ["core"])
+        code, out = rig.call("POST", "/api/links", {"id": services.sid, "names": ["nobody"]}, user=True)
+        self.assertEqual((code, out["error"]), (400, "no agent is called nobody"))
+        # Removed, both are told and the space rule is back.
+        rig.user("POST", "/api/links", {"id": services.sid, "names": []})
+        services.expect("Your user removed your link with core")
+        core.expect("Your user removed your link with services")
+        self.assertEqual(services.peers(), {})
+        code, _ = services.send(ok=False, to="core", text="after")
+        self.assertEqual(code, 409)
+
     def test_a_lead_you_clear_stays_cleared_and_a_lone_agent_is_told_it_leads(self):
         rig = self.rig()
         solo = rig.agent("solo", space="acme")
