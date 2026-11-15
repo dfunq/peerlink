@@ -204,13 +204,15 @@ An AI agent that isn't on this machine, any MCP client (Grok, another company's 
 
   ```
   peerlink agents add <name> --token-file <file> [--rate N] [--replace]   # reads the token from the file, or makes one there (0600); only its hash is sent
+  peerlink agents add <name> --token-sha256 <hex>   # a client that made its own token sends only its hash: sha256 of the exact bearer string (UTF-8, no newline), hex
   peerlink agents revoke <name>     # token refused at once; its chat's mapping goes too
   peerlink agents off <name> / on <name>
+  peerlink agents channel off / on   # the whole channel: nothing listens while it's off
   peerlink agents list
   ```
 
-  A caller with the key may add and revoke clients. Where new clients land (`default_to`), the channel's switch and its port are set only from the web UI.
-- **Limits and audit.** Each client has its own limit on posts (`rate_per_min`, default 6, and 60 an hour), and reads are capped at 60 a minute. Every call is a line in `~/.peerlink/agents/audit.jsonl`: time, client, IP (`CF-Connecting-IP` behind Cloudflare), tool and result. Tokens and message text are never written there. Replies are kept for `read_replies` in `~/.peerlink/agents/replies/<name>.jsonl`.
+  A caller with the key may add and revoke clients and switch the channel. Where new clients land (`default_to`) and its port are set only from the web UI.
+- **Limits and audit.** Each client has its own limit on posts (`rate_per_min`, default 6, and 60 an hour) and on reads (60 a minute). All clients together are capped at 20 posts, 120 reads and 240 requests a minute. Failed sign-ins are capped at 10 a minute per caller IP and 30 a minute overall; past that, the answer is 429. Each client's token is checked against every stored hash in constant time, with no early exit. Every call is a line in `~/.peerlink/agents/audit.jsonl`: time, client, IP (`CF-Connecting-IP` behind Cloudflare), tool and result. Tokens and message text are never written there. Replies are kept for `read_replies` in `~/.peerlink/agents/replies/<name>.jsonl`.
 
 ## Starting and ending agents
 
