@@ -232,6 +232,77 @@ class RecordsTest(unittest.TestCase):
         self.assertEqual(peerlinkd.inboxes.get("s-core", []), [])
 
 
+class StateFileTest(unittest.TestCase):
+    """State files are written whole or not at all, and a damaged one is kept and recovered, never just replaced."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="peerlink-state-")
+        self.path = os.path.join(self.dir, "tasks.json")
+
+    def test_a_damaged_file_is_kept_and_the_last_good_copy_loaded(self):
+        peerlinkd.write_json(self.path, [{"id": "t1"}])
+        peerlinkd.write_json(self.path, [{"id": "t1"}, {"id": "t2"}])
+        with open(self.path, "w") as f:
+            f.write('[{"id": "t1"}, {"id"')  # torn by a disk or an editor
+        self.assertEqual(peerlinkd.read_json(self.path, []), [{"id": "t1"}])  # path.bak: the copy before the last save
+        kept = [n for n in os.listdir(self.dir) if ".corrupt-" in n]
+        self.assertEqual(len(kept), 1)
+        with open(os.path.join(self.dir, kept[0])) as f:
+            self.assertEqual(f.read(), '[{"id": "t1"}, {"id"')
+        # No backup either: defaults, and the damaged file is still kept.
+        os.remove(self.path + ".bak")
+        self.assertEqual(peerlinkd.read_json(self.path, "default"), "default")
+        self.assertTrue(any(".corrupt-" in n for n in os.listdir(self.dir)))
+
+    def test_a_crash_mid_write_leaves_the_old_file_whole(self):
+        peerlinkd.write_json(self.path, {"keep": "me"})
+        real = os.replace
+        def dies(src, dst):
+            if dst == self.path:
+                raise KeyboardInterrupt("killed between fsync and rename")
+            return real(src, dst)
+        peerlinkd.os.replace = dies
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                peerlinkd.write_json(self.path, {"keep": "the new one"})
+        finally:
+            peerlinkd.os.replace = real
+        self.assertEqual(peerlinkd.read_json(self.path), {"keep": "me"})
+        self.assertEqual([n for n in os.listdir(self.dir) if n.endswith(".tmp")], [])
+        # A kill -9 at that point can't clean up: its tmp file is left behind and ignored.
+        with open(self.path + ".x.tmp", "w") as f:
+            f.write("{half")
+        self.assertEqual(peerlinkd.read_json(self.path), {"keep": "me"})
+
+    def test_writers_at_once_never_share_a_tmp_file(self):
+        import threading
+        errors = []
+        def write(i):
+            try:
+                for _ in range(20):
+                    peerlinkd.write_json(self.path, {"writer": i, "pad": "x" * 5000})
+            except Exception as e:
+                errors.append(repr(e))
+        ts = [threading.Thread(target=write, args=(i,)) for i in range(8)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        self.assertEqual(errors, [])
+        self.assertIn(peerlinkd.read_json(self.path)["writer"], range(8))
+        self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o600)
+
+    def test_a_rotated_key_leaves_no_copy(self):
+        old = (peerlinkd.KEY_PATH, peerlinkd.HOME)
+        peerlinkd.KEY_PATH, peerlinkd.HOME = os.path.join(self.dir, "key"), self.dir
+        try:
+            peerlinkd.write_key()
+            peerlinkd.write_key()
+            self.assertEqual(sorted(os.listdir(self.dir)), ["key"])
+        finally:
+            peerlinkd.KEY_PATH, peerlinkd.HOME = old
+
+
 class LocalNameTest(unittest.TestCase):
     def test_the_web_ui_answers_to_its_local_name_and_nothing_a_page_could_pick(self):
         keep = peerlinkd.config.get("local_name")
