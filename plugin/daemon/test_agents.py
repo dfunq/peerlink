@@ -6,6 +6,7 @@ import os
 import socket
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.error
@@ -237,6 +238,77 @@ class AgentsChannelTest(unittest.TestCase):
         self.assertIsNone(peerlinkd.agents_bot[0])
         peerlinkd.agents_api([], "PUT", {"registration": True})
         self.assertEqual(peerlinkd.agents_view()["state"], "online")
+
+    def background(self, token, args):
+        box = {}
+        def run():
+            box["t0"] = time.monotonic()
+            box["out"], box["err"] = self.call(token, "read_replies", args)
+            box["took"] = time.monotonic() - box["t0"]
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        return t, box
+
+    def test_a_waiting_read_returns_as_soon_as_the_answer_comes(self):
+        out, _ = self.call(GROK, "post_message", {"text": "status?"})
+        t, box = self.background(GROK, {"since": out["id"], "wait_s": 4})
+        time.sleep(0.3)
+        msg = peerlinkd.inboxes["chief"][0]
+        self.assertEqual(peerlinkd.send({"from": "chief", "text": "all green", "reply_to": msg["id"]})[0], 200)
+        t.join(5)
+        self.assertIsNone(box["err"])
+        self.assertEqual([r["text"] for r in box["out"]["replies"]], ["all green"])
+        self.assertLess(box["took"], 2)
+        # Nothing new: it waits out wait_s and returns empty, with next_since unchanged.
+        t, box = self.background(GROK, {"since": box["out"]["next_since"], "wait_s": 1})
+        t.join(4)
+        self.assertEqual(box["out"]["replies"], [])
+        self.assertGreaterEqual(box["took"], 0.9)
+        # Something already there comes back at once, whatever wait_s says.
+        t, box = self.background(GROK, {"since": out["id"], "wait_s": 4})
+        t.join(4)
+        self.assertLess(box["took"], 1)
+        _, err = self.call(GROK, "read_replies", {"wait_s": -1})
+        self.assertIn("wait_s", err)
+        self.assertLessEqual(self.bot.wait_s({"wait_s": 1e9}), agentslink.MAX_WAIT_S)
+
+    def test_waiting_reads_are_capped_per_client_and_in_all(self):
+        old = agentslink.WAITERS_TOTAL
+        agentslink.WAITERS_TOTAL = 3
+        try:
+            now = {"since": time.time(), "wait_s": 2}
+            waiters = [self.background(GROK, now) for _ in range(2)] + [self.background(OTHER, now)]
+            time.sleep(0.4)
+            self.assertEqual(self.bot.waiting, {"grok": 2, "other": 1})
+            # A third for grok is over its cap, and one more for other is over the cap for everyone: both refused at once.
+            for tok in (GROK, OTHER):
+                t0 = time.monotonic()
+                _, err = self.call(tok, "read_replies", now)
+                self.assertIn("too many reads are already waiting", err)
+                self.assertLess(time.monotonic() - t0, 1)
+            # A read that doesn't wait still works, and so does posting.
+            self.assertIsNone(self.call(GROK, "read_replies", {"since": now["since"]})[1])
+            self.assertIsNone(self.call(OTHER, "post_message", {"text": "hi"})[1])
+            for t, _ in waiters:
+                t.join(4)
+            self.assertEqual(self.bot.waiting, {})
+            # Ten at once from one client: two wait, the rest are turned away, and every one gets an answer.
+            many = [self.background(GROK, {"since": time.time(), "wait_s": 1}) for _ in range(10)]
+            for t, _ in many:
+                t.join(5)
+            errs = [b["err"] for _, b in many]
+            self.assertEqual(sum(e is None for e in errs), 2, errs)
+            self.assertEqual(self.bot.waiting, {})
+        finally:
+            agentslink.WAITERS_TOTAL = old
+
+    def test_switching_the_channel_off_ends_waiting_reads(self):
+        t, box = self.background(GROK, {"since": time.time(), "wait_s": 4})
+        time.sleep(0.3)
+        self.bot.close()
+        t.join(3)
+        self.assertFalse(t.is_alive())
+        self.assertEqual(box["out"]["replies"], [])
 
 
 class AgentsLinkTest(unittest.TestCase):
