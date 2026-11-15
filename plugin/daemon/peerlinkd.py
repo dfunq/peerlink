@@ -30,7 +30,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.31"
+VERSION = "0.9.32"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -5503,6 +5503,13 @@ def serve():
     load_discord()
     threading.Thread(target=reaction_worker, name="discord-reactions", daemon=True).start()
     clean_stale_reactions()
+    # The port first: a daemon that loses it to another (an older one an agent started mid-upgrade) must touch
+    # nothing on its way out, not the launcher, the chat bots or the Agents channel's port.
+    try:
+        server = ThreadingHTTPServer((config["listen_host"], PORT), Handler)
+    except OSError as err:
+        log("another daemon holds port", PORT, "-", err)
+        sys.exit(0)
     start_discord()
     start_telegram()
     start_slack()
@@ -5511,11 +5518,6 @@ def serve():
         write_launcher()
     except OSError as err:
         log("could not write launcher:", err)
-    try:
-        server = ThreadingHTTPServer((config["listen_host"], PORT), Handler)
-    except OSError as err:
-        log("another daemon holds port", PORT, "-", err)
-        sys.exit(0)
     server.daemon_threads = True
     with open(PID_PATH, "w") as f:
         f.write(str(os.getpid()))
