@@ -38,6 +38,11 @@ PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 MAX_BODY = 64 * 1024
 MAX_TEXT = 4000
 MAX_REPLIES = 50
+# read_replies(wait_s): a read may hold its request open until a reply comes. Cloudflare drops a proxied request that
+# goes 100 s without an answer, so waits stop short of that, and few may wait at once, so they can't use up the threads.
+MAX_WAIT_S = 90
+WAITERS_PER_CLIENT = 2
+WAITERS_TOTAL = 10
 POSTS_PER_MIN = 6
 POSTS_PER_HOUR = 60
 READS_PER_MIN = 60
@@ -75,16 +80,23 @@ TOOLS = [
     {
         "name": "read_replies",
         "description": "skyforge's replies to you, oldest first, after `since`. Pass the next_since value from the "
-        "previous call to get only new ones; leave it out to get the latest replies.",
+        "previous call to get only new ones; leave it out to get the latest replies. Add wait_s to wait for the next one.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "since": {"type": ["number", "string"], "description": "next_since from the previous call, an ISO-8601 "
                           "time, or the id of a reply or of a message you posted: only replies after it are returned"},
+                "wait_s": {"type": "number", "description": f"Optional, up to {MAX_WAIT_S}: when nothing is new yet, wait "
+                           "this many seconds for a reply before returning. After post_to_skyforge, pass since=<its id> "
+                           "and wait_s to get the answer in one call."},
             },
         },
     },
 ]
+class Server(ThreadingHTTPServer):
+    request_queue_size = 64  # the default 5 resets a burst of connections, such as several clients waiting at once
+
+
 _bot = [None]  # the running Bot: post() and the other module calls reach it here, as the platform's "connection"
 
 
@@ -187,9 +199,13 @@ class Bot:
         self.audit_path = os.path.join(self.dir, "audit.jsonl")
         self.mu = threading.Lock()
         self.limiter = Limiter()
+        self.arrived = threading.Condition()  # notified when a reply is kept, or the channel closes
+        self.waiting = {}  # client -> reads holding their request open
+        self.closed = False
+        self.kept = 0  # replies kept so far, so a waiter can tell one arrived while it was reading
         self.port, self.state, self.error, self.server = port, "connecting", "", None
         try:
-            self.server = ThreadingHTTPServer(("127.0.0.1", port), handler(self))
+            self.server = Server(("127.0.0.1", port), handler(self))
             self.server.daemon_threads = True
         except OSError as err:
             self.state, self.error = "error", f"can't listen on 127.0.0.1:{port}: {err}"
@@ -203,6 +219,9 @@ class Bot:
     def close(self):
         if _bot[0] is self:
             _bot[0] = None
+        with self.arrived:
+            self.closed = True
+            self.arrived.notify_all()
         if self.server:
             # At once, not in the background: off means nothing listens from here on, and a channel switched back on
             # needs the port free.
@@ -263,6 +282,9 @@ class Bot:
             fd = os.open(self.store(client), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             with os.fdopen(fd, "a") as f:
                 f.write(json.dumps(entry) + "\n")
+        with self.arrived:
+            self.kept += 1
+            self.arrived.notify_all()
         self.audit(client=client, event="reply", id=entry["id"], chars=len(entry["text"]))
         return entry["id"]
 
@@ -319,7 +341,54 @@ class Bot:
                          "files": [], "bot": True})
         return {"id": mid, "sent": True, "note": "Answers arrive through read_replies."}
 
+    def wait_s(self, args):
+        w = args.get("wait_s")
+        if w in (None, ""):
+            return 0.0
+        try:
+            w = float(w)
+        except (TypeError, ValueError):
+            raise Refused(f"wait_s is a number of seconds, 0 to {MAX_WAIT_S}")
+        if w != w or w < 0:
+            raise Refused(f"wait_s is a number of seconds, 0 to {MAX_WAIT_S}")
+        return min(w, MAX_WAIT_S)
+
     def read_replies(self, client, args):
+        wait = self.wait_s(args)
+        with self.arrived:
+            seen = self.kept
+        out = self.read_once(client, args)
+        if out["replies"] or not wait:
+            return out
+        with self.arrived:
+            if self.closed:
+                return out
+            if self.waiting.get(client, 0) >= WAITERS_PER_CLIENT or sum(self.waiting.values()) >= WAITERS_TOTAL:
+                raise Refused("too many reads are already waiting: call again without wait_s, or wait for those to return")
+            self.waiting[client] = self.waiting.get(client, 0) + 1
+        try:
+            if "since" not in args or args.get("since") in (None, ""):
+                args = {**args, "since": out["next_since"] or time.time()}
+            end = time.monotonic() + wait
+            while True:
+                with self.arrived:
+                    left = end - time.monotonic()
+                    if self.closed or left <= 0:
+                        break
+                    if self.kept == seen:
+                        self.arrived.wait(left)
+                    seen = self.kept
+                out = self.read_once(client, args)
+                if out["replies"]:
+                    break
+            return out
+        finally:
+            with self.arrived:
+                self.waiting[client] -= 1
+                if not self.waiting[client]:
+                    del self.waiting[client]
+
+    def read_once(self, client, args):
         since = args.get("since")
         items = self.replies(client)
         if since in (None, ""):
@@ -379,7 +448,8 @@ class Bot:
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "peerlink-agents", "version": "1"},
                 "instructions": "post_to_skyforge sends skyforge a message; read_replies returns its answers to you. "
-                                "Poll read_replies with the next_since it gave you last time.",
+                                "Call read_replies with the next_since it gave you last time; add wait_s (up to "
+                                f"{MAX_WAIT_S}) to wait for an answer in the same call.",
             })
         if method == "ping":
             return ok({})
