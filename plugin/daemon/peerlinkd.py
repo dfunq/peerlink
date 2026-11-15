@@ -30,7 +30,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.36"
+VERSION = "0.9.37"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -1136,6 +1136,12 @@ def load_messages():
             pass
     messages.extend(list(by_id.values())[-500:])
     for m in messages:
+        # Handed to an agent that acks, and never acked: the daemon stopped before the agent said it had it. It's
+        # queued again; the plugin skips one it already has, so a message is never lost and never shown twice.
+        if m.get("status") == "delivered" and m.get("tracked") and not m.get("acked") and m.get("v") == 2 \
+                and time.time() - m["ts"] < 3600:
+            inboxes.setdefault(m["to"], []).append(m)
+            continue
         if m.get("status") != "queued":
             continue
         if m.get("v") == 2 and time.time() - m["ts"] < 3600:
@@ -3207,7 +3213,13 @@ def take_inbox(sid, track=False):
         for m in box:
             m["status"] = "delivered"
             m["delivered_ts"] = time.time()
-            append_log({"id": m["id"], "status": "delivered", "delivered_ts": m["delivered_ts"]})
+            # tracked: it counts as handed over only once acked, so a restart before then hands it out again.
+            entry = {"id": m["id"], "status": "delivered", "delivered_ts": m["delivered_ts"]}
+            if track:
+                m["tracked"] = entry["tracked"] = True
+                m.pop("acked", None)
+                entry["acked"] = False
+            append_log(entry)
             t = tasks.get(m.get("task") or "")
             if t and t["status"] == "open":
                 t["status"], t["updated"], started = "in_progress", time.time(), True
@@ -4457,7 +4469,10 @@ def ack(sid, ids, holding=None):
     with lock:
         mine = handed.get(sid, {})
         for mid in ids if isinstance(ids, list) else []:
-            mine.pop(str(mid), None)
+            got = mine.pop(str(mid), None)
+            if got:
+                got[0]["acked"] = True
+                append_log({"id": str(mid), "acked": True})
         now = time.time()
         for mid in holding if isinstance(holding, list) else []:
             if str(mid) in mine:
