@@ -208,6 +208,7 @@ An AI agent that isn't on this machine, any MCP client (Grok, another company's 
   peerlink agents revoke <name>     # token refused at once; its chat's mapping goes too
   peerlink agents off <name> / on <name>
   peerlink agents channel off / on   # the whole channel: nothing listens while it's off
+  peerlink agents dismiss <code>     # turn down a registration (approving one is only in the web UI)
   peerlink agents list
   ```
 
