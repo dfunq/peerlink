@@ -31,7 +31,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.38"
+VERSION = "0.9.39"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -1052,6 +1052,19 @@ def sent_last_hour(rec):
     """How many messages this agent's folder sent in the last hour: a chatty pair shows up here first."""
     cutoff, cwd = time.time() - 3600, rec.get("cwd")
     return sum(1 for m in reversed(messages[-500:]) if m.get("ts", 0) > cutoff and (m.get("from") == rec["id"] or (cwd and m.get("from_cwd") == cwd)))
+
+
+def peer_count(sid):
+    """How many live agents here share a space with this one: what local_peers() and peer_reach() would count, without
+    building each peer's whole record (threads, tasks, limits) under the lock on every heartbeat."""
+    now = time.time()
+    with lock:
+        rec = sessions.get(sid)
+        if rec is None:
+            return 0
+        mine = reach(rec)
+        return sum(1 for r in sessions.values()
+                   if r["id"] != sid and is_live(r, now) and (reach(r) or {space_of(r)[0]}) & mine)
 
 
 def local_peers():
@@ -5250,9 +5263,7 @@ class Handler(BaseHTTPRequestHandler):
                 cfg = client_config(sid)
             ack(sid, b.get("ack"), b.get("holding"))
             inbox = [] if cfg["muted"] else take_inbox(sid, track="ack" in b)
-            with lock:
-                mine = reach(rec)
-            others = sum(1 for p in local_peers() if p["id"] != sid and peer_reach(p) & mine) + len(config.get("remotes", []))
+            others = peer_count(sid) + len(config.get("remotes", []))
             with lock:
                 held = limit_for(sid)
             out = {"name": display_name(rec), "config": cfg, "inbox": inbox, "peer_count": others, "limit": held}
