@@ -30,7 +30,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.33"
+VERSION = "0.9.34"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -5429,8 +5429,9 @@ class Handler(BaseHTTPRequestHandler):
             # tokens, and the channel switched off or on; its port and where new clients land (default_to) are yours,
             # from the browser.
             b = self.body() if method in ("POST", "PUT") else {}
-            if method == "PUT" and rest == ["agentchannel"] and (not browser or self.key_ok()) and set(b) - {"enabled"}:
-                return self.reply(403, {"error": "the Agents channel's port and where clients land are set from the web UI"})
+            # Approving a registration is yours alone; turning one down (dismiss) is anyone's with the key.
+            if method == "PUT" and rest == ["agentchannel"] and (not browser or self.key_ok()) and set(b) - {"enabled", "dismiss"}:
+                return self.reply(403, {"error": "approving registrations, the port and where clients land are set from the web UI"})
             return self.reply(*agents_api(rest[1:], method, b))
         if rest and rest[0] == "slack":
             if method != "GET" and (not browser or self.key_ok()):
@@ -5765,8 +5766,8 @@ def cli_agents(args):
     """peerlink agents add NAME (--token-file FILE | --token-sha256 HEX) [--rate N] [--replace] | revoke NAME |
     off NAME | on NAME | channel off|on | list"""
     usage = ("usage: peerlink agents add NAME (--token-file FILE | --token-sha256 HEX) [--rate N] [--replace]\n"
-             "       peerlink agents revoke NAME | off NAME | on NAME | channel off|on | list")
-    if not args or args[0] not in ("add", "revoke", "off", "on", "channel", "list"):
+             "       peerlink agents revoke NAME | off NAME | on NAME | channel off|on | dismiss CODE | list")
+    if not args or args[0] not in ("add", "revoke", "off", "on", "channel", "dismiss", "list"):
         print(usage)
         return 2
     sub, rest = args[0], args[1:]
@@ -5790,11 +5791,21 @@ def cli_agents(args):
         print(f"Agents channel: {out['state']} on 127.0.0.1:{out['port']}, new clients land with {out['default_to'] or '(not set)'}")
         for c in out["clients"]:
             print(f"  {c['name']:<20} {'on ' if c['enabled'] else 'off'}  {c['rate_per_min']}/min  added {c['added']}{'' if c['mapped'] else '  (no agent receives it)'}")
+        print(f"Registrations: {'accepted' if out.get('registration') else 'off'}")
+        for p in out.get("pending") or []:
+            print(f"  waiting: {p['name']:<20} code {p['code']}  from {p['ip']}  {time.strftime('%Y-%m-%d %H:%M', time.localtime(p['ts']))}")
         return 0
     if not rest or rest[0].startswith("-"):
         print(usage)
         return 2
     name = rest[0]
+    if sub == "dismiss":
+        code, out = call("PUT", "/api/agentchannel", {"dismiss": name})
+        if code != 200:
+            print(out.get("error"), file=sys.stderr)
+            return 1
+        print(f"registration {name.upper()} dismissed")
+        return 0
     if sub == "channel":
         if name not in ("on", "off"):
             print(usage)
@@ -5865,7 +5876,7 @@ COMMANDS = {
     "rotate-key": (cli_rotate, "new key: signs out every browser, invalidates links"),
     "logout": (cli_logout, "sign out every browser"),
     "logs": (cli_logs, "the end of the daemon log"),
-    "agents": (cli_agents, "the Agents channel: add NAME --token-file F | --token-sha256 H, revoke NAME, off/on NAME, channel off/on, list"),
+    "agents": (cli_agents, "the Agents channel: add NAME --token-file F | --token-sha256 H, revoke NAME, off/on NAME, channel off/on, dismiss CODE, list"),
     "serve": (lambda a: serve(), "run in the foreground"),
     "fingerprint": (lambda a: print(CODE), "the fingerprint of this daemon's code"),
 }
