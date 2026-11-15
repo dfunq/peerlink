@@ -30,7 +30,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.29"
+VERSION = "0.9.30"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -5360,10 +5360,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.telegram_api(rest[1:], method)
         if rest and rest[0] == "agentchannel":
             # Clients (who) may be added and revoked by a caller with the key, the way your services agent keeps their
-            # tokens; the channel's switch, its port and where new clients land (default_to) are yours, from the browser.
-            if method == "PUT" and rest == ["agentchannel"] and (not browser or self.key_ok()):
-                return self.reply(403, {"error": "the Agents channel is set up from the web UI"})
-            return self.reply(*agents_api(rest[1:], method, self.body() if method in ("POST", "PUT") else {}))
+            # tokens, and the channel switched off or on; its port and where new clients land (default_to) are yours,
+            # from the browser.
+            b = self.body() if method in ("POST", "PUT") else {}
+            if method == "PUT" and rest == ["agentchannel"] and (not browser or self.key_ok()) and set(b) - {"enabled"}:
+                return self.reply(403, {"error": "the Agents channel's port and where clients land are set from the web UI"})
+            return self.reply(*agents_api(rest[1:], method, b))
         if rest and rest[0] == "slack":
             if method != "GET" and (not browser or self.key_ok()):
                 return self.reply(403, {"error": "Slack is set up from the web UI"})
@@ -5692,10 +5694,11 @@ def cli_logs(args):
 
 
 def cli_agents(args):
-    """peerlink agents add NAME --token-file FILE [--rate N] [--replace] | revoke NAME | off NAME | on NAME | list"""
-    usage = ("usage: peerlink agents add NAME --token-file FILE [--rate N] [--replace]\n"
-             "       peerlink agents revoke NAME | off NAME | on NAME | list")
-    if not args or args[0] not in ("add", "revoke", "off", "on", "list"):
+    """peerlink agents add NAME (--token-file FILE | --token-sha256 HEX) [--rate N] [--replace] | revoke NAME |
+    off NAME | on NAME | channel off|on | list"""
+    usage = ("usage: peerlink agents add NAME (--token-file FILE | --token-sha256 HEX) [--rate N] [--replace]\n"
+             "       peerlink agents revoke NAME | off NAME | on NAME | channel off|on | list")
+    if not args or args[0] not in ("add", "revoke", "off", "on", "channel", "list"):
         print(usage)
         return 2
     sub, rest = args[0], args[1:]
@@ -5724,14 +5727,28 @@ def cli_agents(args):
         print(usage)
         return 2
     name = rest[0]
-    if sub == "add":
-        opts = dict(zip(rest[1::2], rest[2::2]))
-        path = os.path.expanduser(opts.get("--token-file", ""))
-        if not path:
+    if sub == "channel":
+        if name not in ("on", "off"):
             print(usage)
             return 2
-        # The token stays in its file: only its sha256 goes to the daemon.
-        if os.path.exists(path):
+        code, out = call("PUT", "/api/agentchannel", {"enabled": name == "on"})
+        if code != 200:
+            print(out.get("error"), file=sys.stderr)
+            return 1
+        print(f"Agents channel {name}: {out['state']}" + ("" if name == "off" else f" on 127.0.0.1:{out['port']}"))
+        return 0
+    if sub == "add":
+        opts = dict(zip([a for a in rest[1:] if a != "--replace"][0::2], [a for a in rest[1:] if a != "--replace"][1::2]))
+        path = os.path.expanduser(opts.get("--token-file", ""))
+        given = opts.get("--token-sha256", "").strip().lower()
+        if bool(path) == bool(given):
+            print(usage)
+            return 2
+        made = False
+        # The token stays in its file, or with whoever made it: only its sha256 goes to the daemon.
+        if given:
+            token = None
+        elif os.path.exists(path):
             with open(path) as f:
                 token = f.read().strip()
             if len(token) < 32 or any(ch.isspace() for ch in token):
@@ -5743,14 +5760,14 @@ def cli_agents(args):
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "w") as f:
                 f.write(token + "\n")
-        body = {"name": name, "token_sha256": hashlib.sha256(token.encode()).hexdigest(), "replace": "--replace" in rest}
+        body = {"name": name, "token_sha256": given or hashlib.sha256(token.encode()).hexdigest(), "replace": "--replace" in rest}
         if "--rate" in opts:
             body["rate_per_min"] = opts["--rate"]
         code, out = call("POST", "/api/agentchannel/clients", body)
         if code != 200:
             print(out.get("error"), file=sys.stderr)
             return 1
-        print(f"added {name} ({out['channel_id']}); its token is in {path}{' (made now, mode 600)' if made else ''}")
+        print(f"added {name} ({out['channel_id']})" + (f"; its token is in {path}{' (made now, mode 600)' if made else ''}" if path else " by its token's hash"))
         return 0
     if sub == "revoke":
         code, out = call("DELETE", f"/api/agentchannel/clients/{name}")
@@ -5780,7 +5797,7 @@ COMMANDS = {
     "rotate-key": (cli_rotate, "new key: signs out every browser, invalidates links"),
     "logout": (cli_logout, "sign out every browser"),
     "logs": (cli_logs, "the end of the daemon log"),
-    "agents": (cli_agents, "the Agents channel's clients: add NAME --token-file F, revoke NAME, off/on NAME, list"),
+    "agents": (cli_agents, "the Agents channel: add NAME --token-file F | --token-sha256 H, revoke NAME, off/on NAME, channel off/on, list"),
     "serve": (lambda a: serve(), "run in the foreground"),
     "fingerprint": (lambda a: print(CODE), "the fingerprint of this daemon's code"),
 }
