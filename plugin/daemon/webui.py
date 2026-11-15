@@ -321,6 +321,9 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <li class="step" id="sstep2"><span class="step-n">2</span><div class="step-body"><div class="step-t">Message it, then allow yourself</div><div id="sstep2b"></div></div></li>
 <li class="step" id="sstep3"><span class="step-n">3</span><div class="step-body"><div class="step-t">Map channels to agents</div><div id="sstep3b"></div></div></li>
 </ol></div></details>
+<details class="plat" id="pagents"><summary><span class="plogo" style="background:#0F766E"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M8 9l-4 3 4 3M16 9l4 3-4 3M13.5 6l-3 12"/></svg></span><span class="ptitle"><b>Agents</b><span class="psub">Other AI agents, over MCP</span></span><span class="pstate" id="agstatus"></span><span class="chev" aria-hidden="true"></span></summary><div class="pbody">
+<p class="meta">An agent outside this machine (any MCP client) can post to the agent you pick and read its replies, and nothing else: two tools, <span class="mono">post_message</span> and <span class="mono">read_replies</span>. Each client is a chat of its own, with its own token. Only the token's hash is kept here. Your agents can answer a client there but never start a conversation with it, and your approvals and questions never go there.</p>
+<div id="agbody"></div></div></details>
 <details class="plat" id="pmap"><summary><span class="plogo" style="background:var(--acc)"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" d="M4 7h11m0 0-3-3m3 3-3 3M20 17H9m0 0 3-3m-3 3 3 3"/></svg></span><span class="ptitle"><b>Channel ⇄ Agent Mappings</b><span class="psub">Which agents hear and post in each channel</span></span><span class="pstate" id="mapstatus"></span><span class="chev" aria-hidden="true"></span></summary><div class="pbody">
 <div id="dstep3b"></div></div></details>
 <details class="plat" id="popts"><summary><span class="plogo" style="background:var(--mut)"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2" fill="none" stroke="#fff" stroke-width="2"/><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M5.6 18.4l1.8-1.8M16.6 7.4l1.8-1.8"/></svg></span><span class="ptitle"><b>Options</b><span class="psub">Progress reactions, buttons and files</span></span><span class="pstate" id="optstatus"></span><span class="chev" aria-hidden="true"></span></summary><div class="pbody">
@@ -386,7 +389,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 // The page's own dialog for a yes-or-no or a notice, in place of the browser's confirm() and alert() boxes. The button
 // says what happens ("Delete", "Move"), and a destructive one is red; Escape or a click outside answers no.
 function ask(text,{ok,tell:only}={}){return new Promise(done=>{
-  const verb=ok||(only?'OK':(text.match(/^[A-Z][a-z]+/)||['OK'])[0]),bad=!only&&/^(Delete|Clear|End|Cancel|Disconnect|Stop|Rotate|Sign|Unassign|Remove)$/.test(verb);
+  const verb=ok||(only?'OK':(text.match(/^[A-Z][a-z]+/)||['OK'])[0]),bad=!only&&/^(Delete|Clear|End|Cancel|Disconnect|Stop|Rotate|Sign|Unassign|Remove|Revoke)$/.test(verb);
   const d=document.createElement('dialog');d.className='ask';
   d.innerHTML=`<p></p><div class="acts">${only?'':`<button type="button" class="ghost" value="no">${verb==='Cancel'?'Keep':'Cancel'}</button>`}<button type="button" value="yes"${bad?' class="bad"':''}></button></div>`;
   d.querySelector('p').textContent=text;d.querySelector('[value=yes]').textContent=verb;
@@ -1008,8 +1011,8 @@ function entrySelect(attrs,placeholder){return `<select ${attrs}><option value="
 function agentSelect(val,attrs,placeholder){const opts=agentFolders();const extra=val&&!opts.some(o=>o.cwd===val)?[{cwd:val}]:[];
   return `<select ${attrs}><option value="">${placeholder}</option>${[...opts,...extra].map(o=>`<option value="${esc(o.cwd)}" ${o.cwd===val?'selected':''}>${esc(folderLabel(o.cwd))}</option>`).join('')}</select>`}
 function channelSelect(val,attrs,skip){const gs=dGuilds||[];
-  return `<select ${attrs}><option value="">Pick a channel…</option>${gs.map(g=>`<optgroup label="${esc(g.name)}">${g.channels.filter(c=>!skip||!skip.has(c.id)).map(c=>`<option value="${esc(c.id)}" ${c.id===val?'selected':''}>${g.id==='telegram'||g.id==='slack'?'':'#'}${esc(c.name)}</option>`).join('')}</optgroup>`).join('')}</select>`}
-const chanName=id=>{for(const g of dGuilds||[])for(const c of g.channels)if(c.id===id)return (g.id==='telegram'||g.id==='slack'?'':'#')+c.name;return 'channel '+id};
+  return `<select ${attrs}><option value="">Pick a channel…</option>${gs.map(g=>`<optgroup label="${esc(g.name)}">${g.channels.filter(c=>!skip||!skip.has(c.id)).map(c=>`<option value="${esc(c.id)}" ${c.id===val?'selected':''}>${OTHER(g)?'':'#'}${esc(c.name)}</option>`).join('')}</optgroup>`).join('')}</select>`}
+const chanName=id=>{for(const g of dGuilds||[])for(const c of g.channels)if(c.id===id)return (OTHER(g)?'':'#')+c.name;return 'channel '+id};
 async function loadDiscord(check){
   dState=await api('/api/discord'+(check?'?check=1':''));
   if(dGuilds===null){const r=await api('/api/discord/channels');dGuilds=r.guilds||[]}
@@ -1051,9 +1054,9 @@ function renderDiscord(){if(!dState)return;const d=dState,invited=(dGuilds||[]).
     <div class="addline"><input id="dbots" class="mono" placeholder="e.g. 1562000000000000000" value="${esc((d.trusted_bots||[]).join(', '))}" data-dbots style="flex:1;min-width:0"></div>
     <h2>Bot</h2>
     <label class="check"><input type="checkbox" data-dact="enabled" ${d.enabled?'checked':''}> Bot running</label>`;
-  if(!(d.configured&&invited)&&!tgChats){$('#dstep3b').innerHTML='<p class="meta">Set up Discord, Telegram or Slack above; the channels and chats its bot can see are mapped to agents here.</p>';$('#dmore').innerHTML='';return}
+  if(!(d.configured&&invited)&&!tgChats){$('#dstep3b').innerHTML='<p class="meta">Set up Discord, Telegram, Slack or Agents above; the channels and chats its bot can see are mapped to agents here.</p>';$('#dmore').innerHTML='';return}
   // A mapped channel is a card: its name, then its agents as chips you toggle. Every change saves at once.
-  const online=id=>({telegram:tState,slack:sState,discord:d}[platOf(id)]||{}).state==='online';
+  const online=id=>({telegram:tState,slack:sState,agents:aState,discord:d}[platOf(id)]||{}).state==='online';
   const taken=new Set(dDraft.routes.map(r=>r.channel_id).filter(Boolean));
   const rows=dDraft.routes.map((r,i)=>`<div class="mrow">
     <div class="mhead">${r.channel_id?`${platLogo(r.channel_id)}<span class="mname">${esc(chanName(r.channel_id))}</span>
@@ -1118,10 +1121,10 @@ document.addEventListener('click',async e=>{const t=e.target.closest('button');i
 });
 // A chat's platform from its id, and that platform's logo.
 const SLACK_LOGO='<svg viewBox="0 0 24 24" aria-hidden="true"><path stroke="#fff" stroke-width="2.6" stroke-linecap="round" fill="none" d="M9 4.5v15M15 4.5v15M4.5 9h15M4.5 15h15"/></svg>';
-const PLAT={discord:['Discord','#5865F2',DISCORD_LOGO],telegram:['Telegram','#26A5E4',TG_LOGO],slack:['Slack','#4A154B',SLACK_LOGO]};
-const platOf=id=>String(id).startsWith('tg:')?'telegram':String(id).startsWith('slack:')?'slack':'discord';
+const PLAT={discord:['Discord','#5865F2',DISCORD_LOGO],telegram:['Telegram','#26A5E4',TG_LOGO],slack:['Slack','#4A154B',SLACK_LOGO],agents:['Agents','#0F766E','<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M8 9l-4 3 4 3M16 9l4 3-4 3M13.5 6l-3 12"/></svg>']};
+const platOf=id=>String(id).startsWith('tg:')?'telegram':String(id).startsWith('slack:')?'slack':String(id).startsWith('agents:')?'agents':'discord';
 const platLogo=id=>{const [name,color,logo]=PLAT[platOf(id)];return `<span class="mlogo" title="${name}" style="background:${color}">${logo}</span>`};
-const OTHER=g=>g.id==='telegram'||g.id==='slack';
+const OTHER=g=>g.id==='telegram'||g.id==='slack'||g.id==='agents';
 // -- Telegram: the bot's token, who may talk to it, and the chats it has heard from ------------------
 let tState=null,tBusy=false;
 async function loadTelegram(){const before=JSON.stringify(Object.keys(tState?.chats||{}));tState=await api('/api/telegram');renderTelegram();
@@ -1194,9 +1197,43 @@ document.addEventListener('click',async e=>{const t=e.target.closest('button');i
 // Someone messaging the bot, or a chat it joins, shows up without a reload.
 setInterval(()=>{if(location.hash==='#channels'&&tState?.configured&&!document.hidden)loadTelegram()},4000);
 setInterval(()=>{if(location.hash==='#channels'&&!document.hidden&&(sState?.configured||!sState))loadSlack()},4000);
+// -- Agents: outside agents over MCP. Clients are added with the CLI (the token never passes through here); where they
+// land, the switch and the port are set here, and a client can be switched off or revoked here.
+let aState=null,aShown=null;
+async function loadAgents(){const before=JSON.stringify((aState?.clients||[]).map(c=>c.name));aState=await api('/api/agentchannel');renderAgents();
+  if(before!==JSON.stringify((aState.clients||[]).map(c=>c.name))&&dState){dGuilds=null;loadDiscord()}}
+function renderAgents(){const a=aState;if(!a||a.error===undefined&&!a.state)return;
+  const label={online:'Online',off:'Turned off',error:'Error',unconfigured:'No clients'}[a.state]||a.state;
+  $('#agstatus').innerHTML=platState(a.clients.length>0,a.state,label,a.state==='online'&&`127.0.0.1:${a.port}`,a.error);
+  if(dState&&a.state!==aShown){aShown=a.state;renderDiscord()}
+  if(document.activeElement&&$('#agbody').contains(document.activeElement))return;
+  const rows=a.clients.map(c=>`<div class="addline small"><b class="mono">${esc(c.name)}</b>
+      <label class="small"><input type="checkbox" data-agon="${esc(c.name)}" ${c.enabled?'checked':''}> On</label>
+      <label class="small">Posts per minute <input type="number" min="1" max="120" value="${c.rate_per_min}" data-agrate="${esc(c.name)}" style="width:64px"></label>
+      <span class="mut">added ${esc((c.added||'').slice(0,10))}</span>${c.mapped?'':' <span class="pill warn">no agent receives it</span>'}
+      <button class="ghost small" data-agrevoke="${esc(c.name)}">Revoke</button></div>`).join('');
+  $('#agbody').innerHTML=`<h2>Where new clients land</h2>
+    <p class="meta">A new client is mapped to this agent, which receives its posts. Change one client's agents under <b>Channel ⇄ Agent Mappings</b>, below.</p>
+    <div class="addline">${agentSelect(a.default_to,'data-agto style="flex:1;min-width:0"','Pick an agent…')}</div>
+    <h2>Clients</h2>${rows||'<p class="small mut">None yet.</p>'}
+    <p class="meta" style="margin-top:8px">Add one in a shell. The token stays in its file, made there if it doesn't exist (mode 600), and only its hash reaches peerlink:<br>
+    <span class="mono">peerlink agents add &lt;name&gt; --token-file &lt;file&gt;</span>. Revoke with <span class="mono">peerlink agents revoke &lt;name&gt;</span> or the button above.</p>
+    <h2>Endpoint</h2>
+    <p class="meta">MCP (Streamable HTTP) at <span class="mono">http://127.0.0.1:${a.port}/mcp</span>, health at <span class="mono">/healthz</span>, listening on this machine only: put a tunnel with its own access control in front of it. Every call is logged to <span class="mono">~/.peerlink/agents/audit.jsonl</span>.</p>
+    <label class="check"><input type="checkbox" data-agact="enabled" ${a.enabled?'checked':''}> Channel on</label>`}
+const agPut=(path,body)=>api('/api/agentchannel'+path,{method:'PUT',headers:J,body:JSON.stringify(body)});
+document.addEventListener('change',e=>{const t=e.target;
+  if(t.dataset.agto!==undefined)agPut('',{default_to:t.value}).then(()=>{t.blur();loadAgents()});
+  if(t.dataset.agact==='enabled')agPut('',{enabled:t.checked}).then(loadAgents);
+  if(t.dataset.agon)agPut('/clients/'+encodeURIComponent(t.dataset.agon),{enabled:t.checked}).then(loadAgents);
+  if(t.dataset.agrate)agPut('/clients/'+encodeURIComponent(t.dataset.agrate),{rate_per_min:+t.value}).then(()=>{t.blur();loadAgents()})});
+document.addEventListener('click',async e=>{const t=e.target.closest('button');if(!t)return;
+  if(t.dataset.agrevoke&&await ask(`Revoke ${t.dataset.agrevoke}? Its token stops working at once, and its chat's mapping is removed.`,{ok:'Revoke'})){
+    await api('/api/agentchannel/clients/'+encodeURIComponent(t.dataset.agrevoke),{method:'DELETE'});loadAgents()}});
+setInterval(()=>{if(location.hash==='#channels'&&!document.hidden)loadAgents()},5000);
 // Invited in another tab, or back from the Developer Portal: look again when this tab gets focus.
 window.addEventListener('focus',()=>{if(location.hash==='#channels'&&dState?.configured){dGuilds=null;loadDiscord(true)}});
-window.addEventListener('hashchange',()=>{if(location.hash==='#discord')location.hash='#channels';if(location.hash==='#channels'){loadDiscord();loadTelegram();loadSlack()}});
+window.addEventListener('hashchange',()=>{if(location.hash==='#discord')location.hash='#channels';if(location.hash==='#channels'){loadDiscord();loadTelegram();loadSlack();loadAgents()}});
 
 // Standing rules, on their own page: yours to add, change, turn off or delete; an agent's proposal to approve.
 let allRules=[];
@@ -1260,6 +1297,6 @@ async function tick(){
   catch(e){if(!signedOut){misses++;offline(e)}}
   if(signedOut){live?.close();return}
   setTimeout(tick,streamOk?30000:misses?10000:2000)}
-show();loadCfg().then(()=>refresh(true)).then(()=>{if(location.hash==='#discord')location.hash='#channels';else if(location.hash==='#channels'){loadDiscord();loadTelegram();loadSlack()}}).catch(e=>{misses=1;offline(e)}).finally(()=>{connect();setTimeout(tick,2000)});
+show();loadCfg().then(()=>refresh(true)).then(()=>{if(location.hash==='#discord')location.hash='#channels';else if(location.hash==='#channels'){loadDiscord();loadTelegram();loadSlack();loadAgents()}}).catch(e=>{misses=1;offline(e)}).finally(()=>{connect();setTimeout(tick,2000)});
 </script></body></html>
 """
