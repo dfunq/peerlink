@@ -31,7 +31,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.40"
+VERSION = "0.9.41"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -888,6 +888,75 @@ def set_parent(space, parent):
     return 200, {"space": space, "parent": parent}
 
 
+def links_of(rec):
+    """The agents you linked this one with in the web UI, by agent id: each pair sees and messages each other whatever
+    spaces they're in. Kept for the agent, so a link survives /clear and restarts. Nobody else's reach changes."""
+    me = (rec or {}).get("agent") or ""
+    if not me:
+        return set()
+    out = set()
+    for pair in config.get("agent_links") or []:
+        if len(pair) == 2 and me in pair:
+            out.add(pair[1] if pair[0] == me else pair[0])
+    return out - {"", me}
+
+
+def agent_label(aid):
+    """An agent's name for the page and messages: its live session's, else the name it last had."""
+    live = agent_session(aid)
+    return display_name(live) if live else (agents.get(aid) or {}).get("name") or aid
+
+
+def find_agent(word):
+    """An agent by its id or name, running or not: the live one first when two share a name."""
+    w = word.strip().lower()
+    if not w:
+        return None
+    if w in agents:
+        return w
+    live = [r for r in sessions.values() if is_live(r) and r.get("agent") and display_name(r).lower() == w]
+    if live:
+        return max(live, key=lambda r: r["last_seen"])["agent"]
+    named = [a for a in agents.values() if (a.get("name") or "").lower() == w]
+    return max(named, key=lambda a: a.get("seen") or 0)["id"] if named else None
+
+
+def set_links(sid, names):
+    """You set who this agent is linked with (none clears them). Both sides of a link added or dropped are told."""
+    with lock:
+        rec = sessions.get(sid)
+        if rec is None or not rec.get("agent"):
+            return 404, {"error": "that agent isn't running"}
+        me, want, unknown = rec["agent"], set(), []
+        for n in names:
+            aid = find_agent(str(n))
+            if aid is None:
+                unknown.append(str(n))
+            elif aid != me:
+                want.add(aid)
+        if unknown:
+            return 400, {"error": f"no agent is called {', '.join(unknown)}"}
+        old = links_of(rec)
+        keep = [p for p in config.get("agent_links") or [] if len(p) == 2 and me not in p]
+        config["agent_links"] = keep + [sorted([me, a]) for a in sorted(want)]
+        save_config()
+        added, dropped = sorted(want - old), sorted(old - want)
+        name = display_name(rec)
+        for aid in added:
+            task_message(None, rec.get("cwd", ""), f"Your user linked you with {agent_label(aid)}: you see and message each other whatever spaces you're in.", prefer=rec)
+            other = agent_session(aid)
+            if other:
+                task_message(None, other.get("cwd", ""), f"Your user linked you with {name}: you see and message each other whatever spaces you're in.", prefer=other)
+        for aid in dropped:
+            task_message(None, rec.get("cwd", ""), f"Your user removed your link with {agent_label(aid)}.", prefer=rec)
+            other = agent_session(aid)
+            if other:
+                task_message(None, other.get("cwd", ""), f"Your user removed your link with {name}.", prefer=other)
+        if added or dropped:
+            log("links", name, "->", ", ".join(agent_label(a) for a in sorted(want)) or "(none)")
+        return 200, {"id": sid, "links": sorted(agent_label(a) for a in want)}
+
+
 def reach(rec):
     """The spaces this agent sees and messages: its own, the parent too when it leads its space, and any you added it to."""
     parent = parent_of(rec)
@@ -1003,6 +1072,7 @@ def public_peer(rec):
         "task_times": {i: [int(tasks[i]["created"]), int(tasks[i]["updated"])] for i in owned_task_ids(rec)[:20]},
         "reach": sorted(reach(rec)),
         "also": also_in(rec),
+        "links": sorted(agent_label(a) for a in links_of(rec)),
         "busy": rec.get("busy", False),
         "busy_since": rec.get("busy_since"),
         "sent_hour": sent_last_hour(rec),
@@ -1059,9 +1129,9 @@ def peer_count(sid):
         rec = sessions.get(sid)
         if rec is None:
             return 0
-        mine = reach(rec)
+        mine, linked = reach(rec), links_of(rec)
         return sum(1 for r in sessions.values()
-                   if r["id"] != sid and is_live(r, now) and (reach(r) or {space_of(r)[0]}) & mine)
+                   if r["id"] != sid and is_live(r, now) and ((reach(r) or {space_of(r)[0]}) & mine or r.get("agent") in linked))
 
 
 def local_peers():
@@ -1127,21 +1197,23 @@ def remote_peers(max_age=REMOTE_CACHE_S):
         return [dict(p) for b in bases for p in remote_cache.get(b, (0, []))[1]]
 
 
-def resolve(to, spaces=None):
-    """Find a live local agent by id, name or id prefix; only one that shares one of `spaces` when given.
+def resolve(to, spaces=None, sender=None):
+    """Find a live local agent by id, name or id prefix; only one that shares one of `spaces` when given, or that
+    you linked with `sender`.
 
     A name is what the agent is shown as (its nickname once it has one), never the folder it was named after,
     so a renamed agent's old name can't land on someone else. A match outside `spaces` is an error, not a miss."""
     to = to.strip().lower()
     with lock:
         live = [r for r in sessions.values() if is_live(r)]
+        linked = links_of(sender)
         for match in (
             lambda r: r["id"].lower() == to,
             lambda r: display_name(r).lower() == to,
             lambda r: r["id"].lower().startswith(to),
         ):
             found = [r for r in live if match(r)]
-            hits = [r for r in found if spaces is None or reach(r) & spaces]
+            hits = [r for r in found if spaces is None or reach(r) & spaces or r.get("agent") in linked]
             if len(hits) == 1:
                 return hits[0], None
             if len(hits) > 1:
@@ -2731,7 +2803,7 @@ def send(body):
         elif word in ("space", "lead") or word.startswith(("space:", "lead:")):
             target, err = lead_target(sender_rec, word, spaces)
         if target is None and err is None:
-            target, err = resolve(to, spaces)
+            target, err = resolve(to, spaces, sender_rec)
         if err:
             return 409, {"error": err}
 
@@ -5276,7 +5348,10 @@ class Handler(BaseHTTPRequestHandler):
                 me = sessions.get(exclude)
                 space = space_of(me)[0] if me else None
                 mine = reach(me) if me else None
-            seen = [p for p in peers if p["id"] != exclude and (mine is None or peer_reach(p) & mine)]
+                linked = links_of(me)
+            # A peer you linked it with is seen too, whatever its space; agent ids are this machine's own.
+            seen = [p for p in peers if p["id"] != exclude and (mine is None or peer_reach(p) & mine
+                                                               or (p.get("host") == HOSTNAME and p.get("agent") in linked))]
             # A space inside the asker's shows only its lead; the lead lists who works under it, so an agent there that
             # the asker can't reach doesn't pass for one that isn't running.
             if mine is not None:
@@ -5570,6 +5645,14 @@ class Handler(BaseHTTPRequestHandler):
             if not browser or self.key_ok():
                 return self.reply(403, {"error": "where a space sits is set in the web UI"})
             code, out = set_parent(rest[1], self.body().get("parent"))
+            return self.reply(code, out)
+        if rest == ["links"] and method == "POST":
+            # Only you, in the browser: no agent links itself with another.
+            if not browser or self.key_ok():
+                return self.reply(403, {"error": "links between agents are set in the web UI"})
+            body = self.body()
+            names = body.get("names")
+            code, out = set_links(str(body.get("id") or ""), names if isinstance(names, list) else [])
             return self.reply(code, out)
         if rest == ["members"] and method == "POST":
             # Only you, in the browser: no agent or bot adds itself, or another, to a space.

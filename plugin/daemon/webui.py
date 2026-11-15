@@ -239,7 +239,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <details class="how"><summary>How it works</summary><ul>
 <li>Each space shows its lead first, outlined in orange, with its members beneath it. A space can sit inside another: its lead then sits with that space's agents, with its own space beneath it.</li>
 <li>Work sent to a space goes to its lead: the agent you picked, or else the one that was alone in it. Pick leads, and which space sits inside which, on the Spaces page.</li>
-<li>An agent only sees and messages agents in its own space. A lead also sees the space its space sits inside.</li>
+<li>An agent only sees and messages agents in its own space. A lead also sees the space its space sits inside. Two agents you link (an agent's details, "Linked with") see and message each other whatever their spaces.</li>
 <li>To move an agent, open it and set its space on the Details tab. It moves alone: other agents in its folder stay where they are.</li>
 <li>The bar is how full the agent's context window is: it turns yellow past half and red past 80%. A yellow dot means it's working, a green one that it's idle. Messages an hour show only when an agent is chatty, 20 or more.</li></ul></details><div class="orgwrap"><div id="peers"></div><div id="detail"></div></div></section>
 
@@ -476,13 +476,15 @@ function agentPanel(x,others=[]){const sc=cfg.sessions?.[x.id]||{};const setSpac
    ${x.remote?'':`<div class="ptiles"><div><span class="k small">Context</span><b>${x.context??'?'}%</b>${x.context!=null?`<span class="cmeter${x.context>=80?' hi':x.context>=50?' mid':''}"><i style="width:${Math.min(100,x.context)}%"></i></span>`:''}</div>
      <div><span class="k small">Sent / hour</span><b${x.sent_hour>=20?' style="color:var(--warn)"':''}>${x.sent_hour||0}</b></div><div><span class="k small">Open tasks</span><b>${x.open_tasks||0}</b></div></div>`}
    ${x.remote?'':`<div class="ptabs">${[['about','Agent'],['tasks','Tasks'+(x.open_tasks?' · '+x.open_tasks:'')],['details','Details'],['controls','Controls']].map(([k,t])=>`<button class="${tab===k?'on':''}" data-ptab="${k}">${t}</button>`).join('')}</div>`}
-   ${tab==='tasks'?panelTasks(x):tab==='details'?`<form id="agentform" data-id="${esc(x.id)}" data-nick="${esc(sc.nickname||'')}" data-space="${esc(setSpace)}" data-role="${esc(sc.role||'')}" data-cwd="${esc(x.cwd)}" data-who="${esc(x.name)}" data-lead="${x.leads?esc(x.space):''}" data-also="${esc((x.also||[]).join(', '))}">
+   ${tab==='tasks'?panelTasks(x):tab==='details'?`<form id="agentform" data-id="${esc(x.id)}" data-nick="${esc(sc.nickname||'')}" data-space="${esc(setSpace)}" data-role="${esc(sc.role||'')}" data-cwd="${esc(x.cwd)}" data-who="${esc(x.name)}" data-lead="${x.leads?esc(x.space):''}" data-also="${esc((x.also||[]).join(', '))}" data-links="${esc((x.links||[]).join(', '))}">
     <label>Name<input name="nickname" type="text" value="${esc(sc.nickname||'')}" placeholder="${esc(x.name)}"><span class="hint">What other agents call it. Kept for this folder.</span></label>
     <label>Role<textarea name="role" rows="3" placeholder="${x.folder_role?'From the folder: '+esc(x.folder_role):'What this agent is here for, e.g. Owns the billing API: invoices, payments, the Stripe webhook.'}">${esc(sc.role||'')}</textarea><span class="hint">For this agent only, kept across /clear and resume. The agent gets it as its brief, and other agents see it.${x.folder_role?' Leave it empty to use the role: in its folder\'s .peerlink.':' A role: line in a folder\'s .peerlink is the role of every agent there without one of its own.'}</span></label>
     <label>Space<input name="space" type="text" list="spacenames" value="${esc(setSpace)}" placeholder="${x.space_source==='file'?esc(x.space)+' (from its .peerlink)':x.space_source==='started'?esc(x.space)+' (started for it)':'unassigned'}"><span class="hint">For this agent only: others in its folder stay where they are. It keeps it after /clear and restarts.${x.space_source==='agent'?' Leave it empty to go back to its folder\'s space.':''}</span>
     ${x.space&&x.space!=='default'?`<button type="button" class="ghost small" data-unassign="${esc(x.id)}" data-who="${esc(x.name)}" data-lead="${x.leads?esc(x.space):''}" data-folder="${esc(x.cwd)}" style="margin-top:6px">Unassign from ${esc(x.space)}</button>`:''}</label>
     <details class="adv"${(x.also||[]).length?' open':''}><summary>Also in other spaces</summary>
     <label>Also a member of<input name="also" type="text" value="${esc((x.also||[]).join(', '))}" placeholder="none"><span class="hint">Rarely needed: more spaces it sees and messages, on top of its own. For this agent only. Separate with commas.</span></label></details>
+    <details class="adv"${(x.links||[]).length?' open':''}><summary>Linked with other agents</summary>
+    <label>Linked with<input name="links" type="text" value="${esc((x.links||[]).join(', '))}" placeholder="none"><span class="hint">Agents it sees and messages, and that see and message it, whatever spaces they're in. Nobody else's reach changes. Separate names with commas.</span></label></details>
     <datalist id="spacenames">${Object.keys(leadOf).concat(livePeers.map(p=>p.space)).filter((n,i,a)=>n&&n!=='default'&&a.indexOf(n)===i).sort().map(n=>`<option value="${esc(n)}">`).join('')}</datalist>
     <div><button type="submit">Save</button> <span id="agentmsg" class="small"></span></div></form>`:tab==='controls'?`<form id="agentform" data-id="${esc(x.id)}" data-wake="${wake}" data-muted="${x.muted?'1':''}" data-auto="${x.auto_approve?'1':''}">
     <label>When a message arrives<select name="wake">${opt('default','Use the default')}${opt('on','Start a turn')}${opt('off','Wait for the next prompt')}</select></label>
@@ -616,7 +618,8 @@ async function refresh(force,snap){
   // A lead is told apart by its outline (and says which team on hover), so every card keeps its context in one place.
   // The badge sits in the name row, left of the context; an offline lead's clear link goes beneath.
   // An implicit lead (it was alone in the space) has a dashed badge, and says so on hover, so the name keeps its room.
-  const alsoBadges=x=>(x.also||[]).map(n=>`<span class="badge guest" title="Also a member of ${esc(n)}">+${esc(n)}</span>`).join('');
+  const alsoBadges=x=>(x.also||[]).map(n=>`<span class="badge guest" title="Also a member of ${esc(n)}">+${esc(n)}</span>`).join('')
+    +(x.links||[]).map(n=>`<span class="badge guest" title="Linked with ${esc(n)}">↔${esc(n)}</span>`).join('');
   const leadBadge=x=>x.leads?`<span class="badge${x.leads==='only'?' only':''}" title="${x.leads==='only'?'Lead (only agent): it was the only agent in the space':'Lead'}">Lead</span>`:'';
   const badge=x=>alsoBadges(x)+leadBadge(x);
   const clearOff=x=>x.leads&&x.offline?`<div><span class="small mut" data-clearlead="${esc(x.space)}" title="Clear this lead" style="cursor:pointer">clear</span></div>`:'';
@@ -990,6 +993,8 @@ document.addEventListener('submit',async e=>{if(e.target.id!=='agentform')return
   if(has('space')&&v('space')!==d.space){const r=await post('/api/folders/space',{cwd:d.cwd,id,space:v('space')});if(r.error)errs.push(r.error)}
   const also=has('also')?v('also').split(',').map(t=>t.trim()).filter(Boolean):[];
   if(has('also')&&also.join(', ')!==d.also){const r=await post('/api/members',{cwd:d.cwd,id,spaces:also});if(r.error)errs.push(r.error)}
+  const links=has('links')?v('links').split(',').map(t=>t.trim()).filter(Boolean):[];
+  if(has('links')&&links.join(', ')!==d.links){const r=await post('/api/links',{id,names:links});if(r.error)errs.push(r.error)}
   editing=false;lastPanel='';await refresh(true);
   const m2=$('#agentmsg');if(m2){m2.className='small '+(errs.length?'err':'ok');m2.textContent=errs.length?errs.join(' '):'Saved'}});
 document.addEventListener('click',async e=>{const t=e.target.closest('button');if(!t)return;
