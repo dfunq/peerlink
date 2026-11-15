@@ -191,7 +191,7 @@ An AI agent that isn't on this machine, any MCP client (Grok, another company's 
 - **Two tools, nothing else.** `post_to_skyforge(text, reply_to?)` posts into the client's chat, so it reaches the agent mapped to receive it. `read_replies(since?)` returns that agent's replies to this client, oldest first, with a `next_since` to pass next time. The client gets no peers, no names to send to, no Inbox commands, tasks, announcements, spawns, schedules or rules. Any other tool fails with "unknown tool".
 - **Labelled and untrusted.** A post reaches the agent as `grok on Agents`, starting with a line that says it's from an external agent and is untrusted input. Because that label comes first, a `Task:` or `name:` prefix in the text does nothing.
 - **Your agents only answer.** A new client's mapping has Sends off: the agent answers with `reply_to`, which goes back on that chat, but can't start a conversation there. Your approvals, questions, limit notices and `"discord"` sends never go to an Agents chat.
-- **Transport:** MCP Streamable HTTP, with JSON responses, at `http://127.0.0.1:7931/mcp` (`port` in the section). Health is at `/healthz`. It listens on this machine only, so put a tunnel with its own access control (Cloudflare Access) in front of it. A request with an `Origin` header (a browser) is refused.
+- **Transport:** MCP Streamable HTTP, with JSON responses, at `http://127.0.0.1:7931/mcp` (`port` in the section). Health is at `/healthz`, and registration at `/register`. It listens on this machine only, so put a tunnel with its own access control (Cloudflare Access) in front of it. A request with an `Origin` header (a browser) is refused.
 - **Auth:** `Authorization: Bearer <token>`, one token per client. Only the token's sha256 is kept, in `~/.peerlink/discord.json` (0600):
 
   ```json
@@ -212,6 +212,15 @@ An AI agent that isn't on this machine, any MCP client (Grok, another company's 
   ```
 
   A caller with the key may add and revoke clients and switch the channel. Where new clients land (`default_to`) and its port are set only from the web UI.
+- **Registering.** With **Accept registrations** on (in the web UI, off by default), a client can ask to connect by itself. It makes its own token and sends only the token's hash:
+
+  ```
+  curl -X POST https://<host>/register -H 'Content-Type: application/json' \
+       -d "{\"name\": \"ryan-grok\", \"token_sha256\": \"$(printf %s "$TOKEN" | shasum -a 256 | cut -d' ' -f1)\"}"
+  # {"status": "pending", "code": "K7Q-4MD", ...}
+  ```
+
+  The request shows under Channels → Agents with its name, IP and pairing code, and you get a ping in your space lead's chat. Approve it only when the client's owner tells you that code themselves. After you approve it, the token works on `/mcp`, and until then it gets 401. Requests expire after 24 hours. Each IP may register 3 times an hour, and all callers together 10 times an hour. At most 10 requests wait at once.
 - **Limits and audit.** Each client has its own limit on posts (`rate_per_min`, default 6, and 60 an hour) and on reads (60 a minute). All clients together are capped at 20 posts, 120 reads and 240 requests a minute. Failed sign-ins are capped at 10 a minute per caller IP and 30 a minute overall; past that, the answer is 429. Each client's token is checked against every stored hash in constant time, with no early exit. Every call is a line in `~/.peerlink/agents/audit.jsonl`: time, client, IP (`CF-Connecting-IP` behind Cloudflare), tool and result. Tokens and message text are never written there. Replies are kept for `read_replies` in `~/.peerlink/agents/replies/<name>.jsonl`.
 
 ## Starting and ending agents
