@@ -17,6 +17,21 @@ class ScenarioTest(unittest.TestCase):
         self.addCleanup(rig.__exit__, None, None, None)
         return rig
 
+    def test_a_message_handed_out_but_not_acked_survives_kill_9(self):
+        rig = self.rig()
+        sky, core, _ = self.team(rig)
+        core.poll()  # what it's told on joining, acked
+        sky.send(to="core", text="Already in your session.")
+        self.assertEqual([m["text"] for m in core.poll()], ["Already in your session."])  # acked
+        sky.send(to="core", text="Deploy is blocked on you.")
+        handed = core.poll(ack=False)  # handed over; the daemon dies before the plugin's ack
+        self.assertEqual([m["text"] for m in handed], ["Deploy is blocked on you."])
+        rig.crash()
+        again = core.poll()
+        self.assertEqual([(m["id"], m["text"]) for m in again], [(handed[0]["id"], "Deploy is blocked on you.")])
+        rig.crash()  # acked this time: nothing comes back
+        self.assertEqual(core.poll(), [])
+
     def team(self, rig):
         """A lead at the top, a lead of a space inside it, and that space's worker: the chain work is relayed along."""
         sky = rig.agent("sky", space="top")
