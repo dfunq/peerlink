@@ -166,6 +166,33 @@ class AgentsChannelTest(unittest.TestCase):
         self.assertEqual(peerlinkd.agents_api(["clients"], "POST", {"name": "new", "token_sha256": sha("n" * 43)})[0], 400)
 
 
+    def test_caps_across_all_clients_and_failed_auth_per_caller(self):
+        agentslink.ALL_POSTS_PER_MIN, saved = 3, agentslink.ALL_POSTS_PER_MIN
+        try:
+            errs = [self.call(GROK if i % 2 else OTHER, "post_message", {"text": f"n{i}"})[1] for i in range(4)]
+        finally:
+            agentslink.ALL_POSTS_PER_MIN = saved
+        self.assertEqual(errs[:3], [None, None, None])
+        self.assertIn("rate limited", errs[3])
+        codes = [self.rpc("x" * 43, "tools/list", headers={"CF-Connecting-IP": "203.0.113.9"})[0] for _ in range(11)]
+        self.assertEqual(codes[:10], [401] * 10)
+        self.assertEqual(codes[10], 429)
+        self.assertEqual(self.rpc("x" * 43, "tools/list", headers={"CF-Connecting-IP": "203.0.113.10"})[0], 401)
+
+    def test_the_hash_is_sha256_of_the_bearer_string_in_lowercase_hex(self):
+        token = "Pat's-token_ü" + "z" * 30
+        code, _ = peerlinkd.agents_api(["clients"], "POST", {"name": "pat", "token_sha256": hashlib.sha256(token.encode("utf-8")).hexdigest().upper()})
+        self.assertEqual(code, 200)
+        self.assertEqual(self.rpc(token, "tools/list")[0], 200)
+
+    def test_the_channel_switch_turns_every_client_away(self):
+        self.assertEqual(peerlinkd.agents_api([], "PUT", {"enabled": False})[0], 200)
+        with self.assertRaises(OSError):
+            self.rpc(GROK, "tools/list")
+        self.assertEqual(peerlinkd.agents_api([], "PUT", {"enabled": True})[0], 200)
+        self.assertEqual(self.rpc(GROK, "tools/list")[0], 200)
+
+
 class AgentsLinkTest(unittest.TestCase):
     def test_clean_clients_drops_malformed_entries(self):
         out = agentslink.clean_clients({"ok": {"token_sha256": "a" * 64}, "Bad": {"token_sha256": "a" * 64},
