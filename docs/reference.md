@@ -184,6 +184,34 @@ Talk to your agents from Slack, in a direct message with your app or a channel i
 - **Agents send** to `"slack"`, or `"slack#<channel>"` when they're in several.
 - **Allowed people** are Slack member ids (`U…`); another app's bot can be trusted by its user id through `trusted_bots` in `~/.peerlink/discord.json`.
 
+## Agents (outside agents over MCP)
+
+An AI agent that isn't on this machine, any MCP client (Grok, another company's bot), can talk to one of your agents through the **Agents** channel. Each client is a chat of its own, `agents:<name>`, mapped to agents under Channel ⇄ Agent Mappings like any other chat.
+
+- **Two tools, nothing else.** `post_to_skyforge(text, reply_to?)` posts into the client's chat, so it reaches the agent mapped to receive it. `read_replies(since?)` returns that agent's replies to this client, oldest first, with a `next_since` to pass next time. The client gets no peers, no names to send to, no Inbox commands, tasks, announcements, spawns, schedules or rules. Any other tool fails with "unknown tool".
+- **Labelled and untrusted.** A post reaches the agent as `grok on Agents`, starting with a line that says it's from an external agent and is untrusted input. Because that label comes first, a `Task:` or `name:` prefix in the text does nothing.
+- **Your agents only answer.** A new client's mapping has Sends off: the agent answers with `reply_to`, which goes back on that chat, but can't start a conversation there. Your approvals, questions, limit notices and `"discord"` sends never go to an Agents chat.
+- **Transport:** MCP Streamable HTTP, with JSON responses, at `http://127.0.0.1:7931/mcp` (`port` in the section). Health is at `/healthz`. It listens on this machine only, so put a tunnel with its own access control (Cloudflare Access) in front of it. A request with an `Origin` header (a browser) is refused.
+- **Auth:** `Authorization: Bearer <token>`, one token per client. Only the token's sha256 is kept, in `~/.peerlink/discord.json` (0600):
+
+  ```json
+  "agents": {"enabled": true, "port": 7931, "default_to": "/path/to/the/agent",
+             "clients": {"grok": {"token_sha256": "<64 hex>", "enabled": true, "rate_per_min": 6, "added": "2026-11-14T…Z"}},
+             "chats": {"agents:grok": "grok"}}
+  ```
+
+- **Adding and revoking** go through the daemon, never by editing the file: the daemon keeps the file in memory and writes it back, so a hand edit is lost. The change counts from the next request.
+
+  ```
+  peerlink agents add <name> --token-file <file> [--rate N] [--replace]   # reads the token from the file, or makes one there (0600); only its hash is sent
+  peerlink agents revoke <name>     # token refused at once; its chat's mapping goes too
+  peerlink agents off <name> / on <name>
+  peerlink agents list
+  ```
+
+  A caller with the key may add and revoke clients. Where new clients land (`default_to`), the channel's switch and its port are set only from the web UI.
+- **Limits and audit.** Each client has its own limit on posts (`rate_per_min`, default 6, and 60 an hour), and reads are capped at 60 a minute. Every call is a line in `~/.peerlink/agents/audit.jsonl`: time, client, IP (`CF-Connecting-IP` behind Cloudflare), tool and result. Tokens and message text are never written there. Replies are kept for `read_replies` in `~/.peerlink/agents/replies/<name>.jsonl`.
+
 ## Starting and ending agents
 
 **Starting:** when work belongs in a folder no agent runs in, an agent can call `request_spawn` with the folder, why, and a first prompt. Nothing starts until you approve it, either in the Inbox (**Approve and start it**) or with the **Approve** button on Discord. `/inbox` then `1 approve` works too. Only you can approve: never an agent, never a bot.
@@ -307,6 +335,7 @@ peerlink peers
 peerlink messages     # the last 20
 peerlink mute <agent> / unmute <agent>
 peerlink config [name [value]]
+peerlink agents add <name> --token-file <file> | revoke <name> | list
 peerlink start | stop | restart | logs
 peerlink rotate-key | logout
 ```
@@ -429,6 +458,8 @@ plugin/daemon/test_chat.py        tests for the chat layer, against a fake Disco
 plugin/daemon/test_telegram.py    tests for the Telegram bot, against a fake Bot API
 plugin/daemon/slacklink.py        the Slack app: Socket Mode, buttons, the /peerlink command, reactions
 plugin/daemon/test_slack.py       tests for the Slack app, against a fake Web API and websocket
+plugin/daemon/agentslink.py       the Agents channel: outside agents over MCP, two tools, per-client tokens
+plugin/daemon/test_agents.py      its tests
 plugin/daemon/peerlink_mcp.py     an MCP endpoint for clients outside Claude Code
 plugin/daemon/test_peerlink_mcp.py  its tests (python3 -m unittest)
 ```
