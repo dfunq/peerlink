@@ -195,7 +195,10 @@ class Bot:
         if _bot[0] is self:
             _bot[0] = None
         if self.server:
-            threading.Thread(target=lambda s=self.server: (s.shutdown(), s.server_close()), daemon=True).start()
+            # At once, not in the background: off means nothing listens from here on, and a channel switched back on
+            # needs the port free.
+            self.server.shutdown()
+            self.server.server_close()
             self.server = None
         self.state = "off"
 
