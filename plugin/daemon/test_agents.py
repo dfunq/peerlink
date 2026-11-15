@@ -224,6 +224,36 @@ class AgentsChannelTest(unittest.TestCase):
         self.assertEqual(self.register({"name": "grok", "token_sha256": sha("q" * 43)}, "203.0.113.6")[0], 409)
         self.assertEqual(self.register({"name": "x", "token_sha256": "nope"}, "203.0.113.7")[0], 400)
 
+    def admin_lines(self):
+        with open(self.bot.audit_path) as f:
+            return [e for e in map(json.loads, f) if e.get("admin")]
+
+    def test_every_change_to_who_may_call_is_in_the_audit_log(self):
+        start = len(self.admin_lines())
+        peerlinkd.agents_api([], "PUT", {"registration": True})
+        _, reg = self.register({"name": "pat", "token_sha256": sha("r" * 43)})
+        peerlinkd.agents_api([], "PUT", {"approve": reg["code"]})
+        _, reg2 = self.register({"name": "spam", "token_sha256": sha("s" * 43)}, "203.0.113.9")
+        peerlinkd.agents_api([], "PUT", {"dismiss": reg2["code"]}, via="key")
+        peerlinkd.agents_api(["clients", "pat"], "PUT", {"enabled": False, "rate_per_min": 3}, via="key")
+        peerlinkd.agents_api(["clients", "pat"], "DELETE", {})
+        peerlinkd.agents_api(["clients"], "POST", {"name": "cli", "token_sha256": sha("c" * 43)}, via="key")
+        peerlinkd.agents_api([], "PUT", {"enabled": False}, via="key")
+        # The channel is off, and changes are still written.
+        peerlinkd.agents_api(["clients", "cli"], "DELETE", {}, via="key")
+        peerlinkd.agents_api([], "PUT", {"enabled": False}, via="key")  # no change: no line
+        got = [(e["admin"], e.get("via"), e.get("client")) for e in self.admin_lines()[start:]]
+        self.assertEqual(got, [("channel", "web", None), ("approve", "web", "pat"), ("dismiss", "key", "spam"),
+                               ("change", "key", "pat"), ("revoke", "web", "pat"), ("add", "key", "cli"),
+                               ("channel", "key", None), ("revoke", "key", "cli")])
+        lines = self.admin_lines()[start:]
+        self.assertEqual((lines[0]["registration"], lines[3]["enabled"], lines[3]["rate_per_min"], lines[6]["enabled"]), (True, False, 3, False))
+        with open(self.bot.audit_path) as f:
+            raw = f.read()
+        for tok in ("r" * 43, "c" * 43):
+            self.assertNotIn(tok, raw)
+            self.assertNotIn(sha(tok), raw)
+
     def test_registrations_are_rate_limited_per_ip_and_can_be_dismissed(self):
         peerlinkd.agents_api([], "PUT", {"registration": True})
         codes = [self.register({"name": f"n{i}", "token_sha256": sha(f"{i}" * 40)})[0] for i in range(4)]

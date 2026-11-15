@@ -93,6 +93,27 @@ TOOLS = [
         },
     },
 ]
+_audit_mu = threading.Lock()
+
+
+def audit(home, log, **entry):
+    """One line in ~/.peerlink/agents/audit.jsonl: a call, a reply, or a change to who may call (admin=True), written
+    whether or not the channel is running. Never a token, a token's hash or message text."""
+    entry = {"ts": iso(time.time()), **entry}
+    d = os.path.join(home, "agents")
+    path = os.path.join(d, "audit.jsonl")
+    with _audit_mu:
+        try:
+            os.makedirs(d, mode=0o700, exist_ok=True)
+            if os.path.exists(path) and os.path.getsize(path) > AUDIT_MAX:
+                os.replace(path, path + ".1")
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(fd, "a") as f:
+                f.write(json.dumps(entry) + "\n")
+        except OSError as err:
+            log("agents", "audit write failed:", err)
+
+
 class Server(ThreadingHTTPServer):
     request_queue_size = 64  # the default 5 resets a burst of connections, such as several clients waiting at once
 
@@ -254,16 +275,7 @@ class Bot:
     # Audit log: one JSON line per call, never a token or message text.
 
     def audit(self, **entry):
-        entry = {"ts": iso(time.time()), **entry}
-        with self.mu:
-            try:
-                if os.path.exists(self.audit_path) and os.path.getsize(self.audit_path) > AUDIT_MAX:
-                    os.replace(self.audit_path, self.audit_path + ".1")
-                fd = os.open(self.audit_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-                with os.fdopen(fd, "a") as f:
-                    f.write(json.dumps(entry) + "\n")
-            except OSError as err:
-                self.log("agents", "audit write failed:", err)
+        audit(os.path.dirname(self.dir), self.log, **entry)
 
     # Replies, kept per client for read_replies
 
