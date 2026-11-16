@@ -15,6 +15,7 @@ You'll get an answer within a week. Fixes ship in the latest version only; there
 Examples of what we want to hear about:
 
 - reaching the daemon's API or web UI without the key, a valid sign-in link or a session cookie
+- doing what only you may do (the browser-only actions, or restart, stop and key rotation without your on-screen yes) while holding only the key
 - a web page, DNS rebinding or another origin driving the daemon from a browser
 - a peer, Discord user or remote daemon getting past the limits peerlink sets: its space, a mute, the hop limit, approval for starting agents, the Discord allowed-users list
 - a remote daemon doing more than peer discovery and message delivery, or getting in without the shared `token`
