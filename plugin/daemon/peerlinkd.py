@@ -31,7 +31,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.43"
+VERSION = "0.9.44"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -221,7 +221,7 @@ config = {}
 key = [""]
 dir_summaries = {}  # cwd -> {summary, name, ts}: what the last agent there was doing
 used_nonces = {}   # nonce -> expiry
-web_sessions = {}  # cookie -> expiry; kept on disk, so a daemon restart doesn't sign browsers out
+web_sessions = {}  # cookie_id(cookie) -> expiry; kept on disk, so a daemon restart doesn't sign browsers out
 WEB_SESSIONS_PATH = os.path.join(HOME, "web_sessions.json")
 
 
@@ -294,6 +294,20 @@ def read_json(path, default=None):
             return default
 
 
+# Browser sign-in links are signed with this, never with the key agents hold. It lives only in this process's memory,
+# so no file an agent can read holds it; a restart makes a new one, which only ends links not yet opened.
+ADMIN_SECRET = secrets.token_hex(32)
+# The rig and the tests run their own daemon on a scratch PEERLINK_HOME and get sign-in links straight back; the
+# daemon at ~/.peerlink never does, whatever its environment says.
+SCRATCH_HOME = os.path.realpath(HOME) != os.path.realpath(os.path.expanduser("~/.peerlink"))
+TEST_MODE = os.environ.get("PEERLINK_TEST") == "1" and SCRATCH_HOME
+
+
+def cookie_id(cookie):
+    """What's kept of a browser's session cookie: its hash, so the file of sessions signs nobody in."""
+    return hashlib.sha256(cookie.encode()).hexdigest()
+
+
 def save_web_sessions():
     now = time.time()
     live = {c: e for c, e in web_sessions.items() if e > now}
@@ -305,7 +319,9 @@ def save_web_sessions():
 
 def load_web_sessions():
     try:
-        web_sessions.update({c: float(e) for c, e in (read_json(WEB_SESSIONS_PATH) or {}).items() if float(e) > time.time()})
+        # Before 0.9.44 the file held the cookies themselves: those are dropped, and their browsers sign in again.
+        web_sessions.update({c: float(e) for c, e in (read_json(WEB_SESSIONS_PATH) or {}).items()
+                             if float(e) > time.time() and re.fullmatch(r"[0-9a-f]{64}", c)})
     except (ValueError, TypeError, AttributeError):
         pass
 
@@ -401,7 +417,8 @@ def link_host():
     return name if name and name_resolves(name) else "127.0.0.1"
 
 
-def mint_link(secret, host="127.0.0.1"):
+def mint_link(secret=None, host="127.0.0.1"):
+    secret = secret or ADMIN_SECRET
     nonce = secrets.token_hex(16)
     exp = int(time.time()) + LINK_TTL_S
     payload = f"{nonce}.{exp}"
@@ -421,11 +438,11 @@ def redeem(token):
             used_nonces.pop(n)
         if exp < now or nonce in used_nonces:
             return None
-        if not hmac.compare_digest(sign(f"{nonce}.{exp}", key[0]), sig):
+        if not hmac.compare_digest(sign(f"{nonce}.{exp}", ADMIN_SECRET), sig):
             return None
         used_nonces[nonce] = exp
         cookie = secrets.token_urlsafe(32)
-        web_sessions[cookie] = now + WEB_SESSION_TTL_S
+        web_sessions[cookie_id(cookie)] = now + WEB_SESSION_TTL_S
         save_web_sessions()
         return cookie
 
@@ -5241,10 +5258,11 @@ class Handler(BaseHTTPRequestHandler):
         for part in self.headers.get("Cookie", "").split(";"):
             name, _, value = part.strip().partition("=")
             if name == COOKIE:
+                sid = cookie_id(value)
                 with lock:
-                    exp = web_sessions.get(value)
+                    exp = web_sessions.get(sid)
                     if exp and exp > time.time():
-                        return value
+                        return sid
         return None
 
     def key_ok(self):
@@ -5256,8 +5274,9 @@ class Handler(BaseHTTPRequestHandler):
         return bool(token) and hmac.compare_digest(self.headers.get("X-Peerlink-Token", ""), token)
 
     def same_origin(self):
+        """A browser's write says where it comes from; one that doesn't isn't taken as yours (SKY-564)."""
         origin = self.headers.get("Origin")
-        return origin is None or origin == f"http://{self.headers.get('Host', '')}"
+        return bool(origin) and origin == f"http://{self.headers.get('Host', '')}"
 
     def route(self, method):
         url = urlparse(self.path)
@@ -5304,7 +5323,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(404, {"error": "not found"})
 
         if rest == ["web", "link"] and method == "POST" and self.key_ok():
-            return self.reply(200, {"url": mint_link(key[0], link_host()), "expires_in_s": LINK_TTL_S})
+            # A key holder (an agent, /peerlink web, peerlink web) never gets the link: you're asked on screen, and on
+            # yes it opens in your browser. The rig's own daemon hands it back, for its tests.
+            if TEST_MODE:
+                return self.reply(200, {"url": mint_link(host=link_host()), "expires_in_s": LINK_TTL_S})
+            return self.reply(*ask_then("Open the peerlink web UI in your browser?", "Open", lambda: open_url(mint_link(host=link_host()))))
 
         if rest == ["web", "logout"] and method == "POST":
             with lock:
@@ -5316,6 +5339,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, {"ok": True})
 
         if rest == ["key", "rotate"] and method == "POST":
+            if not (browser and not self.key_ok()):
+                return self.reply(*ask_then("Rotate peerlink's key? Every browser is signed out.", "Rotate", lambda: (rotate_key(), log("key rotated"))))
             rotate_key()
             log("key rotated")
             return self.reply(200, {"ok": True})
@@ -5740,6 +5765,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(code, res)
 
         if rest and rest[0] == "discord":
+            # Who may talk to your agents is yours to say, as for Telegram and Slack: changes come from your browser.
+            if method != "GET" and (not browser or self.key_ok()):
+                return self.reply(403, {"error": "Discord is set up from the web UI"})
             return self.discord_api(rest[1:], method, q)
         if rest and rest[0] == "telegram":
             # Who may talk to your agents is yours to say: changes come from your browser, never an agent holding the key.
@@ -5773,11 +5801,22 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(code, res)
 
         if rest == ["restart"] and method == "POST":
+            if not (browser and not self.key_ok()):
+                return self.reply(*ask_then("Restart the peerlink daemon?", "Restart", lambda: restart_self(self.server)))
             self.reply(200, {"ok": True})
             threading.Thread(target=restart_self, args=(self.server,), daemon=True).start()
             return
 
         if rest == ["shutdown"] and method == "POST":
+            # A plugin replacing this daemon with the build it ships (newer, or the same version with other code) goes
+            # straight through, as an update must; any other key holder's stop is asked on screen.
+            b = self.body()
+            theirs = str(b.get("version") or "")
+            replacing = bool(theirs) and (version_tuple(theirs) > version_tuple(VERSION)
+                                          or (theirs == VERSION and bool(b.get("code")) and b.get("code") != CODE))
+            if not (browser and not self.key_ok()) and not replacing:
+                return self.reply(*ask_then("Stop the peerlink daemon? Agents start it again when they next need it.", "Stop",
+                                            self.server.shutdown))
             self.reply(200, {"ok": True})
             threading.Thread(target=self.server.shutdown, daemon=True).start()
             return
@@ -5943,7 +5982,80 @@ def detach_quiet():
         sys.stdout = out
 
 
+def version_tuple(v):
+    try:
+        return tuple(int(x) for x in str(v).split("."))
+    except ValueError:
+        return ()
+
+
+_asking = threading.Lock()
+_turned_down = [0.0]
+ASK_TIMEOUT_S = 60
+
+
+def applescript(text):
+    return '"' + str(text).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def confirm_on_screen(question, ok):
+    """Ask you on this machine's screen, in a dialog no agent answers: (yes, why not). One question at a time, and
+    after a no the next one waits a little, so an agent can't bury you in them. Cancel is the default button."""
+    if not _asking.acquire(blocking=False):
+        return False, "a question is already on screen"
+    try:
+        if time.time() < _turned_down[0]:
+            return False, "turned down on screen a moment ago: try again in a minute"
+        canned = os.environ.get("PEERLINK_TEST_ANSWER") if SCRATCH_HOME else None
+        try:
+            if canned in ("yes", "no"):  # a test's daemon: nobody is at the screen
+                yes = canned == "yes"
+            elif sys.platform == "darwin":
+                script = (f"display dialog {applescript(question)} with title \"peerlink\" buttons {{\"Cancel\", {applescript(ok)}}} "
+                          f"default button \"Cancel\" cancel button \"Cancel\" giving up after {ASK_TIMEOUT_S} with icon caution")
+                r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=ASK_TIMEOUT_S + 15)
+                yes = r.returncode == 0 and f"button returned:{ok}" in r.stdout and "gave up:true" not in r.stdout
+            elif os.name == "nt":
+                ps = ("Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show("
+                      + "'" + question.replace("'", "''") + "', 'peerlink', 'OKCancel', 'Warning', 'Cancel')")
+                r = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True, timeout=ASK_TIMEOUT_S * 5)
+                yes = r.stdout.strip() == "OK"
+            elif shutil.which("zenity"):
+                r = subprocess.run(["zenity", "--question", "--title=peerlink", f"--text={question}", f"--ok-label={ok}",
+                                    "--default-cancel", f"--timeout={ASK_TIMEOUT_S}"], capture_output=True, timeout=ASK_TIMEOUT_S + 15)
+                yes = r.returncode == 0
+            else:
+                return False, "there's no screen here to ask you on: do it from the web UI"
+        except (OSError, subprocess.SubprocessError) as err:
+            return False, f"couldn't ask on screen: {err}"
+        if not yes:
+            _turned_down[0] = time.time() + 30
+        return yes, "" if yes else "turned down on screen"
+    finally:
+        _asking.release()
+
+
+def ask_then(question, ok, do):
+    """For a key holder's call that only you may make: ask on screen, in the background so the call returns at once,
+    and do it on yes. (code, body) for the reply."""
+    if _asking.locked():
+        return 409, {"error": "a question is already on screen"}
+
+    def run():
+        yes, why = confirm_on_screen(question, ok)
+        log("asked on screen:", question, "->", "yes" if yes else why)
+        if yes:
+            do()
+    threading.Thread(target=run, daemon=True).start()
+    return 202, {"asked": True, "note": "Asked on this machine's screen; it happens only if you say yes there."}
+
+
 def open_url(url):
+    sink = os.environ.get("PEERLINK_TEST_OPEN") if SCRATCH_HOME else None
+    if sink:  # a test's daemon: "the browser" is a file the test reads
+        with open(sink, "a") as f:
+            f.write(url + "\n")
+        return
     opener = "open" if sys.platform == "darwin" else "xdg-open"
     try:
         if os.name == "nt":
@@ -5954,12 +6066,15 @@ def open_url(url):
 
 
 def cli_web(args):
+    """The daemon asks you on screen and opens your browser itself: a shell, like an agent, never gets the link."""
     ensure_running()
-    url = local_call("POST", "/api/web/link", {})["url"]
-    if "--print" not in args:
-        open_url(url)
-    print(url)
-    print(f"One-time link, valid {LINK_TTL_S}s.")
+    out = local_call("POST", "/api/web/link", {})
+    if out.get("url"):  # the rig's daemon
+        if "--print" not in args:
+            open_url(out["url"])
+        print(out["url"])
+        return
+    print("Asked on your screen: say Open there and the web UI opens in your browser.")
 
 
 def cli_status(args):
@@ -6045,7 +6160,7 @@ def cli_config(args):
 def cli_stop(args):
     try:
         local_call("POST", "/api/shutdown", {})
-        print("stopped (agents start it again when they next need it)")
+        print("Asked on your screen: say Stop there. Agents start it again when they next need it.")
     except Exception:
         print("not running")
 
@@ -6054,7 +6169,8 @@ def cli_restart(args):
     before = health()
     if before:
         local_call("POST", "/api/restart", {})
-        for _ in range(60):
+        print("Asked on your screen: say Restart there.")
+        for _ in range((ASK_TIMEOUT_S + 15) * 10):
             time.sleep(0.1)
             now = health()
             if now and now.get("pid") != before.get("pid"):
@@ -6067,7 +6183,7 @@ def cli_restart(args):
 def cli_rotate(args):
     ensure_running()
     local_call("POST", "/api/key/rotate", {})
-    print("New key written. Browsers are signed out; agents pick up the new key on their next call.")
+    print("Asked on your screen: say Rotate there for a new key. Browsers are then signed out; agents pick up the new key on their next call.")
 
 
 def cli_logout(args):
@@ -6184,7 +6300,7 @@ def cli_agents(args):
 
 
 COMMANDS = {
-    "web": (cli_web, "open the web UI with a one-time sign-in link (--print to only print it)"),
+    "web": (cli_web, "open the web UI: you're asked on screen, then your browser opens signed in"),
     "status": (cli_status, "daemon version, agents, queued messages"),
     "issues": (cli_issues, "the last 20 problems agents reported with peerlink"),
     "peers": (cli_peers, "list live agents"),

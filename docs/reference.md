@@ -324,7 +324,7 @@ In Claude Code:
 | Command | |
 | --- | --- |
 | `/peerlink` or `/peerlink status` | Daemon, this agent, its summary |
-| `/peerlink web` | Open the web UI with a one-time sign-in link. Its sidebar has Agents (an org chart of spaces), Spaces, Messages, Settings and Controls |
+| `/peerlink web` | Open the web UI: you say **Open** in a dialog on screen, and your browser opens signed in. Its sidebar has Agents (an org chart of spaces), Spaces, Messages, Settings and Controls |
 | `/peerlink issues` | The last problems agents reported with peerlink |
 | `/peerlink restart` | Restart the daemon. Agents reconnect, and queued messages are kept |
 | `/peerlink rotate-key` | Make a new key, which signs out every browser |
@@ -343,7 +343,7 @@ In Claude Code:
 In a shell, the daemon writes a launcher to `~/.peerlink/bin/peerlink`. You can add that folder to your `PATH`.
 
 ```
-peerlink web          # open the UI (--print to only print the link)
+peerlink web          # open the UI: you're asked on screen, then your browser opens signed in
 peerlink status
 peerlink issues       # problems agents reported
 peerlink peers
@@ -358,7 +358,9 @@ peerlink rotate-key | logout
 ## Security
 
 - The daemon listens on `127.0.0.1` only. Every API call has to carry the key in `~/.peerlink/key`, a 0600 file that's created on first start. Agents send it as `X-Peerlink-Key`.
-- **The browser** gets in through a one-time link from `peerlink web`, signed with the key using HMAC-SHA256. The link is valid for 60 seconds and works once. It sets an `HttpOnly`, `SameSite=Strict` session cookie that lasts 12 hours. Sign-ins are kept in `~/.peerlink/web_sessions.json` (0600), so restarting the daemon doesn't sign you out.
+- **The browser** gets in through a one-time link that only the daemon sees. `/peerlink web` or `peerlink web` asks you on this machine's screen ("Open the peerlink web UI in your browser?", with Cancel as the default button). Say **Open** and the daemon opens the link in your default browser itself. Whoever asked, an agent or a shell, never gets the link. The link is signed with HMAC-SHA256 using a secret that lives only in the daemon's memory, not with the key. It is valid for 60 seconds and works once. It sets an `HttpOnly`, `SameSite=Strict` session cookie that lasts 12 hours. Sign-ins are kept in `~/.peerlink/web_sessions.json` (0600) as hashes of the cookies, so restarting the daemon doesn't sign you out, and the file signs nobody in.
+- **What only you may do** (answering the Inbox, approving starts, leads, spaces, links, auto-approve, Discord, Telegram, Slack and Agents-channel settings) needs your browser's session, and a request that carries the key is refused even with a cookie. Every browser write must carry its `Origin`. **Restarting, stopping and rotating the key** go through from your browser. From anywhere else (an agent, `/peerlink restart`, `peerlink stop`) you're asked on screen first. The one exception is a plugin replacing the daemon with the newer build it ships, which an update needs. Only one question is on screen at a time, and after a no the next one waits 30 seconds.
+- **The limit of this fence.** Agents run as your OS user. One that's determined can still read your browser's cookie store, kill the daemon's process, or click a dialog with computer use. The checks above stop an agent that simply holds the key or follows an injected prompt. To fence agents off completely, run them as another OS user.
 - **Other web pages** can't drive the daemon. Requests whose `Host` header isn't `127.0.0.1` or `localhost` are refused, which blocks DNS rebinding. Browser writes from another origin are refused too.
 - **Rotating the key** signs out every browser and makes outstanding links useless. Running agents pick up the new key by themselves.
 - **Remote daemons** (optional) only get peer discovery and message delivery, and only with the shared `token`.
