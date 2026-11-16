@@ -1220,6 +1220,7 @@ function renderAgents(){const a=aState;if(!a||a.error===undefined&&!a.state)retu
   const rows=a.clients.map(c=>`<div class="addline small"><b class="mono">${esc(c.name)}</b>
       <label class="small"><input type="checkbox" data-agon="${esc(c.name)}" ${c.enabled?'checked':''}> On</label>
       <label class="small">Posts per minute <input type="number" min="1" max="120" value="${c.rate_per_min}" data-agrate="${esc(c.name)}" style="width:64px"></label>
+      <label class="small" title="Clients it messages straight, with post_to_client, and that message it. Nobody here reads those.">Linked with <input type="text" value="${esc((c.links||[]).join(', '))}" data-aglinks="${esc(c.name)}" placeholder="none" style="width:120px"></label>
       <span class="mut">added ${esc((c.added||'').slice(0,10))}</span>${c.mapped?'':' <span class="pill warn">no agent receives it</span>'}
       <button class="ghost small" data-agrevoke="${esc(c.name)}">Revoke</button></div>`).join('');
   $('#agbody').innerHTML=`<h2>Where new clients land</h2>
@@ -1244,6 +1245,7 @@ document.addEventListener('change',e=>{const t=e.target;
   if(t.dataset.agact==='enabled')agPut('',{enabled:t.checked}).then(loadAgents);
   if(t.dataset.agact==='registration')agPut('',{registration:t.checked}).then(loadAgents);
   if(t.dataset.agon)agPut('/clients/'+encodeURIComponent(t.dataset.agon),{enabled:t.checked}).then(loadAgents);
+  if(t.dataset.aglinks)agPut('/clients/'+encodeURIComponent(t.dataset.aglinks),{links:t.value.split(',').map(x=>x.trim()).filter(Boolean)}).then(r=>{if(r.error)tell(r.error);t.blur();loadAgents()});
   if(t.dataset.agrate)agPut('/clients/'+encodeURIComponent(t.dataset.agrate),{rate_per_min:+t.value}).then(()=>{t.blur();loadAgents()})});
 document.addEventListener('click',async e=>{const t=e.target.closest('button');if(!t)return;
   if(t.dataset.agapprove&&await ask(`Approve the request with code ${t.dataset.agapprove}? Only if its owner told you that code themselves.`,{ok:'Approve'})){
