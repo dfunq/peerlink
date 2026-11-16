@@ -39,7 +39,7 @@ class Rig:
         self.work = os.path.realpath(tempfile.mkdtemp(prefix="peerlink-rig-work-"))
         self.port = free_port()
         self.env = {**os.environ, "PEERLINK_HOME": self.home, "PEERLINK_PORT": str(self.port), "PEERLINK_REDELIVER_S": "1",
-                    "PYTHONUNBUFFERED": "1", **(env or {})}
+                    "PYTHONUNBUFFERED": "1", "PEERLINK_TEST": "1", **(env or {})}
         # Fast enough that a scenario doesn't wait on wall-clock defaults; nothing here is what a scenario is about.
         self.config = {"rate_limit_per_min": 1000, "wake_for": "needed", "peer_ttl_s": 30, **(config or {})}
         self.proc = self.cookie = None
@@ -114,6 +114,8 @@ class Rig:
         headers = {"Content-Type": "application/json", "Host": f"127.0.0.1:{self.port}"}
         if user:
             headers["Cookie"] = self.signed_in()
+            if method != "GET":
+                headers["Origin"] = f"http://127.0.0.1:{self.port}"  # as a browser sends it
         else:
             headers["X-Peerlink-Key"] = self.key
         req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", method=method, headers=headers,
