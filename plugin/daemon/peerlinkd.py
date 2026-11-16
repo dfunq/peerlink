@@ -31,7 +31,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.44"
+VERSION = "0.9.45"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -318,12 +318,15 @@ def save_web_sessions():
 
 
 def load_web_sessions():
+    """Signed-in browsers, by cookie hash. A file from before 0.9.44, which held cookies, is rewritten without them."""
     try:
         # Before 0.9.44 the file held the cookies themselves: those are dropped, and their browsers sign in again.
         web_sessions.update({c: float(e) for c, e in (read_json(WEB_SESSIONS_PATH) or {}).items()
                              if float(e) > time.time() and re.fullmatch(r"[0-9a-f]{64}", c)})
     except (ValueError, TypeError, AttributeError):
         pass
+    if any(not re.fullmatch(r"[0-9a-f]{64}", c) for c in (read_json(WEB_SESSIONS_PATH) or {})):
+        save_web_sessions()
 
 
 def read_key():
@@ -6015,6 +6018,13 @@ def confirm_on_screen(question, ok):
                           f"default button \"Cancel\" cancel button \"Cancel\" giving up after {ASK_TIMEOUT_S} with icon caution")
                 r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=ASK_TIMEOUT_S + 15)
                 yes = r.returncode == 0 and f"button returned:{ok}" in r.stdout and "gave up:true" not in r.stdout
+                if not yes:
+                    # Say which no it was in the log: nobody answered, Cancel, or the dialog couldn't be shown.
+                    why = ("nobody answered within a minute" if "gave up:true" in r.stdout
+                           else "Cancel pressed" if "-128" in r.stderr
+                           else f"the dialog couldn't be shown: {r.stderr.strip()[:200]}")
+                    _turned_down[0] = time.time() + 30
+                    return False, why
             elif os.name == "nt":
                 ps = ("Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show("
                       + "'" + question.replace("'", "''") + "', 'peerlink', 'OKCancel', 'Warning', 'Cancel')")
