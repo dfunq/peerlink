@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.9.43'
+const DAEMON_VERSION = '0.9.44'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -326,7 +326,8 @@ async function ensureDaemon($: EngineInterface, fresh = false) {
     }
     if (health) {
       replaced ||= health.version === DAEMON_VERSION ? `${health.version} (other code)` : health.version
-      await call($, 'POST', '/api/shutdown', {}).catch(() => {})
+      // Says which build replaces it: the daemon lets that through, and asks you on screen for any other stop.
+      await call($, 'POST', '/api/shutdown', { version: DAEMON_VERSION, code: mine }).catch(() => {})
       await $.clock.sleep(300)
     }
     const py = await pythonCmd($)
@@ -1368,11 +1369,15 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
   if (!(await ensureDaemon($))) return 'The peerlink daemon is not running and could not start (it needs Python 3, as python3, python or py -3 on the PATH).'
   switch (sub) {
     case 'web': {
+      // The daemon asks you on screen and opens your browser itself: no agent ever holds a sign-in link (SKY-564).
       const res = await call($, 'POST', '/api/web/link', {})
-      if (!res.ok || !res.data.url) return `Could not make a sign-in link: ${res.data.error ?? res.status}`
-      // rundll32 hands the link to the default browser on Windows; cmd's start would split it at each &.
-      await $.process.run(onWindows($) ? ['rundll32', 'url.dll,FileProtocolHandler', res.data.url] : ['open', res.data.url])
-      return `Opened the web UI with a one-time sign-in link (valid ${res.data.expires_in_s}s).`
+      if (!res.ok) return `Could not open the web UI: ${res.data.error ?? res.status}`
+      if (res.data.url) {
+        // A daemon from before 0.9.44 still hands the link back.
+        await $.process.run(onWindows($) ? ['rundll32', 'url.dll,FileProtocolHandler', res.data.url] : ['open', res.data.url])
+        return `Opened the web UI with a one-time sign-in link (valid ${res.data.expires_in_s}s).`
+      }
+      return 'Asked on your screen: say Open there and the web UI opens in your browser.'
     }
     case 'status': {
       const st = (await call($, 'GET', '/api/status')).data
@@ -1450,12 +1455,14 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
       return `This agent's ${spaceLine()}.`
     }
     case 'restart': {
-      await call($, 'POST', '/api/restart', {})
+      const res = await call($, 'POST', '/api/restart', {})
+      if (res.status === 202) return 'Asked on your screen: say Restart there and the daemon restarts. Agents reconnect by themselves.'
       await $.clock.sleep(1500)
       return (await ensureDaemon($)) ? 'The daemon restarted. Agents reconnect by themselves.' : 'The daemon did not come back; see ~/.peerlink/daemon.log.'
     }
     case 'rotate-key': {
-      await call($, 'POST', '/api/key/rotate', {})
+      const res = await call($, 'POST', '/api/key/rotate', {})
+      if (res.status === 202) return 'Asked on your screen: say Rotate there for a new key. Every browser is then signed out; agents pick up the new key by themselves.'
       await loadKey($)
       return 'New key written. Every browser is signed out; agents pick up the new key by themselves.'
     }
