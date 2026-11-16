@@ -31,7 +31,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.42"
+VERSION = "0.9.43"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -1597,6 +1597,7 @@ def agents_view():
             "registration": bool(ag.get("registration")), "pending": pending,
             "state": bot.state if bot else ("off" if ag.get("clients") else "unconfigured"), "error": bot.error if bot else "",
             "clients": [{"name": n, "enabled": c["enabled"], "rate_per_min": c["rate_per_min"], "added": c["added"],
+                         "links": sorted(b if a == n else a for a, b in agentslink.clean_links(ag.get("links"), ag.get("clients", {})) if n in (a, b)),
                          "mapped": any(r["channel_id"] == f"agents:{n}" and receivers(r) for r in discord.get("routes", []))}
                         for n, c in sorted(ag.get("clients", {}).items())]}
 
@@ -1698,6 +1699,7 @@ def agents_api(rest, method, b, via="web"):
             change = {}
             if method == "DELETE":
                 ag["clients"].pop(name)
+                ag["links"] = [list(p) for p in agentslink.clean_links(ag.get("links"), ag["clients"])]
                 ag["chats"].pop(f"agents:{name}", None)
                 discord["routes"] = [r for r in discord["routes"] if r["channel_id"] != f"agents:{name}"]
             else:
@@ -1708,6 +1710,19 @@ def agents_api(rest, method, b, via="web"):
                         ag["clients"][name]["rate_per_min"] = change["rate_per_min"] = max(1, min(int(b["rate_per_min"]), 120))
                     except (TypeError, ValueError):
                         return 400, {"error": "rate_per_min is a number"}
+                if "links" in b:
+                    # The clients this one may message straight, and that may message it: the whole list, none clears it.
+                    want = b["links"] if isinstance(b["links"], list) else str(b["links"] or "").split(",")
+                    want = {str(w).strip().lower() for w in want} - {"", name}
+                    unknown = sorted(want - set(ag["clients"]))
+                    if unknown:
+                        return 400, {"error": f"no client {', '.join(unknown)}"}
+                    old = agentslink.clean_links(ag.get("links"), ag["clients"])
+                    had = {b2 if a2 == name else a2 for a2, b2 in old if name in (a2, b2)}
+                    ag["links"] = [list(p) for p in agentslink.clean_links(
+                        [p for p in old if name not in p] + [[name, w] for w in want], ag["clients"])]
+                    if want != had:
+                        change["links"] = sorted(want)
             save_discord()
         log("agents", "client", name, "revoked" if method == "DELETE" else "changed")
         agents_admin(via, "revoke" if method == "DELETE" else "change", client=name, **change)
