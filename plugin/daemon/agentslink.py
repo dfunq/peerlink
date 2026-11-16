@@ -96,7 +96,34 @@ TOOLS = [
         },
     },
 ]
+# Offered only to a client you linked with another on the Agents channel page.
+POST_TO_CLIENT = {
+    "name": "post_to_client",
+    "description": "Send a message straight to another outside client you are linked with: {names}. It arrives in their "
+    "read_replies with from set to your name, and their answers reach yours the same way. Nobody at skyforge reads it.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "to": {"type": "string", "description": "The client's name: {names}"},
+            "text": {"type": "string", "description": "The message: what you need and why"},
+            "reply_to": {"type": "string", "description": "Optional: the id of a message from read_replies that you are answering"},
+        },
+        "required": ["to", "text"],
+    },
+}
 _audit_mu = threading.Lock()
+
+
+def clean_links(raw, clients=None):
+    """The "links" section as sorted pairs of client names, each pair once; with `clients`, only pairs of clients that
+    are there."""
+    out = set()
+    for pair in raw or []:
+        if isinstance(pair, (list, tuple)) and len(pair) == 2:
+            a, b = (str(x).strip().lower() for x in pair)
+            if a != b and NAME_RE.match(a) and NAME_RE.match(b) and (clients is None or (a in clients and b in clients)):
+                out.add(tuple(sorted((a, b))))
+    return sorted(out)
 
 
 def audit(home, log, **entry):
@@ -266,6 +293,24 @@ class Bot:
     def clients(self):
         return clean_clients((self.section() or {}).get("clients"))
 
+    def linked(self, client):
+        """The enabled clients this one is linked with: it may post_to_client them, and they it."""
+        clients = self.clients()
+        if not (clients.get(client) or {}).get("enabled"):
+            return []
+        on = {n for n, c in clients.items() if c["enabled"]}
+        return sorted(({b if a == client else a for a, b in clean_links((self.section() or {}).get("links"), clients)
+                        if client in (a, b)} & on) - {client})
+
+    def tools(self, client):
+        names = self.linked(client)
+        if not names:
+            return TOOLS
+        t = json.loads(json.dumps(POST_TO_CLIENT))
+        t["description"] = t["description"].format(names=", ".join(names))
+        t["inputSchema"]["properties"]["to"]["description"] = t["inputSchema"]["properties"]["to"]["description"].format(names=", ".join(names))
+        return TOOLS + [t]
+
     def who(self, token):
         """The enabled client a bearer token belongs to, or None. Every entry is compared, each in constant time."""
         if not token:
@@ -286,10 +331,13 @@ class Bot:
     def store(self, client):
         return os.path.join(self.dir, "replies", f"{client}.jsonl")
 
-    def keep(self, client, text, reply_to=None, options=(), files=()):
+    def keep(self, client, text, reply_to=None, options=(), files=(), sender=None, mid=None):
+        """A message for `client` to read: an agent's reply, or (sender set) a post from a client it's linked with."""
         if not NAME_RE.match(client):
             raise ChatError(f"no Agents client '{client}'")
-        entry = {"id": "r" + secrets.token_hex(6), "ts": time.time(), "text": text or "", "reply_to": reply_to}
+        entry = {"id": mid or "r" + secrets.token_hex(6), "ts": time.time(), "text": text or "", "reply_to": reply_to}
+        if sender:
+            entry["from"] = sender
         if options:
             entry["options"] = list(options)
         if files:
@@ -299,7 +347,10 @@ class Bot:
         with self.arrived:
             self.kept += 1
             self.arrived.notify_all()
-        self.audit(client=client, event="reply", id=entry["id"], chars=len(entry["text"]))
+        if sender:
+            self.audit(client=client, event="relay", sender=sender, id=entry["id"], chars=len(entry["text"]))
+        else:
+            self.audit(client=client, event="reply", id=entry["id"], chars=len(entry["text"]))
         return entry["id"]
 
     @staticmethod
@@ -394,6 +445,27 @@ class Bot:
                          "files": [], "bot": True})
         return {"id": mid, "sent": True, "note": "Answers arrive through read_replies."}
 
+    def post_to_client(self, client, args):
+        """Straight to a client it's linked with, into that client's read_replies; no agent here sees it. The id is the
+        same on both sides, so either can name it in reply_to or since."""
+        to = str(args.get("to") or "").strip().lower()
+        text = str(args.get("text") or "").strip()
+        ref = str(args.get("reply_to") or "").strip() or None
+        linked = self.linked(client)
+        if to not in linked:
+            raise Refused(f"you can post to {', '.join(linked)}, not {to or 'nobody'}" if linked else "you aren't linked with another client")
+        if not text:
+            raise Refused("text is required")
+        if len(text) > MAX_TEXT:
+            raise Refused(f"text is {len(text)} characters, over the {MAX_TEXT} limit: shorten it")
+        if ref and ref not in {r["id"] for r in self.replies(client)} and ref not in self.posted(client):
+            raise Refused(f"{ref} isn't one of your messages (read_replies lists them)")
+        mid = "p" + secrets.token_hex(6)
+        with self.mu:
+            self.append(self.posts_path(client), f"{mid} {time.time()}", KEEP_POSTS, self.post_line)
+        self.keep(to, text, ref, sender=client, mid=mid)
+        return {"id": mid, "sent": True, "note": f"{to} reads it through read_replies; its answers reach yours there."}
+
     def wait_s(self, args):
         w = args.get("wait_s")
         if w in (None, ""):
@@ -453,7 +525,7 @@ class Bot:
         out = []
         for r in items:
             one = {"id": r["id"], "time": iso(r.get("ts", 0)), "text": r.get("text"), "reply_to": r.get("reply_to")}
-            for k in ("options", "files"):
+            for k in ("from", "options", "files"):
                 if r.get(k):
                     one[k] = r[k]
             out.append(one)
@@ -502,27 +574,32 @@ class Bot:
                 "serverInfo": {"name": "peerlink-agents", "version": "1"},
                 "instructions": "post_to_skyforge sends skyforge a message; read_replies returns its answers to you. "
                                 "Call read_replies with the next_since it gave you last time; add wait_s (up to "
-                                f"{MAX_WAIT_S}) to wait for an answer in the same call.",
+                                f"{MAX_WAIT_S}) to wait for an answer in the same call."
+                                + (f" You are also linked with {', '.join(self.linked(client))}: post_to_client sends them a "
+                                   "message, and theirs reach your read_replies with from set." if self.linked(client) else ""),
             })
         if method == "ping":
             return ok({})
         if method == "tools/list":
-            return ok({"tools": TOOLS})
+            return ok({"tools": self.tools(client)})
         if method != "tools/call":
             return err(-32601, f"method not found: {method}")
         name, args = params.get("name"), params.get("arguments") or {}
-        if name not in ("post_to_skyforge", "read_replies"):
+        offered = [t["name"] for t in self.tools(client)]
+        if name not in offered:
             self.audit(client=client, ip=ip, method=method, tool=str(name)[:60], result="unknown-tool")
-            return err(-32602, f"unknown tool {name}: this endpoint has only post_to_skyforge and read_replies")
+            return err(-32602, f"unknown tool {name}: this endpoint has only {', '.join(offered)}")
         if not isinstance(args, dict):
             return err(-32602, "arguments must be an object")
-        if name == "post_to_skyforge":
+        posting = name != "read_replies"  # both kinds of post share one allowance
+        if posting:
             rate = (self.clients().get(client) or {}).get("rate_per_min", POSTS_PER_MIN)
             limits = [(rate, 60), (max(rate, POSTS_PER_HOUR), 3600)]
         else:
             limits = [(READS_PER_MIN, 60)]
-        everyone = [(ALL_POSTS_PER_MIN if name == "post_to_skyforge" else ALL_READS_PER_MIN, 60)]
-        if not self.limiter.allow(f"all:{name}", everyone) or not self.limiter.allow(f"{client}:{name}", limits):
+        bucket = "post" if posting else name
+        everyone = [(ALL_POSTS_PER_MIN if posting else ALL_READS_PER_MIN, 60)]
+        if not self.limiter.allow(f"all:{bucket}", everyone) or not self.limiter.allow(f"{client}:{bucket}", limits):
             self.audit(client=client, ip=ip, method=method, tool=name, result="rate-limited")
             return tool_error("rate limited: wait a minute and try again")
         try:
@@ -534,7 +611,9 @@ class Bot:
             self.log("agents", f"{name} for {client} failed:", e)
             self.audit(client=client, ip=ip, method=method, tool=name, result="error")
             return tool_error("that failed on peerlink's side; try again later")
-        extra = {"id": out["id"], "chars": len(str(args.get("text") or ""))} if name == "post_to_skyforge" else {"count": len(out["replies"])}
+        extra = {"id": out["id"], "chars": len(str(args.get("text") or ""))} if posting else {"count": len(out["replies"])}
+        if name == "post_to_client":
+            extra["to"] = str(args.get("to") or "").strip().lower()
         self.audit(client=client, ip=ip, method=method, tool=name, result="ok", **extra)
         return ok({"content": [{"type": "text", "text": json.dumps(out, ensure_ascii=False)}]})
 

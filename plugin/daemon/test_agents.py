@@ -58,7 +58,7 @@ class AgentsChannelTest(unittest.TestCase):
         if peerlinkd.agents_bot[0]:
             peerlinkd.agents_bot[0].close()
         peerlinkd.agents_bot[0] = None
-        peerlinkd.discord["agents"].update({"clients": {}, "chats": {}, "default_to": "", "registration": False, "pending": []})
+        peerlinkd.discord["agents"].update({"clients": {}, "chats": {}, "default_to": "", "registration": False, "pending": [], "links": []})
         peerlinkd.discord["routes"] = []
         peerlinkd.sessions.clear()
         peerlinkd.inboxes.clear()
@@ -152,6 +152,40 @@ class AgentsChannelTest(unittest.TestCase):
         self.assertNotIn("agents:grok", [r["channel_id"] for r in peerlinkd.discord["routes"]])
         stored = json.dumps(peerlinkd.discord["agents"])
         self.assertNotIn(OTHER, stored)  # hashes only
+
+    def test_two_clients_you_link_message_each_other_straight_and_nobody_here_reads_it(self):
+        tools = lambda tok: [t["name"] for t in self.rpc(tok, "tools/list")[1]["result"]["tools"]]
+        self.assertEqual(tools(GROK), ["post_to_skyforge", "read_replies"])
+        unknown = lambda tok: self.rpc(tok, "tools/call", {"name": "post_to_client", "arguments": {"to": "other", "text": "x"}})[1]["error"]["message"]
+        self.assertIn("unknown tool post_to_client", unknown(GROK))
+        code, out = peerlinkd.agents_api(["clients", "grok"], "PUT", {"links": ["nobody"]})
+        self.assertEqual((code, out["error"]), (400, "no client nobody"))
+        code, _ = peerlinkd.agents_api(["clients", "grok"], "PUT", {"links": ["other"]})
+        self.assertEqual(code, 200)
+        self.assertEqual({c["name"]: c["links"] for c in peerlinkd.agents_view()["clients"]}, {"grok": ["other"], "other": ["grok"]})
+        self.assertEqual(tools(GROK), ["post_to_skyforge", "read_replies", "post_to_client"])
+        self.assertEqual(tools(OTHER), ["post_to_skyforge", "read_replies", "post_to_client"])
+        sent, err = self.call(GROK, "post_to_client", {"to": "other", "text": "can you check the build?"})
+        self.assertIsNone(err)
+        got, _ = self.call(OTHER, "read_replies")
+        self.assertEqual([(r["from"], r["text"], r["id"]) for r in got["replies"]], [("grok", "can you check the build?", sent["id"])])
+        self.assertEqual(peerlinkd.inboxes.get("sky", []), [])  # skyforge never sees it
+        back, err = self.call(OTHER, "post_to_client", {"to": "grok", "text": "green", "reply_to": sent["id"]})
+        self.assertIsNone(err)
+        got, _ = self.call(GROK, "read_replies", {"since": sent["id"]})
+        self.assertEqual([(r["from"], r["text"], r["reply_to"]) for r in got["replies"]], [("other", "green", sent["id"])])
+        _, err = self.call(GROK, "post_to_client", {"to": "skyforge", "text": "x"})
+        self.assertEqual(err, "you can post to other, not skyforge")
+        with open(self.bot.audit_path) as f:
+            audit = [json.loads(l) for l in f]
+        self.assertIn({"admin": "change", "client": "grok", "links": ["other"]}, [{k: e[k] for k in ("admin", "client", "links") if k in e} for e in audit])
+        self.assertTrue(any(e.get("event") == "relay" and e.get("sender") == "grok" and e.get("client") == "other" for e in audit))
+        self.assertNotIn("check the build", json.dumps(audit))
+        # Switched off, its link stops working both ways; revoked, the link is gone.
+        peerlinkd.agents_api(["clients", "other"], "PUT", {"enabled": False})
+        self.assertIn("unknown tool post_to_client", unknown(GROK))
+        peerlinkd.agents_api(["clients", "other"], "DELETE", {})
+        self.assertEqual(peerlinkd.discord["agents"]["links"], [])
 
     def test_posts_are_rate_limited_per_client(self):
         peerlinkd.agents_api(["clients", "grok"], "PUT", {"rate_per_min": 2})
