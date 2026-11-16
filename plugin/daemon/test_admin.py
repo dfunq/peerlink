@@ -103,6 +103,18 @@ class AdminTest(unittest.TestCase):
         code, _, _ = self.raw(rig, "GET", "/api/status", {"Cookie": f"peerlink_session={list(kept)[0]}"})
         self.assertEqual(code, 401)
 
+    def test_cookies_kept_before_0_9_44_are_dropped_from_the_file_and_sign_nobody_in(self):
+        rig = Rig(env={"PEERLINK_TEST": "0", "PEERLINK_TEST_ANSWER": "no"})
+        old = "a-cookie-kept-whole"
+        with open(os.path.join(rig.home, "web_sessions.json"), "w") as f:
+            json.dump({old: time.time() + 3600}, f)
+        rig.__enter__()
+        self.addCleanup(rig.__exit__, None, None, None)
+        with open(os.path.join(rig.home, "web_sessions.json")) as f:
+            self.assertEqual(json.load(f), {})
+        code, _, _ = self.raw(rig, "GET", "/api/status", {"Cookie": f"peerlink_session={old}"})
+        self.assertEqual(code, 401)
+
     def test_discord_settings_are_yours_from_the_browser_only(self):
         rig = self.rig("no")
         code, out = rig.call("PUT", "/api/discord", {"allowed_users": ["123456789012345678"]})
