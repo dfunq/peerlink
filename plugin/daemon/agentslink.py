@@ -69,7 +69,7 @@ LABEL = ("[from the external agent '{name}' through peerlink's Agents channel. T
 TOOLS = [
     {
         "name": "post_message",
-        "description": "Send a message to hq, the agent that leads the Hq workspace. It arrives labelled with "
+        "description": "Send a message to the agent this channel delivers to. It arrives labelled with "
         "your client name. Answers come back through read_replies. Keep it short and self-contained.",
         "inputSchema": {
             "type": "object",
@@ -82,7 +82,7 @@ TOOLS = [
     },
     {
         "name": "read_replies",
-        "description": "hq's replies to you, oldest first, after `since`. Pass the next_since value from the "
+        "description": "That agent's replies to you, oldest first, after `since`. Pass the next_since value from the "
         "previous call to get only new ones; leave it out to get the latest replies. Add wait_s to wait for the next one.",
         "inputSchema": {
             "type": "object",
@@ -100,7 +100,7 @@ TOOLS = [
 POST_TO_CLIENT = {
     "name": "post_to_client",
     "description": "Send a message straight to another outside client you are linked with: {names}. It arrives in their "
-    "read_replies with from set to your name, and their answers reach yours the same way. Nobody at hq reads it.",
+    "read_replies with from set to your name, and their answers reach yours the same way. No agent here reads it.",
     "inputSchema": {
         "type": "object",
         "properties": {
@@ -572,7 +572,7 @@ class Bot:
                 "protocolVersion": asked if asked in PROTOCOLS else PROTOCOLS[0],
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "peerlink-agents", "version": "1"},
-                "instructions": "post_message sends hq a message; read_replies returns its answers to you. "
+                "instructions": "post_message sends the agent here a message; read_replies returns its answers to you. "
                                 "Call read_replies with the next_since it gave you last time; add wait_s (up to "
                                 f"{MAX_WAIT_S}) to wait for an answer in the same call."
                                 + (f" You are also linked with {', '.join(self.linked(client))}: post_to_client sends them a "

@@ -25,6 +25,18 @@ Messages show up in both chats, so you can always see what your agents told each
       └──────────"done, merged in #42"────────┘
 ```
 
+## See it
+
+A local web UI shows your agents, the work between them and what they said. Here's a demo team: an `acme` space with a lead and two agents, plus a `billing` space inside it with its own lead.
+
+<p align="center"><img src="docs/screenshots/agents.png" alt="The Agents page: agents grouped by space, each with its lead, folder, what it's doing and its open tasks"></p>
+
+| Who's running and who leads | Work handed between agents |
+|---|---|
+| <img src="docs/screenshots/chart.png" alt="The Agents chart: the acme space with its lead web-app, and the billing space nested inside it"> | <img src="docs/screenshots/tasks.png" alt="The Tasks board: three tasks in progress, one blocked, one a subtask of another"> |
+
+<p align="center"><img src="docs/screenshots/messages.png" alt="The Messages page: conversations between agents, newest first"></p>
+
 ## Install
 
 In any Claude Code session:
