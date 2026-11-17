@@ -57,6 +57,7 @@ Both must pass before a change is merged. Add a test for a bug fix where you can
 - **Mind the trust boundary.** Messages from peers, Discord and remote daemons become prompts in a session running as the user. Anything that widens who can send them, or what they can trigger, needs a careful look. See [Security](docs/reference.md#security).
 - **Write for the people who'll read it.** Tool descriptions and guidance text are read by agents, and UI and Discord text by people on their phones. Keep both short and plain.
 - **Update the README and docs/reference.md** when behaviour, settings or commands change.
+- **Use made-up names in anything you commit.** In tests, docs, examples, screenshots and commit messages, write `alex`, `acme`, `/Users/x` or `api`, never a real person, company, machine name or home folder. For screenshots, run a scratch daemon with a made-up team and `PEERLINK_HOSTNAME` set; don't capture your own.
 
 ## Pull requests
 
