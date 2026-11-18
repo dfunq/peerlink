@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-24.04, macos-latest]  # 24.04: the newest Ubuntu that still has Python 3.9
         python: ["3.9", "3.13"]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -24,7 +24,13 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       # Crash, restart and concurrency scenarios run here too (test_scenarios.py, test_records.py).
-      - run: python3 -m unittest discover -s plugin/daemon
+      # A test that hangs prints every thread's stack and fails here, rather than running into the job's timeout.
+      - run: |
+          python3 -c "
+          import faulthandler, unittest
+          faulthandler.dump_traceback_later(480, exit=True)
+          unittest.main(module=None, argv=['unittest', 'discover', '-s', 'plugin/daemon', '-v'])
+          "
 
   hooks:
     name: Hooks module
