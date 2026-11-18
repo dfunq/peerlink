@@ -6,10 +6,11 @@ import sys
 import threading
 import time
 import unittest
+import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from rig import Rig  # noqa: E402
+from rig import Agent, Rig  # noqa: E402
 
 
 class ScenarioTest(unittest.TestCase):
@@ -106,6 +107,38 @@ class ScenarioTest(unittest.TestCase):
         core = rig.agent("core", space="core", parent="top")
         loop = rig.agent("loop", space="core", parent="top")
         return chief, core, loop
+
+    def started_agent(self, rig, name, sid, space, parent):
+        """An agent a spawn started: its space comes from the request, in a folder whose .peerlink says `space`/`parent`."""
+        agent = Agent(rig, name, rig.folder(name, space, parent))
+        agent.sid = sid
+        agent.register()
+        rig.agents.append(agent)
+        agent.poll()
+        return agent
+
+    def test_a_nested_lead_restarted_by_a_spawn_stays_inside_its_parent(self):
+        """i63: a spawn names the space, and the folder's .peerlink still says which space that one sits inside."""
+        sid = str(uuid.uuid4())
+        rig = self.rig(config={"sessions": {sid: {"started_in": "core"}}})
+        chief = rig.agent("chief", space="top")
+        core = self.started_agent(rig, "core", sid, "core", "top")
+        chief.send(to="core", text="By name.")
+        core.expect("By name.")
+        chief.send(to="space:core", text="By space.")
+        core.expect("By space.")
+        core.send(to="chief", text="Back up the tree.")
+        chief.expect("Back up the tree.")
+
+    def test_a_parent_line_only_counts_for_the_space_its_file_names(self):
+        """An agent started in another space doesn't inherit the parent of the space its folder's .peerlink names."""
+        sid = str(uuid.uuid4())
+        rig = self.rig(config={"sessions": {sid: {"started_in": "elsewhere"}}})
+        chief = rig.agent("chief", space="top")
+        self.started_agent(rig, "core", sid, "core", "top")
+        code, out = chief.send(False, to="core", text="hi")
+        self.assertEqual(code, 409)
+        self.assertIn("can't reach", out["error"])
 
     def test_work_goes_down_a_tree_of_tasks_and_word_comes_back_without_a_relay(self):
         rig = self.rig()
