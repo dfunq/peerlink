@@ -31,7 +31,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.46"
+VERSION = "0.9.47"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -679,8 +679,9 @@ def space_of(rec):
         found = (chosen, "set", cwd)
     elif path and read_space_file(path):
         found = (read_space_file(path), "file", path)
-    # A parent: line in the .peerlink names the space this one sits inside, unless you set it on the Spaces page.
-    parent = read_space_file(found[2], "parent") if found[1] == "file" else ""
+    # A parent: line in the .peerlink names the space this one sits inside, unless you set it on the Spaces page. It
+    # holds for an agent in the space that file names, however it got there: a lead restarted by a spawn is still nested.
+    parent = read_space_file(path, "parent") if path and read_space_file(path) == found[0] else ""
     rec["_space"] = (now, found, "" if parent == found[0] else parent)
     return found
 
