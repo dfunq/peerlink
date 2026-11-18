@@ -388,12 +388,23 @@ def web_hosts():
     return {f"{h}:{PORT}" for h in hosts}
 
 
+NAME_LOOKUP_S = 1.0
+
+
 def name_resolves(name):
-    """True when name reaches this machine: a sign-in link may use it then."""
-    try:
-        return all(a[4][0] in ("127.0.0.1", "::1") for a in socket.getaddrinfo(name, PORT, proto=socket.IPPROTO_TCP))
-    except (OSError, UnicodeError):
-        return False
+    """True when name reaches this machine: a sign-in link may use it then. A lookup that takes too long counts as no,
+    since a slow network mustn't hold up the request waiting for the link."""
+    found = []
+
+    def look():
+        try:
+            found.append(all(a[4][0] in ("127.0.0.1", "::1") for a in socket.getaddrinfo(name, PORT, proto=socket.IPPROTO_TCP)))
+        except (OSError, UnicodeError):
+            found.append(False)
+    thread = threading.Thread(target=look, name="name-lookup", daemon=True)
+    thread.start()
+    thread.join(NAME_LOOKUP_S)
+    return bool(found and found[0])
 
 
 def publish_name():
