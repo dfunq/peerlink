@@ -48,7 +48,7 @@ claude plugin test plugin                          # the hooks module (register.
 python3 -m unittest discover -s plugin/daemon      # the MCP endpoint
 ```
 
-Both must pass before a change is merged. Add a test for a bug fix where you can. For daemon changes with no unit tests, describe in the pull request how you checked the change against a scratch daemon.
+Both must pass before a change is merged, and CI runs them on every pull request. Add a test for a bug fix where you can. For daemon changes with no unit tests, describe in the pull request how you checked the change against a scratch daemon.
 
 ## Making a change
 

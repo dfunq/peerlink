@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 import urllib.error
 import urllib.request
 
@@ -396,7 +397,10 @@ class AgentsChannelTest(unittest.TestCase):
 
     def test_switching_the_channel_off_ends_waiting_reads(self):
         t, box = self.background(GROK, {"since": time.time(), "wait_s": 4})
-        time.sleep(0.3)
+        end = time.monotonic() + 3
+        while not self.bot.waiting and time.monotonic() < end:  # closed before the read waits, it never tests the wake
+            time.sleep(0.01)
+        self.assertTrue(self.bot.waiting)
         self.bot.close()
         t.join(3)
         self.assertFalse(t.is_alive())
@@ -404,6 +408,37 @@ class AgentsChannelTest(unittest.TestCase):
 
 
 class AgentsLinkTest(unittest.TestCase):
+    def test_the_cloudflare_header_counts_only_from_this_machine_and_only_as_an_address(self):
+        self.assertEqual(agentslink.caller_ip("203.0.113.5", "127.0.0.1"), "203.0.113.5")
+        self.assertEqual(agentslink.caller_ip(" 2001:DB8::1 ", "::1"), "2001:db8::1")
+        self.assertEqual(agentslink.caller_ip("203.0.113.5", "198.51.100.7"), "198.51.100.7")  # not through the tunnel
+        for forged in (None, "", "not-an-ip", "1.2.3.4, 5.6.7.8", 'x"}\n{"forged":1', "9" * 5000):
+            self.assertEqual(agentslink.caller_ip(forged, "127.0.0.1"), "127.0.0.1", forged)
+
+    def test_the_limiter_forgets_a_key_once_its_window_has_passed_and_still_limits_until_then(self):
+        limiter, now = agentslink.Limiter(), [1000.0]
+        with mock.patch.object(agentslink.time, "time", lambda: now[0]):
+            limiter.pruned = now[0]
+            self.assertTrue(limiter.allow("register:1.1.1.1", [(1, 3600)]))
+            self.assertTrue(limiter.allow("short", [(1, 60)]))
+            now[0] += 120
+            self.assertTrue(limiter.allow("other", [(1, 60)]))
+            self.assertEqual(sorted(limiter.hits), ["other", "register:1.1.1.1"])  # the hour's window still counts
+            self.assertFalse(limiter.allow("register:1.1.1.1", [(1, 3600)]))
+            now[0] += 3600
+            self.assertTrue(limiter.allow("later", [(1, 60)]))
+            self.assertEqual(sorted(limiter.hits), ["later"])
+            self.assertEqual(sorted(limiter.until), ["later"])
+
+    def test_callers_with_ever_new_addresses_cant_grow_the_limiter_past_its_cap(self):
+        limiter = agentslink.Limiter()
+        with mock.patch.object(agentslink.Limiter, "MAX_KEYS", 100):
+            for i in range(1000):
+                self.assertTrue(limiter.allow(f"register:{i}", [(3, 3600)]))
+                self.assertLessEqual(len(limiter.hits), 100)
+            self.assertIn("register:999", limiter.hits)  # the newest stay
+            self.assertNotIn("register:0", limiter.hits)
+
     def test_clean_clients_drops_malformed_entries(self):
         out = agentslink.clean_clients({"ok": {"token_sha256": "a" * 64}, "Bad": {"token_sha256": "a" * 64},
                                         "nohash": {}, "rate": {"token_sha256": "b" * 64, "rate_per_min": 9999}})

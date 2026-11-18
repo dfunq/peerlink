@@ -18,10 +18,23 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
-VERSION = "0.9.19"
+
+
+def package_version():
+    """The version of the plugin this file shipped in, so it can't fall behind."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".claude-plugin", "plugin.json")
+    try:
+        with open(path) as f:
+            return str(json.load(f)["version"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return "unknown"
+
+
+VERSION = package_version()
 PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 HEARTBEAT_S = 2.0
-WAIT_BEAT_S = 0.5  # how often the daemon is asked while a caller waits in inbox
+WAIT_HOLD_S = 10.0  # while a caller waits in inbox, the daemon holds each heartbeat this long for a message
+WAIT_BEAT_S = 0.5   # the least time between those, for a daemon too old to hold them
 WAIT_MAX_S = 25.0   # under the request timeout most MCP clients keep
 SEEN_MAX = 2000
 HOME = os.environ.get("PEERLINK_HOME", os.path.expanduser("~/.peerlink"))
@@ -80,7 +93,8 @@ class Daemon:
         self.key_path = os.path.join(home, "key")
         self.id = f"mcp-{name}"
         self.lock = threading.Condition()
-        self.waiting = 0   # inbox calls holding for a message: the daemon is asked more often while there are any
+        self.waiting = 0   # inbox calls holding for a message: the daemon is asked to hold heartbeats while there are any
+        self.wake = threading.Event()  # a caller started waiting: don't sit out the rest of the heartbeat's sleep
         self.pending = {}  # id -> message handed by the daemon, not yet read
         self.to_ack = []   # read, and the daemon not yet told
         self.seen = {}     # id -> True for every message addressed to us, so a reply_to on one is ours to make
@@ -160,11 +174,12 @@ class Daemon:
         if code == 200 and out.get("user"):
             self.user_names.add(str(out["user"]).strip().lower())
 
-    def heartbeat(self):
+    def heartbeat(self, hold=0):
         with self.lock:
             acks = list(self.to_ack)
         # "ack" present tells the daemon to hand a message again until it is acked, so one never read is not lost.
-        code, out = self.call("POST", f"/api/sessions/{self.id}/heartbeat", {"busy": False, "ack": acks})
+        body = {"busy": False, "ack": acks, **({"wait": hold} if hold else {})}
+        code, out = self.call("POST", f"/api/sessions/{self.id}/heartbeat", body, timeout=5 + hold)
         if code == 404:
             self.register()
             return
@@ -187,14 +202,19 @@ class Daemon:
                 self.seen.pop(next(iter(self.seen)))
 
     def run_heartbeats(self):
+        pause = HEARTBEAT_S
         while True:
-            time.sleep(WAIT_BEAT_S if self.waiting else HEARTBEAT_S)
+            self.wake.wait(pause)
+            self.wake.clear()
+            hold = WAIT_HOLD_S if self.waiting else 0
+            started = time.time()
             try:
-                self.heartbeat()
+                self.heartbeat(hold)
             except Refused as err:
                 log(err)
             except Exception as err:  # keep the peer alive through anything odd
                 log("heartbeat failed:", err)
+            pause = max(0.0, WAIT_BEAT_S - (time.time() - started)) if self.waiting else HEARTBEAT_S
 
     # Tools
 
@@ -255,6 +275,7 @@ class Daemon:
         with self.lock:
             if wait and not self.pending:
                 self.waiting += 1
+                self.wake.set()
                 try:
                     self.lock.wait_for(lambda: self.pending, wait)
                 finally:
