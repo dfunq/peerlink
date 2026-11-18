@@ -152,6 +152,18 @@ class EndpointTest(unittest.TestCase):
             self.assertTrue(err, to)
         self.assertFalse([1 for p, _ in self.d.posted if p == "/api/messages"])
 
+    def test_it_reports_the_version_of_the_plugin_it_shipped_in(self):
+        with open(os.path.join(os.path.dirname(SCRIPT), "..", ".claude-plugin", "plugin.json")) as f:
+            version = json.load(f)["version"]
+        self.assertEqual(self.c.rpc("initialize", {"protocolVersion": "2025-06-18"})["result"]["serverInfo"]["version"], version)
+
+    def test_a_waiting_inbox_asks_the_daemon_to_hold_and_doesnt_hammer_one_too_old_to(self):
+        before = len(self.d.posted)
+        self.assertEqual(self.c.tool("inbox", wait=2.2)[1]["messages"], [])
+        beats = [b for p, b in self.d.posted[before:] if p.endswith("/heartbeat")]
+        self.assertTrue(beats and all(b.get("wait") for b in beats[:-1] or beats), beats)
+        self.assertLessEqual(len(beats), 7)  # this fake answers at once: at most one each WAIT_BEAT_S
+
     def test_caps_text_at_the_daemons_limit(self):
         err, msg = self.c.tool("send_message", to="billing", text="x" * 51)
         self.assertTrue(err)
