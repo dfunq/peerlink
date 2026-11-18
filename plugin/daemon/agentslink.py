@@ -19,10 +19,12 @@ text). A client's replies are kept in ~/.peerlink/agents/replies/<name>.jsonl fo
 import collections
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
 import secrets
+import socketserver
 import threading
 import time
 from datetime import datetime, timezone
@@ -147,6 +149,11 @@ def audit(home, log, **entry):
 class Server(ThreadingHTTPServer):
     request_queue_size = 64  # the default 5 resets a burst of connections, such as several clients waiting at once
 
+    def server_bind(self):
+        # HTTPServer's own asks DNS for this machine's name, which on a slow network holds up the port for a minute.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
 
 _bot = [None]  # the running Bot: post() and the other module calls reach it here, as the platform's "connection"
 
@@ -182,23 +189,54 @@ def clean_clients(raw):
     return out
 
 
+def caller_ip(header, peer):
+    """Who is calling, for limits and the audit log. Only cloudflared, connecting from this machine, sets the
+    Cloudflare header truthfully, so it counts only from loopback and only when it is an address: anything else would
+    let a caller pick its own limiter key, or write what it likes into the audit log."""
+    try:
+        if not ipaddress.ip_address(peer).is_loopback:
+            return peer
+        return str(ipaddress.ip_address((header or "").strip()))
+    except ValueError:
+        return peer
+
+
 class Limiter:
-    """Sliding windows: allow(key, [(count, seconds), ...]) is False once any window is full."""
+    """Sliding windows: allow(key, [(count, seconds), ...]) is False once any window is full. A key is forgotten once
+    its longest window has passed, and the keys are capped, so callers with ever-new addresses can't grow it for good."""
+
+    PRUNE_S = 60
+    MAX_KEYS = 10000
 
     def __init__(self):
         self.hits = collections.defaultdict(collections.deque)
+        self.until = {}  # key -> when its last hit has left its longest window
+        self.pruned = time.time()
         self.mu = threading.Lock()
+
+    def prune(self, now):
+        self.pruned = now
+        for key in [k for k, end in self.until.items() if end <= now]:
+            self.hits.pop(key, None)
+            self.until.pop(key, None)
+        if len(self.until) >= self.MAX_KEYS:  # down to 90%, so a flood doesn't sort them on every call
+            for key in sorted(self.until, key=self.until.get)[:len(self.until) - self.MAX_KEYS * 9 // 10]:
+                self.hits.pop(key, None)
+                self.until.pop(key, None)
 
     def allow(self, key, windows):
         now = time.time()
         longest = max(s for _, s in windows)
         with self.mu:
+            if now - self.pruned >= self.PRUNE_S or (key not in self.until and len(self.until) >= self.MAX_KEYS):
+                self.prune(now)
             q = self.hits[key]
             while q and q[0] <= now - longest:
                 q.popleft()
             if any(sum(1 for t in q if t > now - s) >= n for n, s in windows):
                 return False
             q.append(now)
+            self.until[key] = now + longest
             return True
 
 
@@ -642,7 +680,7 @@ def handler(bot):
             return urlparse(self.path).path.rstrip("/")
 
         def ip(self):
-            return self.headers.get("CF-Connecting-IP") or self.client_address[0]
+            return caller_ip(self.headers.get("CF-Connecting-IP"), self.client_address[0])
 
         def do_GET(self):
             if self.where() == "/healthz":
