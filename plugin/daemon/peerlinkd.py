@@ -31,7 +31,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.45"
+VERSION = "0.9.46"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -197,7 +197,22 @@ DEFAULT_CONFIG = {
 
 lock = threading.RLock()
 sessions = {}   # id -> session record
-inboxes = {}    # id -> [message]
+
+
+class Inboxes(dict):
+    """id -> [message]. Everything that queues a message goes through setdefault, which wakes a heartbeat held for one."""
+
+    def setdefault(self, key, default=None):
+        held = held_beats.get(key)
+        if held:
+            held.set()
+        return super().setdefault(key, default)
+
+
+held_beats = {}  # id -> the Event a heartbeat with "wait" is held on
+HOLD_MAX_S = 20  # well under peer_ttl_s, and the agent is kept live while held
+HOLDS_MAX = 16   # each holds a server thread
+inboxes = Inboxes()
 # Messages handed to an agent that hasn't said they reached its session yet: id -> {message id: (message, when handed)}.
 # Handed again until acked, so one lost in a plugin reload or a prompt that never started a turn still arrives.
 handed = {}
@@ -373,12 +388,23 @@ def web_hosts():
     return {f"{h}:{PORT}" for h in hosts}
 
 
+NAME_LOOKUP_S = 1.0
+
+
 def name_resolves(name):
-    """True when name reaches this machine: a sign-in link may use it then."""
-    try:
-        return all(a[4][0] in ("127.0.0.1", "::1") for a in socket.getaddrinfo(name, PORT, proto=socket.IPPROTO_TCP))
-    except (OSError, UnicodeError):
-        return False
+    """True when name reaches this machine: a sign-in link may use it then. A lookup that takes too long counts as no,
+    since a slow network mustn't hold up the request waiting for the link."""
+    found = []
+
+    def look():
+        try:
+            found.append(all(a[4][0] in ("127.0.0.1", "::1") for a in socket.getaddrinfo(name, PORT, proto=socket.IPPROTO_TCP)))
+        except (OSError, UnicodeError):
+            found.append(False)
+    thread = threading.Thread(target=look, name="name-lookup", daemon=True)
+    thread.start()
+    thread.join(NAME_LOOKUP_S)
+    return bool(found and found[0])
 
 
 def publish_name():
@@ -3503,6 +3529,33 @@ def close_threads(sid, ids):
     return 200, {"closed": [m["id"] for m in mine], **({"not_yours": missing} if missing else {})}
 
 
+def hold_for_inbox(sid, wait, track):
+    """A heartbeat that asked to wait: the agent's next messages, as soon as there are any, or none after `wait`
+    seconds. An agent already held, or one over the limit of holds, gets its answer at once."""
+    done = time.time() + min(wait, HOLD_MAX_S)
+    beat = threading.Event()
+    with lock:
+        if sid in held_beats or len(held_beats) >= HOLDS_MAX:
+            return []
+        held_beats[sid] = beat
+    try:
+        while time.time() < done:
+            beat.clear()  # before looking, so a message queued after the look still wakes the wait below
+            with lock:
+                rec = sessions.get(sid)
+                if rec is None:
+                    return []
+                rec["last_seen"] = time.time()
+            inbox = take_inbox(sid, track=track)
+            if inbox:
+                return inbox
+            beat.wait(min(1.0, max(0.0, done - time.time())))  # a redelivery comes due with no queueing to wake it
+        return []
+    finally:
+        with lock:
+            held_beats.pop(sid, None)
+
+
 def take_inbox(sid, track=False):
     """New messages for this agent, marked delivered. With track (a plugin that acks), each is handed again every
     REDELIVER_S until the plugin acks it, for up to a day."""
@@ -5528,6 +5581,9 @@ class Handler(BaseHTTPRequestHandler):
                 cfg = client_config(sid)
             ack(sid, b.get("ack"), b.get("holding"))
             inbox = [] if cfg["muted"] else take_inbox(sid, track="ack" in b)
+            wait = b.get("wait")
+            if not inbox and not cfg["muted"] and isinstance(wait, (int, float)) and not isinstance(wait, bool) and wait > 0:
+                inbox = hold_for_inbox(sid, wait, "ack" in b)
             others = peer_count(sid) + len(config.get("remotes", []))
             with lock:
                 held = limit_for(sid)

@@ -429,6 +429,33 @@ class ScenarioTest(unittest.TestCase):
         # And it goes on serving: the only message is the one saying it leads acme, being alone in it.
         self.assertTrue(all("as the only agent in it" in m["text"] for m in lead.poll()))
 
+    def test_a_heartbeat_that_waits_comes_back_when_a_message_does_and_keeps_the_agent_live_meanwhile(self):
+        rig = self.rig(config={"peer_ttl_s": 1})
+        sender, waiter = rig.agent("sender", space="acme"), rig.agent("waiter", space="acme")
+        beat = lambda wait: rig.call("POST", f"/api/sessions/{waiter.sid}/heartbeat", {"busy": False, "ack": [], "wait": wait})
+
+        start = time.time()
+        code, out = beat(0.4)
+        self.assertEqual((code, out["inbox"]), (200, []))
+        self.assertGreaterEqual(time.time() - start, 0.35)
+
+        got, start = {}, time.time()
+        t = threading.Thread(target=lambda: got.update(out=beat(8)[1], took=time.time() - start))
+        t.start()
+        time.sleep(1.6)  # past peer_ttl_s: only the hold keeps it listed
+        sender.poll()
+        self.assertIn("waiter", sender.peers())
+        sender.send(to="waiter", text="here it is")
+        t.join(6)
+        self.assertEqual([m["text"] for m in got["out"]["inbox"]], ["here it is"])
+        self.assertLess(got["took"], 4)
+
+        # Nonsense isn't a wait, and a second hold for the same agent doesn't stack.
+        start = time.time()
+        for wait in ("soon", True, -1, 0):
+            self.assertEqual(beat(wait)[0], 200)
+        self.assertLess(time.time() - start, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -331,6 +331,7 @@ class SlackBotTest(unittest.TestCase):
         self.assertTrue(wait(lambda: self.fake.sock.opened == 2))
         self.fake.sock.push(event("still here"))
         self.assertTrue(wait(lambda: self.got))
+        self.fake.sock.conn.shutdown(socket.SHUT_RDWR)  # close alone sends nothing on Linux while a thread reads it
         self.fake.sock.conn.close()
         self.assertTrue(wait(lambda: self.fake.sock.opened == 3, 6))
 
