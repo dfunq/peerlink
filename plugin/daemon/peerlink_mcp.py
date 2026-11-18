@@ -10,6 +10,7 @@ and no tool takes an identity. It speaks MCP over stdio, or over HTTP on 127.0.0
 import argparse
 import json
 import os
+import socketserver
 import sys
 import threading
 import time
@@ -378,7 +379,12 @@ def serve_http(daemon, port):
         def do_GET(self):
             self.send(405, {"error": "POST JSON-RPC to /mcp"})
 
-    srv = ThreadingHTTPServer(("127.0.0.1", port), H)
+    class Server(ThreadingHTTPServer):
+        def server_bind(self):  # HTTPServer's own waits on a reverse DNS lookup of this machine
+            socketserver.TCPServer.server_bind(self)
+            self.server_name, self.server_port = self.server_address[:2]
+
+    srv = Server(("127.0.0.1", port), H)
     log(f"listening on http://127.0.0.1:{port}/mcp")
     srv.serve_forever()
 

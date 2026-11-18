@@ -24,6 +24,7 @@ import json
 import os
 import re
 import secrets
+import socketserver
 import threading
 import time
 from datetime import datetime, timezone
@@ -147,6 +148,11 @@ def audit(home, log, **entry):
 
 class Server(ThreadingHTTPServer):
     request_queue_size = 64  # the default 5 resets a burst of connections, such as several clients waiting at once
+
+    def server_bind(self):
+        # HTTPServer's own asks DNS for this machine's name, which on a slow network holds up the port for a minute.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 _bot = [None]  # the running Bot: post() and the other module calls reach it here, as the platform's "connection"

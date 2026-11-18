@@ -408,6 +408,25 @@ class AgentsChannelTest(unittest.TestCase):
 
 
 class AgentsLinkTest(unittest.TestCase):
+    def test_binding_the_port_never_waits_on_dns(self):
+        with mock.patch("socket.getfqdn", side_effect=AssertionError("asked DNS for this machine's name")):
+            server = agentslink.Server(("127.0.0.1", 0), agentslink.BaseHTTPRequestHandler)
+        self.addCleanup(server.server_close)
+        self.assertEqual(server.server_name, "127.0.0.1")
+        self.assertEqual(server.server_port, server.server_address[1])
+
+    def test_a_slow_name_lookup_gives_up_so_a_sign_in_link_falls_back_to_the_address(self):
+        release = threading.Event()
+        self.addCleanup(release.set)
+        with mock.patch.object(peerlinkd.socket, "getaddrinfo", lambda *a, **k: release.wait(10) and []), \
+                mock.patch.object(peerlinkd, "NAME_LOOKUP_S", 0.1), mock.patch.object(peerlinkd, "local_name", lambda: "peerlink.local"):
+            start = time.monotonic()
+            self.assertEqual(peerlinkd.link_host(), "127.0.0.1")
+            self.assertLess(time.monotonic() - start, 2)
+        with mock.patch.object(peerlinkd.socket, "getaddrinfo", lambda *a, **k: [(0, 0, 0, "", ("127.0.0.1", 7899))]), \
+                mock.patch.object(peerlinkd, "local_name", lambda: "peerlink.local"):
+            self.assertEqual(peerlinkd.link_host(), "peerlink.local")
+
     def test_the_cloudflare_header_counts_only_from_this_machine_and_only_as_an_address(self):
         self.assertEqual(agentslink.caller_ip("203.0.113.5", "127.0.0.1"), "203.0.113.5")
         self.assertEqual(agentslink.caller_ip(" 2001:DB8::1 ", "::1"), "2001:db8::1")
