@@ -32,7 +32,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.48"
+VERSION = "0.9.49"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -1451,8 +1451,8 @@ def expire(box):
 
 
 # -- Discord ---------------------------------------------------------------------------------------
-# The mapping: each Discord channel has agents, each one ticked to receive (your messages reach it: the first
-# such agent gets them, "name: ..." reaches another) and to send (it may post there). Agents are kept by folder,
+# The mapping: each Discord channel has agents, each one ticked to receive (your messages reach it: every such
+# agent gets them, "name: ..." reaches one alone) and to send (it may post there). Agents are kept by folder,
 # so a mapping survives a restart, /clear or a new session. Direct messages go to `dm`.
 discord = {"token": "", "app_id": "", "user": "", "enabled": True, "routes": [], "dm": "",
            # What agents may do beyond text, each a switch on the Channels page.
@@ -1523,7 +1523,8 @@ def clean_route(r):
 
 
 def receivers(route):
-    """The agents a channel's messages can reach, as its entries, in order: the first gets them unless one is named."""
+    """The agents a channel's messages reach, as its entries, in order: each gets them unless one is named or replied
+    to, and the first gets a task."""
     return [a for a in route.get("agents", []) if a.get("receives")]
 
 
@@ -2287,7 +2288,7 @@ def external(channel_id):
 
 def routes_for(cwd, name="", agents=False):
     """The channels an agent is mapped into, by its folder and name (a folder alone: any agent there): whether it
-    receives and sends there, and whether it's the first receiver (`master`), which gets messages that name nobody.
+    receives and sends there, and whether it gets messages that name nobody (`master`): every receiver does.
     An Agents channel counts only with agents=True: it is an outside agent's, so your approvals, questions and notices
     never go there, and "discord" (any chat) never means it."""
     out = []
@@ -2296,9 +2297,8 @@ def routes_for(cwd, name="", agents=False):
             continue
         a = next((a for a in r.get("agents", []) if entry_is(a, cwd, name)), None)
         if a:
-            first = receivers(r)[:1]
             out.append({"channel_id": r["channel_id"], "channel": discord_channel_label(r["channel_id"]), "platform": chatlink.name(r["channel_id"]),
-                        "master": bool(first) and entry_is(first[0], cwd, name), "receives": a["receives"], "sends": a["sends"]})
+                        "master": a["receives"], "receives": a["receives"], "sends": a["sends"]})
     if discord.get("dm") == cwd:
         out.append({"channel_id": "dm", "channel": "direct messages", "platform": "Discord", "master": True, "receives": True, "sends": True})
     return out
@@ -2428,7 +2428,7 @@ def agent_named(name):
 
 
 def channel_agent(channel_id, dm):
-    """The agent a channel's messages go to: its first receiver, or your DMs'."""
+    """The agent a channel's /peerlink run goes to: its first receiver, or your DMs'."""
     if dm:
         with lock:
             return successor(discord["dm"]) if discord.get("dm") else None
@@ -2525,7 +2525,8 @@ def on_clear_all_press(press):
 
 
 def on_discord(d):
-    """A message from you on Discord, Telegram or Slack: to the chat's first receiver, or to another one it names first."""
+    """A message from you on Discord, Telegram or Slack: to every agent that receives the chat, or to the one it names
+    first or replies to. A task goes to the first receiver alone, since a task has one owner."""
     bot = chat_bot(d["channel_id"])
     if not bot:
         return
@@ -2539,7 +2540,7 @@ def on_discord(d):
         # Without the Message Content switch only @mentions carry text; with it, every message in a mapped channel.
         if route is None or not (d["mentioned"] or bot.reads_messages):
             return
-    text, entry = d["text"], (receivers(route) or [None])[0]
+    text, entry, named = d["text"], (receivers(route) or [None])[0], False
     # "storefront: ..." or "@storefront ..." addresses another agent this channel reaches, by name.
     head, sep, rest = text.partition(":")
     first = text.split(None, 1)
@@ -2551,7 +2552,7 @@ def on_discord(d):
             agent = entry_agent(member)
             names = {entry_label(member).lower(), (display_name(agent) if agent else "").lower()} - {""}
             if candidate.lower() in names:
-                text, entry = body or text, member
+                text, entry, named = body or text, member, True
                 break
         else:
             continue
@@ -2583,6 +2584,16 @@ def on_discord(d):
         chat_post(d["channel_id"], f"Announced to {n} agent{'' if n == 1 else 's'} in {space}." if n else f"No agent in {space} is running; nobody heard it.", d["message_id"])
         return
     claim = d.get("approval") if external(d["channel_id"]) else None
+    # Named nobody and answers nobody: each agent ticked to receive here gets its own copy. One with an approval
+    # claim is stamped for one receiver, so it stays with the first.
+    entries = [entry] if named or replied or claim or kind == "task" else receivers(route)
+    for entry in entries:
+        deliver_from_chat(d, entry, text, kind, claim, replied, asker)
+
+
+def deliver_from_chat(d, entry, text, kind, claim, replied, asker):
+    """One chat message queued for one receiver, as its own message: on_discord's last step."""
+    cwd = entry["cwd"]
     stamped = None
     with lock:
         if claim:
@@ -2635,17 +2646,23 @@ def on_discord(d):
 # thread, so a heartbeat never waits on Discord.
 ACTIVITY_EMOJI = {"thinking": "🤔", "tools": "🛠️", "asking": "❓"}
 reactions = {}  # message id -> the emoji it shows now
+reaction_posts = {}  # message id -> (channel, post) it reacts on, for posts several messages share
 reaction_jobs = []
 reaction_wake = threading.Event()
 
 
 def set_reaction(msg, emoji):
+    """One message's reaction. Several messages can share one post (a chat message every receiver got its copy of):
+    the post shows each one's, and a reaction comes off only when none of them still has it."""
     d = msg.get("discord")
     if not d or reactions.get(msg["id"]) == emoji:
         return
     old = reactions.get(msg["id"])
     reactions[msg["id"]] = emoji
-    reaction_jobs.append((d["channel_id"], d["message_id"], old, emoji))
+    post = (d["channel_id"], d["message_id"])
+    reaction_posts[msg["id"]] = post
+    shown = {reactions.get(i) for i, p in reaction_posts.items() if p == post and i != msg["id"]}
+    reaction_jobs.append((d["channel_id"], d["message_id"], None if old in shown else old, None if emoji in shown else emoji))
     reaction_wake.set()
 
 
@@ -2695,6 +2712,7 @@ def clean_stale_reactions():
         recent = [m for m in messages if m.get("discord") and str(m.get("from", "")).startswith("discord:") and m.get("ts", 0) > cutoff][-60:]
         for m in recent:
             reactions.pop(m["id"], None)
+            reaction_posts.pop(m["id"], None)
             for emoji in ACTIVITY_EMOJI.values():
                 reaction_jobs.append((m["discord"]["channel_id"], m["discord"]["message_id"], emoji, None))
         config["reactions_cleaned"] = VERSION
@@ -3666,6 +3684,33 @@ def agent_for(rec, old=None):
     rec["agent"] = agent_of[rec["id"]] = aid
     rec.pop("_space", None)  # worked out before it knew which agent it is; an agent's own space now counts
     return a, before
+
+
+def moved_folder(rec, cwd):
+    """A session that comes back in another folder (a new process resuming its conversation there, not a shell cd,
+    which the plugin never reports) is a new agent there: the agent it was keeps its settings, its queued messages and
+    the claim to its name, under a key no session has, for its next session to take up. Called with the lock held."""
+    sid = rec["id"]
+    aid = rec.get("agent") or agent_of.get(sid)
+    was = rec.get("cwd") or (agents.get(aid) or {}).get("cwd")
+    if not cwd or not was or was == cwd:
+        return False
+    left = f"{sid}@{aid or 'gone'}"
+    if sid in config["sessions"]:
+        config["sessions"][left] = config["sessions"].pop(sid)
+        save_config()
+    if sid in inboxes:
+        inboxes[left] = inboxes.pop(sid)
+        for m in inboxes[left]:
+            m["to"] = left
+    if aid in agents:
+        agents[aid]["sid"] = left
+        agent_of[left] = aid
+    agent_of.pop(sid, None)
+    for k in ("name", "agent", "summary", "headline", "summary_ts", "_space"):
+        rec.pop(k, None)
+    log("agent", sid, "moved from", was, "to", cwd, "and is a new agent there")
+    return True
 
 
 def agent_seen(rec):
@@ -5376,6 +5421,7 @@ def tidy():
         shown = {m["id"] for m in messages}
         for mid in [m for m in reactions if m not in shown]:
             reactions.pop(mid)
+            reaction_posts.pop(mid, None)
     # The daemon's own output: started in the background, its stdout is daemon.log, which moves aside for a new one.
     try:
         if too_big(LOG_PATH) and os.fstat(1).st_ino == os.stat(LOG_PATH).st_ino:
@@ -5545,7 +5591,7 @@ class Handler(BaseHTTPRequestHandler):
         if rest == ["test"] and method == "POST":
             channel = str(self.body().get("channel_id") or "")
             try:
-                chat_post(channel, "👋 peerlink is connected. Messages here go to this channel's first receiving agent; start with an agent's name and a colon to reach another one that receives here.")
+                chat_post(channel, "👋 peerlink is connected. Messages here go to every agent that receives in this channel; start with an agent's name and a colon, or reply to its post, to reach that one alone.")
             except ChatError as err:
                 return self.reply(502, {"error": str(err)})
             return self.reply(200, {"ok": True})
@@ -5870,6 +5916,8 @@ class Handler(BaseHTTPRequestHandler):
             with lock:
                 fresh = sid not in sessions and not b.get("succeeds")
                 rec = sessions.get(sid, {"id": sid, "started": time.time()})
+                if not b.get("succeeds"):
+                    moved_folder(rec, b.get("cwd") or "")
                 # One a spawn started, in a folder that may already have its agent: it takes the name and role it
                 # was asked for, never the folder's, which belong to the agent already there.
                 spawn = spawn_of({"cwd": b.get("cwd") or "", "pid": b.get("pid")}, fresh) if sid not in sessions else None
