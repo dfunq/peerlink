@@ -151,7 +151,11 @@ class ScenarioTest(unittest.TestCase):
         self.assertFalse(rig.call("GET", "/api/agentchannel/delegation")[1]["switch"])
         self.assertTrue(rig.user("PUT", "/api/agentchannel/delegation", {"switch": True})["switch"])
         self.assertEqual(rig.call("GET", "/api/agentchannel/delegation/acme-bot")[0], 404)
+        # An agent must say which message it came on and who it is; only your browser looks one up bare.
         code, out = rig.call("GET", "/api/approvals/da1")
+        self.assertEqual(code, 400)
+        self.assertIn("needs the message", out["error"])
+        code, out = rig.call("GET", "/api/approvals/da1?message=m1&by=x")
         self.assertEqual(code, 404)
         self.assertIn("isn't approved", out["error"])
         self.assertEqual(rig.call("POST", "/api/approvals/da1/revoke", {})[0], 404)

@@ -32,6 +32,10 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     if (path.endsWith('/threads')) return ok(state.threads)
     if (path === '/api/web/link') return ok({ url: 'http://127.0.0.1:7899/login?t=x', expires_in_s: 60 })
     if (path === '/api/issues') return ok({ id: 'i1', logged: '/Users/x/.peerlink/issues.jsonl', sent_to: 'peerlink' })
+    if (path === '/api/approvals/da7')
+      return new URL(e.url).search === '?message=m12&by=me-session'
+        ? ok({ id: 'da7', valid: true, client: 'grok', scope: 'dev.change', env: 'dev', action: 'revert the copy', ticket: '', valid_until: '2026-11-18T20:30:00Z' })
+        : ok({ id: 'da7', valid: false, reason: 'da7 was stamped on m12, not on m13: a copy of its id in any other message counts for nothing' })
     if (path === '/api/rules') return body ? ok({ rule: { id: 'r4', space: 'acme', status: 'pending' } }) : ok({ rules: [{ id: 'r1', space: 'acme', status: 'active', text: 'Never merge on a Friday.' }] })
     if (path.endsWith('/note')) return ok({ task: 't3', direction: body.blocked ? 'up' : 'down', told: body.blocked ? ['acme'] : ['api', 'worker'] })
     if (path.startsWith('/api/tasks/') && !body)
@@ -303,6 +307,17 @@ test('rule proposes a standing rule for approval and lists what stands', async (
   expect(added).toContain("Rule r4 for acme waits for your user's approval")
   expect(daemon.posted.find(p => p.path === '/api/rules' && p.body)!.body).toEqual({ by: 'me-session', text: 'Never merge on a Friday.' })
   expect(JSON.stringify(await $.tool.call({ tool: 'mcp__peerlink__rule', action: 'list' } as any))).toContain('- r1 [acme]: Never merge on a Friday.')
+})
+
+test('check_approval asks about the message it came on, as this session, and a copy in another message does not count', async ($, on) => {
+  engine(on)
+  const daemon = fakeDaemon(on)
+  await $.session.start(START)
+  const check = async (input: any) => JSON.stringify(await $.tool.call({ tool: 'mcp__peerlink__check_approval', ...input } as any))
+  expect(await check({ id: 'da7' })).toContain('say which message it came on')
+  expect(daemon.posted.some(p => p.path.startsWith('/api/approvals/'))).toBe(false)
+  expect(await check({ id: 'da7', message: 'm12' })).toContain('da7 counts now: grok approved dev.change on dev')
+  expect(await check({ id: 'da7', message: 'm13' })).toContain('da7 does NOT count: da7 was stamped on m12, not on m13')
 })
 
 test('a question to the user can carry a default and the task it is about', async ($, on) => {
