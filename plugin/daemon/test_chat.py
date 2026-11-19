@@ -160,6 +160,31 @@ class ChatTest(unittest.TestCase):
         # (take off, put on) for each: 👀 stays while b still has it, and comes off when b moves on too.
         self.assertEqual([j[2:] for j in jobs], [(None, "👀"), (None, None), (None, "🤔"), ("👀", None), (None, "👀")])
 
+    def test_a_session_with_no_agent_record_that_moves_folder_leaves_nothing_nobody_can_take(self):
+        peerlinkd.load_config()
+        rec = {"id": "s-lost", "name": "loop", "cwd": "/x/loop", "last_seen": peerlinkd.time.time()}
+        peerlinkd.config["sessions"]["s-lost"] = {"role": "Owns the loop service."}
+        peerlinkd.inboxes["s-lost"] = [{"id": "m-lost", "text": "hi", "to": "s-lost", "to_cwd": "/x/loop"}]
+        self.addCleanup(lambda: [peerlinkd.inboxes.pop(k, None) for k in ("s-lost", "s-lost@gone", "s-next")])
+        self.assertTrue(peerlinkd.moved_folder(rec, "/x/pixel"))
+        self.assertFalse([k for k in peerlinkd.config["sessions"] if k.startswith("s-lost")])
+        # The message waits for the next agent in the folder it was sent to.
+        nxt = {"id": "s-next", "name": "loop", "cwd": "/x/loop", "last_seen": peerlinkd.time.time()}
+        peerlinkd.adopt(nxt)
+        self.assertIn("m-lost", [m["id"] for m in peerlinkd.inboxes["s-next"]])
+        self.assertNotIn("s-lost@gone", peerlinkd.inboxes)
+
+    def test_same_folder_sees_through_symlinks_slashes_and_unicode_forms(self):
+        import unicodedata
+        tmp = tempfile.mkdtemp()
+        real = os.path.join(tmp, unicodedata.normalize("NFC", "Shared drive caf\u00e9"))
+        os.makedirs(real)
+        os.symlink(real, os.path.join(tmp, "link"))
+        self.assertTrue(peerlinkd.same_folder(real, os.path.join(tmp, "link")))
+        self.assertTrue(peerlinkd.same_folder(real, real + "/"))
+        self.assertTrue(peerlinkd.same_folder(real, unicodedata.normalize("NFD", real)))
+        self.assertFalse(peerlinkd.same_folder(real, tmp))
+
     def test_a_conversation_is_both_ends_of_every_message_in_the_log(self):
         log = peerlinkd.MESSAGES_PATH
         self.addCleanup(lambda: [os.remove(f) for f in (log, log + ".1") if os.path.exists(f)])
