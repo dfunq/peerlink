@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.9.47', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.9.48', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (state.forget && path.endsWith('/heartbeat') && 'busy' in body) {
       state.forget = false
       return { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'unknown agent; register again' }) } }
@@ -32,6 +32,10 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     if (path.endsWith('/threads')) return ok(state.threads)
     if (path === '/api/web/link') return ok({ url: 'http://127.0.0.1:7899/login?t=x', expires_in_s: 60 })
     if (path === '/api/issues') return ok({ id: 'i1', logged: '/Users/x/.peerlink/issues.jsonl', sent_to: 'peerlink' })
+    if (path === '/api/approvals/da7')
+      return new URL(e.url).search === '?message=m12&by=me-session'
+        ? ok({ id: 'da7', valid: true, client: 'grok', scope: 'dev.change', env: 'dev', action: 'revert the copy', ticket: '', valid_until: '2026-11-18T20:30:00Z' })
+        : ok({ id: 'da7', valid: false, reason: 'da7 was stamped on m12, not on m13: a copy of its id in any other message counts for nothing' })
     if (path === '/api/rules') return body ? ok({ rule: { id: 'r4', space: 'acme', status: 'pending' } }) : ok({ rules: [{ id: 'r1', space: 'acme', status: 'active', text: 'Never merge on a Friday.' }] })
     if (path.endsWith('/note')) return ok({ task: 't3', direction: body.blocked ? 'up' : 'down', told: body.blocked ? ['acme'] : ['api', 'worker'] })
     if (path.startsWith('/api/tasks/') && !body)
@@ -303,6 +307,17 @@ test('rule proposes a standing rule for approval and lists what stands', async (
   expect(added).toContain("Rule r4 for acme waits for your user's approval")
   expect(daemon.posted.find(p => p.path === '/api/rules' && p.body)!.body).toEqual({ by: 'me-session', text: 'Never merge on a Friday.' })
   expect(JSON.stringify(await $.tool.call({ tool: 'mcp__peerlink__rule', action: 'list' } as any))).toContain('- r1 [acme]: Never merge on a Friday.')
+})
+
+test('check_approval asks about the message it came on, as this session, and a copy in another message does not count', async ($, on) => {
+  engine(on)
+  const daemon = fakeDaemon(on)
+  await $.session.start(START)
+  const check = async (input: any) => JSON.stringify(await $.tool.call({ tool: 'mcp__peerlink__check_approval', ...input } as any))
+  expect(await check({ id: 'da7' })).toContain('say which message it came on')
+  expect(daemon.posted.some(p => p.path.startsWith('/api/approvals/'))).toBe(false)
+  expect(await check({ id: 'da7', message: 'm12' })).toContain('da7 counts now: grok approved dev.change on dev')
+  expect(await check({ id: 'da7', message: 'm13' })).toContain('da7 does NOT count: da7 was stamped on m12, not on m13')
 })
 
 test('a question to the user can carry a default and the task it is about', async ($, on) => {
@@ -1073,7 +1088,7 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.9.47 · daemon 0.9.47 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.9.48 · daemon 0.9.48 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the space is listed once', async ($, on) => {
@@ -1106,7 +1121,7 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.9.47')
+  expect(reg.plugin).toBe('0.9.48')
 })
 
 test('an agent registers again under the folder it started in, wherever the host has moved its root since', async ($, on) => {
@@ -1208,7 +1223,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.9.48', true], ['0.9.47', false]] as const)
+for (const [installed, reloads] of [['0.9.49', true], ['0.9.48', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     const daemon = fakeDaemon(on)
