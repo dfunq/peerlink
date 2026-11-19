@@ -113,6 +113,53 @@ class ChatTest(unittest.TestCase):
         self.assertEqual(msg["to"], "agent:telegram")
         peerlinkd.inboxes.pop("agent:telegram", None)
 
+    def test_every_agent_ticked_to_receive_gets_a_message_that_names_none_and_a_named_one_goes_to_that_one(self):
+        peerlinkd.load_config()
+        kept, next_id = list(peerlinkd.messages), peerlinkd.next_msg[0]
+        self.addCleanup(lambda: (peerlinkd.messages.__setitem__(slice(None), kept), peerlinkd.next_msg.__setitem__(0, next_id),
+                                 peerlinkd.reaction_jobs.clear(), peerlinkd.tasks.clear()))
+        now = peerlinkd.time.time()
+        for sid, name, cwd in (("s-chief", "hq", "/x/hq"), ("s-notes", "notes", "/x/notes"), ("s-quiet", "quiet", "/x/quiet")):
+            peerlinkd.sessions[sid] = {"id": sid, "name": name, "cwd": cwd, "last_seen": now}
+        self.addCleanup(lambda: [peerlinkd.sessions.pop(k, None) or peerlinkd.inboxes.pop(k, None) for k in ("s-chief", "s-notes", "s-quiet")])
+        peerlinkd.discord["routes"] = [peerlinkd.clean_route({"channel_id": "77", "agents": [
+            {"cwd": "/x/hq", "receives": True, "sends": True},
+            {"cwd": "/x/notes", "name": "notes", "receives": True, "sends": False},
+            {"cwd": "/x/quiet", "receives": False, "sends": True}]})]
+        self.addCleanup(lambda: peerlinkd.discord.update({"routes": []}))
+        peerlinkd.discord_bot[0] = type("Bot", (), {"reads_messages": True, "channel_name": lambda self, c: "delegator"})()
+        n = [0]
+
+        def say(text):
+            n[0] += 1
+            peerlinkd.on_discord({"channel_id": "77", "message_id": f"p{n[0]}", "author": "you", "text": text, "dm": False,
+                                  "mentioned": False, "ref": "", "files": [], "bot": False})
+
+        def got(sid):
+            return [m["text"] for m in peerlinkd.inboxes.get(sid, [])]
+
+        say("test")
+        self.assertEqual((got("s-chief"), got("s-notes"), got("s-quiet")), (["test"], ["test"], []))
+        copies = [m for m in peerlinkd.messages if m.get("discord", {}).get("message_id") == "p1"]
+        self.assertEqual(len({m["id"] for m in copies}), 2)  # each its own message, to answer on its own
+        say("@notes only you")
+        say("Task: rotate the key")
+        self.assertEqual(got("s-notes"), ["test", "only you"])
+        self.assertEqual(got("s-chief"), ["test", "Task: rotate the key"])  # a task has one owner: the first receiver
+
+    def test_a_reaction_on_a_post_several_messages_share_comes_off_only_when_none_has_it(self):
+        jobs = peerlinkd.reaction_jobs
+        jobs.clear()
+        self.addCleanup(lambda: (jobs.clear(), [peerlinkd.reactions.pop(i, None) or peerlinkd.reaction_posts.pop(i, None) for i in ("ra", "rb")]))
+        a, b = ({"id": i, "discord": {"channel_id": "77", "message_id": "p9"}} for i in ("ra", "rb"))
+        peerlinkd.set_reaction(a, "👀")
+        peerlinkd.set_reaction(b, "👀")
+        peerlinkd.set_reaction(a, "🤔")
+        peerlinkd.set_reaction(b, "🤔")
+        peerlinkd.set_reaction(a, "👀")
+        # (take off, put on) for each: 👀 stays while b still has it, and comes off when b moves on too.
+        self.assertEqual([j[2:] for j in jobs], [(None, "👀"), (None, None), (None, "🤔"), ("👀", None), (None, "👀")])
+
     def test_a_conversation_is_both_ends_of_every_message_in_the_log(self):
         log = peerlinkd.MESSAGES_PATH
         self.addCleanup(lambda: [os.remove(f) for f in (log, log + ".1") if os.path.exists(f)])

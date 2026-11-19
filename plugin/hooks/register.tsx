@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.9.48'
+const DAEMON_VERSION = '0.9.49'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -377,12 +377,23 @@ const FOLDERS_KEPT = 50
 
 // The folder this agent is, for its whole session. $.session.root() follows the host when it moves the session's
 // directory (it can follow a shell cd), and an agent that re-registers from ~/Repos must not become "Repos".
+// The pin holds only within the Claude Code process that set it: a new process resuming the same session id from
+// another folder (claude --resume there) is that folder's agent. A pin from before 0.9.49 has no process: it's kept and
+// this process stamped on it. Where there's no process id (Windows), a pin is kept as it was.
 // `succeeds`: the session this one continues after a /clear or resume, whose folder it keeps.
+type Pin = { cwd: string; pid?: number }
 async function agentFolder($: EngineInterface, succeeds?: string) {
-  const folders = ((await $.store.get('folders').catch(() => undefined)) ?? {}) as Record<string, string>
-  if (folders[sessionId]) return folders[sessionId]
-  const cwd = (succeeds && folders[succeeds]) || (await $.session.root())
-  folders[sessionId] = cwd
+  const folders = ((await $.store.get('folders').catch(() => undefined)) ?? {}) as Record<string, string | Pin>
+  const me = await processId($)
+  const pinned = (id?: string) => {
+    const p = id ? folders[id] : undefined
+    const pin = typeof p === 'string' ? { cwd: p } : p
+    return pin?.cwd && (!me || !pin.pid || pin.pid === me) ? pin.cwd : ''
+  }
+  const had = folders[sessionId]
+  const cwd = pinned(sessionId) || pinned(succeeds) || (await $.session.root())
+  if (had && typeof had !== 'string' && had.cwd === cwd && had.pid === me) return cwd
+  folders[sessionId] = me ? { cwd, pid: me } : { cwd }
   await $.store.set('folders', Object.fromEntries(Object.entries(folders).slice(-FOLDERS_KEPT))).catch(() => undefined)
   return cwd
 }

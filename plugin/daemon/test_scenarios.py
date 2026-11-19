@@ -444,6 +444,34 @@ class ScenarioTest(unittest.TestCase):
         self.assertNotIn("Not yet.", app.texts())
         self.assertEqual(lead.peers()["helper"]["agent"], agent)
 
+    def test_a_session_resumed_in_another_folder_is_a_new_agent_there_and_leaves_the_old_one_whole(self):
+        rig = self.rig()
+        lead = rig.agent("lead", space="acme")
+        loop, pixel = rig.agent("loop", space="acme"), rig.agent("pixel", space="acme")
+        rig.user("POST", f"/api/sessions/{loop.sid}/config", {"role": "Owns the loop service."})
+        agent = lead.peers()["loop"]["agent"]
+
+        # A message for loop that it never reads; Claude Code quits; then `claude --resume <loop's id>` runs in pixel's folder.
+        lead.send(to="loop", text="Ship the retry fix")
+        loop.quit()
+        moved = Agent(rig, "pixel", pixel.cwd)
+        moved.sid = loop.sid
+        moved.register()
+        self.assertEqual(moved.name, "pixel-2")
+        self.assertFalse(moved.config.get("role"))
+        self.assertNotIn("Ship the retry fix", moved.texts())
+        seen = lead.peers()
+        self.assertEqual(seen["pixel-2"]["cwd"], pixel.cwd)
+        self.assertNotEqual(seen["pixel-2"]["agent"], agent)
+        self.assertNotIn("loop", seen)
+
+        # loop starts again in its own folder: the same agent, with its role and the message that waited.
+        loop.restart()
+        self.assertEqual(loop.name, "loop")
+        self.assertEqual(loop.config.get("role"), "Owns the loop service.")
+        loop.expect("Ship the retry fix")
+        self.assertEqual(lead.peers()["loop"]["agent"], agent)
+
     def test_chatter_stops_at_the_reply_limit_and_work_on_a_task_carries_on(self):
         rig = self.rig(config={"max_hops": 4})
         a, b = rig.agent("a", space="acme"), rig.agent("b", space="acme")
