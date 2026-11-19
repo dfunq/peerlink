@@ -370,9 +370,10 @@ class AgentsChannelTest(unittest.TestCase):
         old = agentslink.WAITERS_TOTAL
         agentslink.WAITERS_TOTAL = 3
         try:
-            now = {"since": time.time(), "wait_s": 2}
+            now = {"since": time.time(), "wait_s": 4}  # under the 5 s the test client waits for an answer
             waiters = [self.background(GROK, now) for _ in range(2)] + [self.background(OTHER, now)]
-            time.sleep(0.4)
+            with self.bot.arrived:  # each read says when it waits; a slow runner takes its time getting there (T-626)
+                self.bot.arrived.wait_for(lambda: self.bot.waiting == {"grok": 2, "other": 1}, timeout=30)
             self.assertEqual(self.bot.waiting, {"grok": 2, "other": 1})
             # A third for grok is over its cap, and one more for other is over the cap for everyone: both refused at once.
             for tok in (GROK, OTHER):
@@ -384,7 +385,7 @@ class AgentsChannelTest(unittest.TestCase):
             self.assertIsNone(self.call(GROK, "read_replies", {"since": now["since"]})[1])
             self.assertIsNone(self.call(OTHER, "post_message", {"text": "hi"})[1])
             for t, _ in waiters:
-                t.join(4)
+                t.join(10)
             self.assertEqual(self.bot.waiting, {})
             # Ten at once from one client: two wait, the rest are turned away, and every one gets an answer.
             many = [self.background(GROK, {"since": time.time(), "wait_s": 1}) for _ in range(10)]
@@ -397,11 +398,11 @@ class AgentsChannelTest(unittest.TestCase):
             agentslink.WAITERS_TOTAL = old
 
     def test_switching_the_channel_off_ends_waiting_reads(self):
-        t, box = self.background(GROK, {"since": time.time(), "wait_s": 4})
-        end = time.monotonic() + 3
-        while not self.bot.waiting and time.monotonic() < end:  # closed before the read waits, it never tests the wake
-            time.sleep(0.01)
-        self.assertTrue(self.bot.waiting)
+        # A wait far longer than the test, so only the close can end it; and closed only once the read says it waits,
+        # or it never tests the wake. A slow runner can take seconds to get there (T-626).
+        t, box = self.background(GROK, {"since": time.time(), "wait_s": 60})
+        with self.bot.arrived:
+            self.assertTrue(self.bot.arrived.wait_for(lambda: self.bot.waiting, timeout=30), "the read never started waiting")
         self.bot.close()
         t.join(3)
         self.assertFalse(t.is_alive())
