@@ -60,6 +60,10 @@ FAILED_AUTH_PER_IP_PER_MIN = 10  # each caller's IP (CF-Connecting-IP behind Clo
 REGISTER_PER_IP_PER_HOUR = 3
 REGISTER_PER_HOUR = 10
 CODE_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  # no 0/O, 1/I/L: read aloud over a call
+# What a client may approve for you, once you grant it on its mapping (peerlinkd checks and stamps it). Nothing else is
+# ever delegable: prod, money, secrets, deletions and peerlink's own settings stay yours alone.
+DELEGABLE = ("dev.start", "dev.change", "dev.deploy", "jira")
+APPROVAL_FIELDS = {"scope": 40, "action": 200, "env": 40, "ticket": 40, "quote": 500}
 
 
 def pairing_code():
@@ -78,6 +82,19 @@ TOOLS = [
             "properties": {
                 "text": {"type": "string", "description": "The message: what you need and why"},
                 "reply_to": {"type": "string", "description": "Optional: the id of a reply from read_replies that you are answering"},
+                "approval": {
+                    "type": "object",
+                    "description": "Optional, only when the person you work for has given you an approval to pass on and this "
+                    "peerlink lets you: what they approved. peerlink checks it; without its check it counts for nothing.",
+                    "properties": {
+                        "scope": {"type": "string", "enum": list(DELEGABLE), "description": "What kind of work it approves"},
+                        "action": {"type": "string", "description": "The one thing approved, e.g. 'revert the pricing copy'"},
+                        "env": {"type": "string", "description": "Where: dev or staging"},
+                        "ticket": {"type": "string", "description": "Optional: the ticket it's for"},
+                        "quote": {"type": "string", "description": "Optional: their words"},
+                    },
+                    "required": ["scope", "action", "env"],
+                },
             },
             "required": ["text"],
         },
@@ -186,6 +203,20 @@ def clean_clients(raw):
             rate = POSTS_PER_MIN
         out[name] = {"token_sha256": h, "enabled": c.get("enabled", True) is not False, "rate_per_min": rate,
                      "added": str(c.get("added") or "")}
+        if c.get("registered"):
+            out[name]["registered"] = True  # it asked to be let in (POST /register): never delegated an approval
+    return out
+
+
+def clean_approval(raw):
+    """A client's approval claim as {scope, action, env, ticket, quote}, strings cut to size; Refused when it isn't one.
+    It's only a claim: peerlinkd decides whether it counts."""
+    if not isinstance(raw, dict):
+        raise Refused("approval is an object: {scope, action, env}, with ticket and quote optional")
+    out = {k: " ".join(str(raw.get(k) or "").split())[:n] for k, n in APPROVAL_FIELDS.items()}
+    if not (out["scope"] and out["action"] and out["env"]):
+        raise Refused("approval needs scope, action and env")
+    out["scope"], out["env"] = out["scope"].lower(), out["env"].lower()
     return out
 
 
@@ -474,14 +505,23 @@ class Bot:
             raise Refused(f"text is {len(text)} characters, over the {MAX_TEXT} limit: shorten it")
         if ref and ref not in {r["id"] for r in self.replies(client)}:
             raise Refused(f"{ref} isn't one of your replies (read_replies lists them)")
+        claim = clean_approval(args["approval"]) if args.get("approval") not in (None, "", {}) else None
         mid = "p" + secrets.token_hex(6)
         with self.mu:
             self.append(self.posts_path(client), f"{mid} {time.time()}", KEEP_POSTS, self.post_line)
         # bot: True keeps it from working your Inbox; the label first means no "name:" or "Task:" prefix can steer it.
-        self.on_message({"channel_id": f"agents:{client}", "message_id": mid, "author": client, "author_id": client,
-                         "text": LABEL.format(name=client) + text, "dm": False, "mentioned": True, "ref": ref,
-                         "files": [], "bot": True})
-        return {"id": mid, "sent": True, "note": "Answers arrive through read_replies."}
+        # author_id is the client the token named, never anything the call says: the daemon checks an approval against it.
+        d = {"channel_id": f"agents:{client}", "message_id": mid, "author": client, "author_id": client,
+             "text": LABEL.format(name=client) + text, "dm": False, "mentioned": True, "ref": ref,
+             "files": [], "bot": True}
+        if claim:
+            d["approval"] = claim
+        self.on_message(d)
+        out = {"id": mid, "sent": True, "note": "Answers arrive through read_replies."}
+        if claim:
+            # What the daemon made of it: an approval id, or why it went as an ordinary, unapproved message.
+            out["approval"] = d.get("approval_out") or {"verified": False, "reason": "peerlink didn't check it"}
+        return out
 
     def post_to_client(self, client, args):
         """Straight to a client it's linked with, into that client's read_replies; no agent here sees it. The id is the
