@@ -118,13 +118,14 @@ class EndpointTest(unittest.TestCase):
         self.addCleanup(self.d.stop)
         self.addCleanup(self.c.close)
 
-    def test_registers_under_the_launch_name_and_lists_exactly_three_tools(self):
+    def test_registers_under_the_launch_name_and_lists_exactly_four_tools(self):
         init = self.c.rpc("initialize", {"protocolVersion": "2025-03-26"})["result"]  # registration precedes serving
         reg = next(b for p, b in self.d.posted if p == "/api/sessions")
         self.assertEqual((reg["name"], reg["had_name"], reg["id"]), ("voice", "voice", "mcp-voice"))
         self.assertEqual(init["serverInfo"]["name"], "peerlink")
         tools = self.c.rpc("tools/list")["result"]["tools"]
-        self.assertEqual(sorted(t["name"] for t in tools), ["inbox", "list_peers", "send_message"])
+        # check_approval only reads: whether an approval stamped on a message it got still counts.
+        self.assertEqual(sorted(t["name"] for t in tools), ["check_approval", "inbox", "list_peers", "send_message"])
         self.assertNotIn("kind", next(t for t in tools if t["name"] == "send_message")["inputSchema"]["properties"])
 
     def test_list_peers_trims_fields(self):

@@ -97,6 +97,8 @@ details.plat .pbody h2{font-size:14px;margin:16px 0 6px}.pill.warn{color:var(--w
 .mrow{border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:var(--well)}
 .mhead{display:flex;align-items:center;gap:8px;min-width:0}.mhead .mname{font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.mhead select{flex:1;min-width:0}
 .magents{display:flex;flex-direction:column;align-items:flex-start;gap:6px;margin-top:8px}
+.mdeleg{margin-top:10px;padding-top:8px;border-top:1px dashed var(--line)}.mdeleg .scopes{display:flex;flex-wrap:wrap;gap:4px 14px;margin-left:24px}.mdeleg .scopes label.check{margin:2px 0}
+.dgswitch{border:1px solid var(--line);border-radius:10px;padding:8px 12px;margin:8px 0 12px;background:var(--well)}
 .magent{display:inline-flex;align-items:center;gap:4px;border:1px solid var(--line);border-radius:999px;padding:2px 4px 2px 10px;background:var(--card);font-size:13px}
 .magent .mn{width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tog{font-size:11px;padding:1px 8px;border-radius:999px;border:1px solid var(--line);background:transparent;color:var(--mut);cursor:pointer}
@@ -1076,8 +1078,10 @@ function renderDiscord(){if(!dState)return;const d=dState,invited=(dGuilds||[]).
         <button class="tog" aria-pressed="${!!a.receives}" data-dflag="${i}:${j}:receives" title="Your messages here go to it">Receives</button>
         <button class="tog" aria-pressed="${!!a.sends}" data-dflag="${i}:${j}:sends" title="It can post here">Sends</button>
         <button class="x" title="Take it off this channel" aria-label="Remove ${esc(entryLabel(a))}" data-dunagent="${i}:${j}">✕</button></span>`).join('')}
-      ${r.channel_id?entrySelect(`data-daddagent="${i}"`,(r.agents||[]).length?'+ agent':'+ Add an agent'):''}</div></div>`).join('');
+      ${r.channel_id?entrySelect(`data-daddagent="${i}"`,(r.agents||[]).length?'+ agent':'+ Add an agent'):''}</div>${delegRow(r.channel_id)}</div>`).join('');
+  const dg=aState&&aState.delegation,hasAg=dDraft.routes.some(r=>String(r.channel_id).startsWith('agents:'));
   $('#dstep3b').innerHTML=`<p class="meta">Your messages go to the first agent that <b>receives</b>; to reach another, start with its name and a colon: <span class="mono">storefront: how's the build?</span> An agent that <b>sends</b> posts its messages and updates there. Changes save as you make them.</p>
+    ${dg&&hasAg?`<div class="dgswitch"><label class="check"><input type="checkbox" data-dgswitch ${dg.switch?'checked':''}> <span><b>Outside agents may pass on your approvals.</b> Only the clients and kinds of work you tick on their mapping below, on ${dg.envs.join(' or ')} only, at most ${dg.per_hour} an hour and ${dg.per_day} a day, ${String(dg.hours[0]).padStart(2,'0')}:00–${dg.hours[1]}:00. Each one is posted to you with <b>Undo + revoke</b>. Off, none counts. Prod, money, secrets and deletions always need you.</span></label></div>`:''}
     <div class="mlist2">${rows||'<div class="mut small">No channels mapped yet.</div>'}</div>
     <div class="addline" style="margin-top:10px"><button class="ghost" data-dact="addroute">+ Map a channel</button><button class="ghost" data-dact="refresh" title="Look for new servers and channels">↻ Refresh channels</button><span class="small" id="dsaved"></span></div>
     ${d.configured?`<div class="addline" style="margin-top:12px"><label class="small mut">Direct messages to the Discord bot go to</label>${agentSelect(dDraft.dm,'data-ddm','Nobody (ignored)')}</div>`:''}
@@ -1099,6 +1103,25 @@ document.addEventListener('submit',async e=>{if(e.target.id!=='dtoken')return;e.
   if(r.error){renderDiscord();$('#dtokerr').textContent=r.error;return}dGuilds=null;dDraft=null;await loadDiscord()});
 // The mapping saves as you change it: the channels that have an agent, and where DMs go. One still being set up
 // (no channel or no agent yet) stays on the page until it's complete.
+// Delegated approvals: on an Agents client's mapping, whether it may pass on your OK and for which kinds of work.
+// Saved at once, from your browser only; the daemon checks every approval against its token and this mapping.
+const dgPick={};
+function delegRow(cid){const dg=aState&&aState.delegation;if(!dg||!String(cid).startsWith('agents:'))return'';
+  const n=String(cid).slice(7),c=(dg.clients||{})[n];if(!c)return'';
+  if(c.never)return `<div class="mdeleg small mut">Can't approve for you: ${esc(c.never)}.</div>`;
+  const pick=c.on?c.scopes:(dgPick[n]||[]),days=c.on?Math.max(0,Math.ceil((c.expires*1000-Date.now())/86400000)):0;
+  return `<div class="mdeleg"><label class="check"><input type="checkbox" data-dgon="${esc(n)}" ${c.on?'checked':''}> <span><b>Can approve for you</b>, from its own token only${c.on?` · ${days} day${days===1?'':'s'} left (ticking a kind renews it for ${dg.grant_days})`:''}${dg.switch?'':' · <span class="mut">the switch above is off</span>'}${c.linked.length?` <span class="pill warn">linked with ${esc(c.linked.join(', '))}</span>`:''}${c.problem?` <span class="pill warn">${esc(c.problem)}</span>`:''}${c.recent?` <span class="mut">${c.recent} in the last day</span>`:''}</span></label>
+    <div class="scopes">${dg.scopes.map(sc=>`<label class="check small"><input type="checkbox" data-dgscope="${esc(n)}" value="${esc(sc)}" ${pick.includes(sc)?'checked':''}> <span class="mono">${esc(sc)}</span></label>`).join('')}</div></div>`}
+async function dgPut(path,body){const r=await api('/api/agentchannel/delegation'+path,{method:'PUT',headers:J,body:JSON.stringify(body)});
+  if(r.error)tell(r.error);await loadAgents();renderDiscord()}
+document.addEventListener('change',e=>{const t=e.target;
+  if(t.dataset.dgswitch!==undefined)dgPut('',{switch:t.checked});
+  const scopesOf=n=>[...document.querySelectorAll(`[data-dgscope="${CSS.escape(n)}"]`)].filter(x=>x.checked).map(x=>x.value);
+  if(t.dataset.dgon){const n=t.dataset.dgon,sc=scopesOf(n);
+    if(t.checked&&!sc.length){t.checked=false;tell('Tick the kinds of work it may approve first.');return}
+    dgPut('/'+encodeURIComponent(n),{on:t.checked,scopes:sc})}
+  if(t.dataset.dgscope){const n=t.dataset.dgscope,c=((aState.delegation||{}).clients||{})[n]||{},sc=scopesOf(n);dgPick[n]=sc;
+    if(c.on)dgPut('/'+encodeURIComponent(n),{on:sc.length>0,scopes:sc})}});
 async function saveMap(){const routes=dDraft.routes.filter(r=>r.channel_id&&(r.agents||[]).length);
   const r=await api('/api/discord',{method:'PUT',headers:J,body:JSON.stringify({routes,dm:dDraft.dm})});
   if(!r.error&&dState){dState.routes=JSON.parse(JSON.stringify(routes));dState.dm=dDraft.dm}

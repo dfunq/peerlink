@@ -140,6 +140,22 @@ class ScenarioTest(unittest.TestCase):
         self.assertEqual(code, 409)
         self.assertIn("can't reach", out["error"])
 
+    def test_only_your_browser_says_who_may_approve_for_you(self):
+        """Delegated approvals are the owner's: an agent holding the key can't switch them on or grant a client, though it
+        may read them, check an approval, or take one back."""
+        rig = self.rig()
+        for path, body in (("/api/agentchannel/delegation", {"switch": True}),
+                           ("/api/agentchannel/delegation/acme-bot", {"on": True, "scopes": ["jira"]})):
+            code, out = rig.call("PUT", path, body)
+            self.assertEqual((code, out["error"]), (403, "delegated approvals are set from the web UI"))
+        self.assertFalse(rig.call("GET", "/api/agentchannel/delegation")[1]["switch"])
+        self.assertTrue(rig.user("PUT", "/api/agentchannel/delegation", {"switch": True})["switch"])
+        self.assertEqual(rig.call("GET", "/api/agentchannel/delegation/acme-bot")[0], 404)
+        code, out = rig.call("GET", "/api/approvals/da1")
+        self.assertEqual(code, 404)
+        self.assertIn("isn't approved", out["error"])
+        self.assertEqual(rig.call("POST", "/api/approvals/da1/revoke", {})[0], 404)
+
     def test_work_goes_down_a_tree_of_tasks_and_word_comes_back_without_a_relay(self):
         rig = self.rig()
         chief, core, loop = self.team(rig)
