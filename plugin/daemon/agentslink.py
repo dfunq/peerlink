@@ -569,6 +569,9 @@ class Bot:
             if self.waiting.get(client, 0) >= WAITERS_PER_CLIENT or sum(self.waiting.values()) >= WAITERS_TOTAL:
                 raise Refused("too many reads are already waiting: call again without wait_s, or wait for those to return")
             self.waiting[client] = self.waiting.get(client, 0) + 1
+            # Says a read now waits, to whoever watches `waiting` (a test, before it closes the channel). Other
+            # waiting reads wake, find nothing new kept, and wait again.
+            self.arrived.notify_all()
         try:
             if "since" not in args or args.get("since") in (None, ""):
                 args = {**args, "since": out["next_since"] or time.time()}
