@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.9.48', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.9.49', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (state.forget && path.endsWith('/heartbeat') && 'busy' in body) {
       state.forget = false
       return { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'unknown agent; register again' }) } }
@@ -97,11 +97,14 @@ function engine(on: any, { turns = 0, percent = 85, readme = '', claudeMd = '', 
     return { value: undefined }
   })
   const ran: string[][] = []
+  // This Claude Code process's id, as `sh -c 'echo $PPID'` gives it; 0 for none.
+  const proc = { pid: 0 }
   on('process.run', (_: any, e: any) => {
     ran.push(e.argv)
     const [cmd, ...args] = e.argv
     let stdout = ''
     let exitCode = 0
+    if (cmd === 'sh' && proc.pid) stdout = `${proc.pid}\n`
     if (cmd === 'git') {
       if (!git.dirs) exitCode = 128
       else if (args.includes('--git-dir')) stdout = git.dirs.join('\n') + '\n'
@@ -149,7 +152,7 @@ function engine(on: any, { turns = 0, percent = 85, readme = '', claudeMd = '', 
       calls.model++
       return { value: { isAnswered: true, text, usage: {} } }
     })
-  return { clock, calls, answer, writes, ids, pinned, git, where, woke, submits, limits, tools, ran, usage }
+  return { clock, calls, answer, writes, ids, pinned, git, where, woke, submits, limits, tools, ran, usage, proc, store }
 }
 
 test('the model is told about peers beside the prompt, again only when who is there changes', async ($, on) => {
@@ -1088,7 +1091,7 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.9.48 · daemon 0.9.48 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.9.49 · daemon 0.9.49 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the space is listed once', async ($, on) => {
@@ -1121,7 +1124,7 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.9.48')
+  expect(reg.plugin).toBe('0.9.49')
 })
 
 test('an agent registers again under the folder it started in, wherever the host has moved its root since', async ($, on) => {
@@ -1135,6 +1138,27 @@ test('an agent registers again under the folder it started in, wherever the host
   const regs = daemon.posted.filter(p => p.path === '/api/sessions').map(p => [p.body.cwd, p.body.name])
   expect(regs.length).toBe(2)
   expect(regs[1]).toEqual(['/Users/x/r/web', 'web'])
+})
+
+test('a session resumed by a new process in another folder registers as that folder, not the one it started in', async ($, on) => {
+  const { proc, store } = engine(on)
+  proc.pid = 222
+  store.folders = { 'me-session': { cwd: '/Users/x/r/loop', pid: 111 } }
+  const daemon = fakeDaemon(on)
+  await $.session.start(START)
+  const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
+  expect([reg.cwd, reg.name, reg.pid]).toEqual(['/Users/x/r/web', 'web', 222])
+  expect(store.folders).toEqual({ 'me-session': { cwd: '/Users/x/r/web', pid: 222 } })
+})
+
+test('a session keeps its folder through a plugin reload in the same process, and an older pin is kept and stamped', async ($, on) => {
+  const { proc, store } = engine(on)
+  proc.pid = 111
+  store.folders = { 'me-session': '/Users/x/r/loop' }
+  const daemon = fakeDaemon(on)
+  await $.session.start(START)
+  expect(daemon.posted.find(p => p.path === '/api/sessions')!.body.cwd).toBe('/Users/x/r/loop')
+  expect(store.folders).toEqual({ 'me-session': { cwd: '/Users/x/r/loop', pid: 111 } })
 })
 
 test("an agent is given its role from .peerlink, and peers see a peer's role beside what it's doing", async ($, on) => {
@@ -1223,7 +1247,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.9.49', true], ['0.9.48', false]] as const)
+for (const [installed, reloads] of [['0.9.50', true], ['0.9.49', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     const daemon = fakeDaemon(on)
