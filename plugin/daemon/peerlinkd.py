@@ -27,12 +27,13 @@ import socket
 import sys
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.49"
+VERSION = "0.9.50"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -3686,18 +3687,33 @@ def agent_for(rec, old=None):
     return a, before
 
 
+def same_folder(a, b):
+    """Whether two spellings name one folder: through symlinks (/tmp and /private/tmp), a trailing slash, and Unicode
+    normalization (a Google Drive path can come NFD from one source and NFC from another)."""
+    spell = lambda p: unicodedata.normalize("NFC", os.path.realpath(os.path.expanduser(p)))
+    return a == b or spell(a) == spell(b)
+
+
 def moved_folder(rec, cwd):
     """A session that comes back in another folder (a new process resuming its conversation there, not a shell cd,
     which the plugin never reports) is a new agent there: the agent it was keeps its settings, its queued messages and
     the claim to its name, under a key no session has, for its next session to take up. Called with the lock held."""
     sid = rec["id"]
     aid = rec.get("agent") or agent_of.get(sid)
+    if aid not in agents:
+        aid = None
     was = rec.get("cwd") or (agents.get(aid) or {}).get("cwd")
-    if not cwd or not was or was == cwd:
+    if not cwd or not was or same_folder(was, cwd):
         return False
+    # With no agent to keep them for, its settings go; its queued messages wait under a key no session has, where
+    # adopt() hands them to the next agent in the folder they were sent to.
     left = f"{sid}@{aid or 'gone'}"
     if sid in config["sessions"]:
-        config["sessions"][left] = config["sessions"].pop(sid)
+        kept = config["sessions"].pop(sid)
+        if aid:
+            config["sessions"][left] = kept
+        else:
+            log("agent", sid, "left", was, "with no agent record: its settings are dropped")
         save_config()
     if sid in inboxes:
         inboxes[left] = inboxes.pop(sid)

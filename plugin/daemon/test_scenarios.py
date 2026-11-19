@@ -472,6 +472,26 @@ class ScenarioTest(unittest.TestCase):
         loop.expect("Ship the retry fix")
         self.assertEqual(lead.peers()["loop"]["agent"], agent)
 
+    def test_one_folder_spelled_two_ways_stays_one_agent(self):
+        rig = self.rig()
+        lead = rig.agent("lead", space="acme")
+        real = rig.folder("loop", space="acme")
+        link = real + "-link"
+        os.symlink(real, link)
+        loop = rig.agent("loop", folder=real)
+        rig.user("POST", f"/api/sessions/{loop.sid}/config", {"role": "Owns the loop service."})
+        agent = lead.peers()["loop"]["agent"]
+        lead.send(to="loop", text="Ship the retry fix")
+        loop.quit()
+        # The same session, the same folder, by its symlink and with a trailing slash.
+        for spelled in (link, real + "/"):
+            again = Agent(rig, "loop", spelled)
+            again.sid = loop.sid
+            again.register()
+            self.assertEqual((again.name, again.config.get("role")), ("loop", "Owns the loop service."))
+            self.assertEqual(lead.peers()["loop"]["agent"], agent)
+        again.expect("Ship the retry fix")
+
     def test_chatter_stops_at_the_reply_limit_and_work_on_a_task_carries_on(self):
         rig = self.rig(config={"max_hops": 4})
         a, b = rig.agent("a", space="acme"), rig.agent("b", space="acme")
