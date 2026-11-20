@@ -114,9 +114,9 @@ details.plat .pbody h2{font-size:14px;margin:16px 0 6px}.pill.warn{color:var(--w
 .ctx{font-size:11px;color:var(--mut);font-weight:500}.ctx.hi{color:var(--warn)}
 .node .state{font-size:11px;color:var(--mut);margin-top:4px;display:flex;align-items:center;justify-content:space-between;gap:6px}.hot{color:var(--warn);font-weight:600}
 .node .sum{font-size:12px;color:var(--mut);margin-top:4px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.sbox{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px;width:240px;box-sizing:border-box;text-align:center;display:flex;flex-direction:column;min-height:150px}
+.sbox{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px;width:min(240px,100%);min-width:150px;box-sizing:border-box;text-align:center;display:flex;flex-direction:column;min-height:150px}
 .sbox .small.mut{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}.sbox .spick{margin-top:auto;padding-top:8px}
-.sbox.led{border-color:var(--acc)}.spick{display:flex;flex-direction:column;gap:4px;margin-top:8px;text-align:left}.spick label{display:flex;justify-content:space-between;align-items:center;gap:6px;font-size:12px;color:var(--mut)}.spick select{font-size:12px;padding:2px 4px;width:160px}.sbox .small{margin-top:2px}
+.sbox.led{border-color:var(--acc)}.spick{display:flex;flex-direction:column;gap:4px;margin-top:8px;text-align:left}.spick label{display:flex;justify-content:space-between;align-items:center;gap:6px;font-size:12px;color:var(--mut)}.spick select{font-size:12px;padding:2px 4px;width:0;min-width:0;max-width:160px;flex:1 1 auto}.sbox .small{margin-top:2px}
 #detail:empty{display:none}
 #detail{position:fixed;top:0;right:0;bottom:0;width:380px;max-width:100%;overflow-y:auto;background:var(--bg);border-left:1px solid var(--line);box-shadow:-8px 0 24px rgba(0,0,0,.08);padding:16px;z-index:10}
 #detail .panel{border:0;padding:0;background:transparent}
@@ -167,7 +167,10 @@ details.plat .pbody h2{font-size:14px;margin:16px 0 6px}.pill.warn{color:var(--w
 @media (max-width:720px){#detail{width:100%;border-left:0}}
 .branch{display:flex;align-items:flex-start;justify-content:safe center}
 /* A tree wider than the page grows its column to fit, so the chart scrolls to both ends instead of cutting off the left. */
-.chart>.ocol{width:max-content;min-width:100%}
+/* A row of spaces takes the chart's width and its boxes narrow to fit, down to 150px each. Only a tree wider than
+   that scrolls, and it overflows to the right, so its left end is never out of reach. */
+.branch{align-self:stretch}.branch>.ocol{width:252px;min-width:162px;flex:0 1 auto;box-sizing:border-box}
+.branch>.ocol:has(>.branch){width:auto;min-width:auto}
 .branch>.ocol{position:relative;padding:14px 6px 0}
 .branch>.ocol::before{content:"";position:absolute;top:0;left:0;right:0;border-top:2px solid var(--acc)}
 .branch>.ocol:first-child::before{left:50%}.branch>.ocol:last-child::before{right:50%}.branch>.ocol:only-child::before{display:none}
@@ -177,7 +180,7 @@ details.plat .pbody h2{font-size:14px;margin:16px 0 6px}.pill.warn{color:var(--w
  .orow{flex-direction:column;align-items:stretch;gap:8px}.ocol{align-items:stretch}.node{width:auto}
  .ocol>.down{display:none}.ocol>.unit{margin:8px 0 0 14px;width:auto;border-left:2px solid var(--acc);border-style:none none none solid;border-radius:0;padding:4px 0 4px 12px}
  .branch{flex-direction:column;align-items:stretch;margin-left:14px;border-left:2px solid var(--acc);padding-left:12px}
- .chart>.ocol{width:auto;min-width:0}
+ .branch>.ocol{width:auto;min-width:0}
  .branch>.ocol{padding:8px 0 0}.branch>.ocol::before,.branch>.ocol::after{display:none}.sbox{max-width:none;text-align:left}
 }
 .mut{color:var(--mut)}
