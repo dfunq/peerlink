@@ -33,7 +33,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.60"
+VERSION = "0.9.61"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -4499,9 +4499,10 @@ def task_note(tid, body):
             t["blocked"] = text[:300] if blocked else ""
             t["status"] = "in_progress"
             req, told = t["requester"], []
-            line = f"Task {tid} ({t['title']}) is blocked. {name}:\n{text}" if blocked else f"Task {tid} ({t['title']}), progress from {name}:\n{text}"
+            # The note leads: a preview cut short then still shows what's new, not the task's title again.
+            line = (f"{name} is blocked on {tid}: {text}" if blocked else f"{name} on {tid}: {text}") + f"\n\n(Task {tid}: {t['title']})"
             if req.get("discord"):
-                posts.append((req["discord"]["channel_id"], f"**{name}**: {line}", req["discord"]["message_id"]))
+                posts.append((req["discord"]["channel_id"], f"**{name}**{line[len(name):]}", req["discord"]["message_id"]))
                 told = [req.get("name") or USER_NAME]
             elif req.get("cwd"):
                 asker = continuation(req.get("id") or "", req.get("name") or "", req.get("cwd") or "")
@@ -4515,8 +4516,8 @@ def task_note(tid, body):
             task_log(t, name, "note", text)
             t["blocked"] = ""
             reach = [x for x in [t] + [c for c, _ in task_below(t) if c["status"] in TASK_OPEN]]
-            told = task_fan_out(t, f"Note on task {tid} ({t['title']}) from {name}"
-                                   + (f", sent to everyone working under it ({len(reach)} tasks)" if len(reach) > 1 else "") + f":\n{text}",
+            told = task_fan_out(t, f"{name} on {tid}: {text}\n\n(Task {tid}: {t['title']}"
+                                   + (f"; sent to everyone working under it, {len(reach)} tasks" if len(reach) > 1 else "") + ")",
                                 sender=by, skip={by["id"]})
             save_tasks()
             out = {"task": tid, "direction": "down", "told": told}

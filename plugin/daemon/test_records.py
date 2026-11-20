@@ -69,6 +69,8 @@ class RecordsTest(unittest.TestCase):
         peerlinkd.inboxes.clear()
         peerlinkd.task_note(sub, {"by": "s-loop", "text": "PR #166 is open."})
         progress = peerlinkd.inboxes["s-core"][-1]
+        # The note leads, so a preview cut short shows what's new rather than the task's title again.
+        self.assertTrue(progress["text"].startswith(f"loop on {sub}: PR #166 is open."), progress["text"])
         self.assertEqual((progress["wake"], progress["expects_reply"]), (False, False))
         peerlinkd.task_note(sub, {"by": "s-loop", "text": "Need the dev AI key's limit raised.", "blocked": True})
         self.assertTrue(peerlinkd.inboxes["s-core"][-1]["wake"])
