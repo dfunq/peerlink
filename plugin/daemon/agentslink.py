@@ -24,6 +24,7 @@ import json
 import os
 import re
 import secrets
+import socket
 import socketserver
 import threading
 import time
@@ -165,8 +166,13 @@ def audit(home, log, **entry):
 
 class Server(ThreadingHTTPServer):
     request_queue_size = 64  # the default 5 resets a burst of connections, such as several clients waiting at once
+    # On Windows SO_REUSEADDR lets a second socket take a port another holds, so a second daemon would start beside
+    # the first (and read the same chat bots, which Telegram answers with 409). There, the port is held exclusively.
+    allow_reuse_address = os.name != "nt"
 
     def server_bind(self):
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         # HTTPServer's own asks DNS for this machine's name, which on a slow network holds up the port for a minute.
         socketserver.TCPServer.server_bind(self)
         self.server_name, self.server_port = self.server_address[:2]
