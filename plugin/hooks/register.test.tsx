@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.9.54', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.9.55', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (state.forget && path.endsWith('/heartbeat') && 'busy' in body) {
       state.forget = false
       return { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'unknown agent; register again' }) } }
@@ -515,6 +515,36 @@ test('an incoming peer message draws as a chat row, on every surface', async ($,
     expect((await expanded.find({ type: 'Text', text: /engine/ }))).toBeDefined()
     await expanded.unmount()
   }
+})
+
+test("another agent's long message shows one line until ctrl+o; yours shows whole", async ($, on) => {
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e) as any
+    return <Text>engine</Text>
+  })
+  const long = 'Long report. '.repeat(30).trim()
+  const base = { plugin: 'peerlink', surface: 'terminal', component: 'UserMessage', requestId: 'u1' } as const
+  const text = PROMPT.replace('Which file defines the invoice model?', long)
+  const agent = await $.ui.mount({ ...base, props: { text, origin: { kind: 'plugin', name: 'peerlink' }, isExpanded: false } } as any)
+  const peek = (await agent.find({ type: 'Text', text: /^Long report/ }))?.text ?? ''
+  expect(peek.length).toBe(100)
+  expect(peek.endsWith('…')).toBe(true)
+  await agent.unmount()
+
+  const yours = await $.ui.mount({ ...base, props: { text: text.replace('↘ api', '↘ alex on Discord'), origin: { kind: 'plugin', name: 'peerlink' }, isExpanded: false } } as any)
+  expect((await yours.find({ type: 'Text', text: /^Long report/ }))?.text).toBe(long)
+  await yours.unmount()
+
+  const sent = (to: string) => $.ui.mount({
+    plugin: 'peerlink', surface: 'terminal', component: 'ToolUse', requestId: 't1',
+    props: { tool: 'mcp__peerlink__send_message', input: { to, text: long }, output: `Sent to ${to} (m4).`, isRunning: false, isErrored: false, isInterrupted: false, isExpanded: false },
+  } as any)
+  const toAgent = await sent('api')
+  expect((await toAgent.find({ type: 'Text', text: /^Long report/ }))?.text.length).toBe(100)
+  await toAgent.unmount()
+  const toYou = await sent('user')
+  expect((await toYou.find({ type: 'Text', text: /^Long report/ }))?.text).toBe(long)
+  await toYou.unmount()
 })
 
 test('a sent message draws as who it went to and what it said', async ($, on) => {
@@ -1091,7 +1121,7 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.9.54 · daemon 0.9.54 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.9.55 · daemon 0.9.55 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the space is listed once', async ($, on) => {
@@ -1124,7 +1154,7 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.9.54')
+  expect(reg.plugin).toBe('0.9.55')
 })
 
 test('an agent registers again under the folder it started in, wherever the host has moved its root since', async ($, on) => {
@@ -1247,7 +1277,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.9.55', true], ['0.9.54', false]] as const)
+for (const [installed, reloads] of [['0.9.56', true], ['0.9.55', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     const daemon = fakeDaemon(on)
