@@ -273,7 +273,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <div class="addline" style="margin-top:8px"><label class="check small"><input type="checkbox" name="start" checked> Start it when it isn&#39;t running</label><button type="submit">Add schedule</button><span class="small" id="schedmsg"></span></div></form></div></details>
 <div id="schedlist" style="margin-top:12px;display:flex;flex-direction:column;gap:8px"></div></section>
 
-<section id="messages"><h1>Messages</h1><p class="lead">Conversations between agents, and with you on Discord, Telegram and Slack, the latest first. Open one for its whole history.</p>
+<section id="messages"><h1>Messages</h1><p class="lead">Conversations between agents, and with you on Discord, Telegram, Slack and Teams, the latest first. Open one for its whole history.</p>
 <div class="msgbar"><span class="fl"><label class="small mut" for="msgspace">Space</label><select id="msgspace"><option value="">All spaces</option></select></span>
 <span class="fl"><label class="small mut" for="msgagent">Agent</label><select id="msgagent"><option value="">Everyone</option></select></span>
 <input id="msgq" class="search" type="search" placeholder="Search messages" aria-label="Search messages">
@@ -324,6 +324,12 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <li class="step" id="sstep1"><span class="step-n">1</span><div class="step-body"><div class="step-t">Create the app and paste its two tokens</div><div id="sstep1b"></div></div></li>
 <li class="step" id="sstep2"><span class="step-n">2</span><div class="step-body"><div class="step-t">Message it, then allow yourself</div><div id="sstep2b"></div></div></li>
 <li class="step" id="sstep3"><span class="step-n">3</span><div class="step-body"><div class="step-t">Map channels to agents</div><div id="sstep3b"></div></div></li>
+</ol></div></details>
+<details class="plat" id="pteams"><summary><span class="plogo" style="background:#4B53BC"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#fff" d="M4 6.5h10v2.6h-3.6V18H7.6V9.1H4z"/><circle cx="18" cy="7.5" r="2" fill="#fff"/><path fill="#fff" d="M15.5 10.5h5v4.8a2.5 2.5 0 0 1-5 0z"/></svg></span><span class="ptitle"><b>Teams</b><span class="psub">A chat, signed in as you</span></span><span class="pstate" id="tmstatus"></span><span class="chev" aria-hidden="true"></span></summary><div class="pbody">
+<p class="meta">One of your Teams chats works like a Discord channel. There's no bot: peerlink signs in as you and checks the chats you map every few seconds, so your agents' posts go out under your name, each starting with the agent's.</p>
+<ol class="steps">
+<li class="step" id="mstep1"><span class="step-n">1</span><div class="step-body"><div class="step-t">Sign in with Microsoft</div><div id="mstep1b"></div></div></li>
+<li class="step" id="mstep2"><span class="step-n">2</span><div class="step-body"><div class="step-t">Map chats to agents</div><div id="mstep2b"></div></div></li>
 </ol></div></details>
 <details class="plat" id="pagents"><summary><span class="plogo" style="background:#0F766E"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M8 9l-4 3 4 3M16 9l4 3-4 3M13.5 6l-3 12"/></svg></span><span class="ptitle"><b>Agents</b><span class="psub">Other AI agents, over MCP</span></span><span class="pstate" id="agstatus"></span><span class="chev" aria-hidden="true"></span></summary><div class="pbody">
 <p class="meta">An agent outside this machine (any MCP client) can post to the agent you pick and read its replies, and nothing else: two tools, <span class="mono">post_message</span> and <span class="mono">read_replies</span>. Each client is a chat of its own, with its own token. Only the token's hash is kept here. Your agents can answer a client there but never start a conversation with it, and your approvals and questions never go there.</p>
@@ -1073,6 +1079,7 @@ function renderDiscord(){if(!dState)return;const d=dState,invited=(dGuilds||[]).
   $('#dstep1').classList.toggle('done',d.configured);$('#dstep2').classList.toggle('done',d.configured&&invited);$('#dstep3').classList.toggle('done',(d.routes||[]).some(r=>platOf(r.channel_id)==='discord'&&(r.agents||[]).length));
   $('#tstep3').classList.toggle('done',(d.routes||[]).some(r=>r.channel_id.startsWith('tg:')&&(r.agents||[]).length));
   $('#sstep3').classList.toggle('done',(d.routes||[]).some(r=>r.channel_id.startsWith('slack:')&&(r.agents||[]).length));
+  $('#mstep2').classList.toggle('done',(d.routes||[]).some(r=>r.channel_id.startsWith('teams:')&&(r.agents||[]).length));
   $('#dstep1b').innerHTML=d.configured?`<p class="meta">Token <span class="mono">${esc(d.token_hint)}</span> saved. <button class="ghost small" data-dact="forget">Disconnect</button></p>`
    :`<p class="meta">On the <a href="https://discord.com/developers/applications" target="_blank" rel="noreferrer">Developer Portal ↗</a>, click <b>New Application</b> and give it a name. Open <b>Bot</b>, click <b>Reset Token</b>, and copy it. Optional: on the same page, turn on <b>Message Content Intent</b> so you can talk to it without @mentioning it every time.</p>
      <form class="addline" id="dtoken"><input type="password" class="mono grow" autocomplete="off" spellcheck="false" placeholder="Bot token" name="token"><button type="submit" ${dBusy?'disabled':''}>${dBusy?'Checking…':'Connect'}</button></form><p class="small err" id="dtokerr"></p>`;
@@ -1091,9 +1098,9 @@ function renderDiscord(){if(!dState)return;const d=dState,invited=(dGuilds||[]).
     <div class="addline"><input id="dbots" class="mono" placeholder="e.g. 1562000000000000000" value="${esc((d.trusted_bots||[]).join(', '))}" data-dbots style="flex:1;min-width:0"></div>
     <h2>Bot</h2>
     <label class="check"><input type="checkbox" data-dact="enabled" ${d.enabled?'checked':''}> Bot running</label>`;
-  if(!(d.configured&&invited)&&!tgChats){$('#dstep3b').innerHTML='<p class="meta">Set up Discord, Telegram, Slack or Agents above; the channels and chats its bot can see are mapped to agents here.</p>';$('#dmore').innerHTML='';return}
+  if(!(d.configured&&invited)&&!tgChats){$('#dstep3b').innerHTML='<p class="meta">Set up Discord, Telegram, Slack, Teams or Agents above; the channels and chats its bot can see are mapped to agents here.</p>';$('#dmore').innerHTML='';return}
   // A mapped channel is a card: its name, then its agents as chips you toggle. Every change saves at once.
-  const online=id=>({telegram:tState,slack:sState,agents:aState,discord:d}[platOf(id)]||{}).state==='online';
+  const online=id=>({telegram:tState,slack:sState,teams:mState,agents:aState,discord:d}[platOf(id)]||{}).state==='online';
   const taken=new Set(dDraft.routes.map(r=>r.channel_id).filter(Boolean));
   const rows=dDraft.routes.map((r,i)=>`<div class="mrow">
     <div class="mhead">${r.channel_id?`${platLogo(r.channel_id)}<span class="mname">${esc(chanName(r.channel_id))}</span>
@@ -1179,10 +1186,10 @@ document.addEventListener('click',async e=>{const t=e.target.closest('button');i
 });
 // A chat's platform from its id, and that platform's logo.
 const SLACK_LOGO='<svg viewBox="0 0 24 24" aria-hidden="true"><path stroke="#fff" stroke-width="2.6" stroke-linecap="round" fill="none" d="M9 4.5v15M15 4.5v15M4.5 9h15M4.5 15h15"/></svg>';
-const PLAT={discord:['Discord','#5865F2',DISCORD_LOGO],telegram:['Telegram','#26A5E4',TG_LOGO],slack:['Slack','#4A154B',SLACK_LOGO],agents:['Agents','#0F766E','<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M8 9l-4 3 4 3M16 9l4 3-4 3M13.5 6l-3 12"/></svg>']};
-const platOf=id=>String(id).startsWith('tg:')?'telegram':String(id).startsWith('slack:')?'slack':String(id).startsWith('agents:')?'agents':'discord';
+const PLAT={discord:['Discord','#5865F2',DISCORD_LOGO],telegram:['Telegram','#26A5E4',TG_LOGO],slack:['Slack','#4A154B',SLACK_LOGO],teams:['Teams','#4B53BC','<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#fff" d="M4 6.5h10v2.6h-3.6V18H7.6V9.1H4z"/><circle cx="18" cy="7.5" r="2" fill="#fff"/><path fill="#fff" d="M15.5 10.5h5v4.8a2.5 2.5 0 0 1-5 0z"/></svg>'],agents:['Agents','#0F766E','<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M8 9l-4 3 4 3M16 9l4 3-4 3M13.5 6l-3 12"/></svg>']};
+const platOf=id=>String(id).startsWith('tg:')?'telegram':String(id).startsWith('slack:')?'slack':String(id).startsWith('teams:')?'teams':String(id).startsWith('agents:')?'agents':'discord';
 const platLogo=id=>{const [name,color,logo]=PLAT[platOf(id)];return `<span class="mlogo" title="${name}" style="background:${color}">${logo}</span>`};
-const OTHER=g=>g.id==='telegram'||g.id==='slack'||g.id==='agents';
+const OTHER=g=>g.id==='telegram'||g.id==='slack'||g.id==='teams'||g.id==='agents';
 // -- Telegram: the bot's token, who may talk to it, and the chats it has heard from ------------------
 let tState=null,tBusy=false;
 async function loadTelegram(){const before=JSON.stringify(Object.keys(tState?.chats||{}));tState=await api('/api/telegram');renderTelegram();
@@ -1255,6 +1262,50 @@ document.addEventListener('click',async e=>{const t=e.target.closest('button');i
 // Someone messaging the bot, or a chat it joins, shows up without a reload.
 setInterval(()=>{if(location.hash==='#channels'&&tState?.configured&&!document.hidden)loadTelegram()},4000);
 setInterval(()=>{if(location.hash==='#channels'&&!document.hidden&&(sState?.configured||!sState))loadSlack()},4000);
+// -- Teams: signed in as you with a device code; your chats are mapped like any channel ----------------------------
+let mState=null,mBusy=false,mShown=null,mOwn=false;
+async function loadTeams(){const before=JSON.stringify(mState?.chats||{});mState=await api('/api/teams');renderTeams();
+  if(before!==JSON.stringify(mState.chats||{})&&dState){dGuilds=null;loadDiscord()}}
+function renderTeams(){const t=mState;if(!t)return;
+  const label={online:'Online',connecting:'Connecting…',error:'Error',off:'Turned off',unconfigured:'Not set up'}[t.state]||t.state;
+  $('#tmstatus').innerHTML=platState(t.configured,t.state,label,t.user,t.error)+((t.strangers||[]).length?` <span class="pill warn">${t.strangers.length} waiting</span>`:'');
+  if(dState&&t.state!==mShown){mShown=t.state;renderDiscord()}
+  panels({pteams:(t.configured&&t.state==='error')||!!t.sign_in});
+  $('#mstep1').classList.toggle('done',t.configured&&t.state!=='error');
+  const s=t.sign_in;
+  // The app-id fields are left alone while they're being filled in: the page polls.
+  if(document.activeElement?.closest?.('#mstep1b')&&!s)return;
+  $('#mstep1b').innerHTML=s?(s.error?`<p class="small err">${esc(s.error)}</p><p><button data-mact="cancel">Start again</button></p>`
+     :`<p class="meta">Open <a href="${esc(s.verification_uri)}" target="_blank" rel="noreferrer">${esc(s.verification_uri)} ↗</a> and enter this code, then sign in with your work account:</p>
+       <p><span class="mono" style="font-size:1.6em;letter-spacing:.12em">${esc(s.user_code)}</span> <button class="ghost small" data-mcopy="${esc(s.user_code)}">Copy</button></p>
+       <p class="small mut">Waiting for you to sign in. This updates by itself. <button class="ghost small" data-mact="cancel">Cancel</button></p>`)
+   :t.configured&&t.state!=='error'?`<p class="meta">Signed in${t.user?` as <b>${esc(t.user)}</b>`:''}${t.client_id?` through your app <span class="mono">${esc(t.client_id)}</span>`:''}. <label class="small"><input type="checkbox" data-mact="enabled" ${t.enabled?'checked':''}> Reading chats</label> <button class="ghost small" data-mact="forget">Sign out</button></p>`
+   :`<p class="meta">${t.configured?'Teams signed you out; sign in again. ':''}You get a code to enter at microsoft.com/devicelogin. There's nothing to register: the sign-in goes through Microsoft's own <b>Graph Command Line Tools</b> app, which is what your company's sign-in log will show, asking to read and send your chat messages.</p>
+     <p><button data-mact="sign-in" ${mBusy?'disabled':''}>${mBusy?'Asking Microsoft…':'Sign in with Microsoft'}</button> <button class="ghost small" data-mact="own">${mOwn?'Use Microsoft\'s app':'Use your own app instead'}</button></p>
+     ${mOwn?`<p class="meta">An app registered in Entra, for when your company blocks Microsoft's or won't let you approve chat access: a public client (<b>Allow public client flows</b> on) with the delegated permissions <span class="mono">User.Read</span> and <span class="mono">Chat.ReadWrite</span>.</p>
+       <div class="addline"><input class="mono grow" id="mclient" placeholder="Application (client) id" value="${esc(t.client_id||'')}" spellcheck="false"><input class="mono" id="mtenant" placeholder="Tenant id or domain (optional)" value="${esc(t.tenant||'')}" spellcheck="false"></div>`:''}
+     <p class="small err" id="mterr"></p>`;
+  const strangers=(t.strangers||[]).map(x=>`<div class="addline small"><b>${esc(x.name)}</b> <span class="mono mut">${esc(x.id)}</span> <span class="mut">in ${esc(x.chat_name||x.chat)}, ${ago(x.ts)} ago</span>
+      <button class="small" data-mallow="${esc(x.id)}">Allow</button><button class="ghost small" data-mdismiss="${esc(x.id)}">Dismiss</button></div>`).join('');
+  if(document.activeElement?.dataset?.musers===undefined)$('#mstep2b').innerHTML=!t.configured?'':`<p class="meta">Your chats are listed under <b>Channel ⇄ Agent Mappings</b>, below${Object.keys(t.chats||{}).some(k=>k==='teams:48:notes')?', with <b>Chat with yourself</b> first among them for talking to agents alone':''}. Only chats you map are read: write in one and its agent gets it. Questions come as a numbered list; answer with the number.
+    Commands work as words: <span class="mono">peerlink status</span>, <span class="mono">peerlink inbox</span>, <span class="mono">peerlink run loop 5m check the deploy</span>.</p>
+    ${strangers?`<p class="meta"><b>Wrote in a mapped group chat, not allowed yet:</b></p>${strangers}`:''}
+    <p class="meta" style="margin-top:8px">Besides you, allowed in group chats (Entra user ids, separated by commas):</p>
+    <div class="addline"><input class="mono" placeholder="e.g. 0f1e2d3c-…" value="${esc((t.allowed_users||[]).join(', '))}" data-musers style="flex:1;min-width:0"></div>`}
+document.addEventListener('change',e=>{const t=e.target;
+  if(t.dataset.musers!==undefined)api('/api/teams',{method:'PUT',headers:J,body:JSON.stringify({allowed_users:t.value})}).then(()=>{t.blur();loadTeams()});
+  if(t.dataset.mact==='enabled')api('/api/teams',{method:'PUT',headers:J,body:JSON.stringify({enabled:t.checked})}).then(loadTeams)});
+document.addEventListener('click',async e=>{const t=e.target.closest('button');if(!t)return;
+  if(t.dataset.mcopy){navigator.clipboard?.writeText(t.dataset.mcopy);t.textContent='Copied'}
+  if(t.dataset.mact==='own'){mOwn=!mOwn;renderTeams()}
+  if(t.dataset.mact==='sign-in'){const client_id=mOwn?($('#mclient')?.value||'').trim():'',tenant=mOwn?($('#mtenant')?.value||'').trim():'';
+    mBusy=true;renderTeams();const r=await api('/api/teams/sign-in',{method:'POST',headers:J,body:JSON.stringify({client_id,tenant})});mBusy=false;
+    if(r.error){renderTeams();$('#mterr').textContent=r.error;return}await loadTeams()}
+  if(t.dataset.mact==='cancel'){await api('/api/teams/sign-in',{method:'DELETE'});loadTeams()}
+  if(t.dataset.mallow){await api('/api/teams',{method:'PUT',headers:J,body:JSON.stringify({allow:t.dataset.mallow})});loadTeams()}
+  if(t.dataset.mdismiss){await api('/api/teams',{method:'PUT',headers:J,body:JSON.stringify({dismiss:t.dataset.mdismiss})});loadTeams()}
+  if(t.dataset.mact==='forget'&&await ask('Sign Teams out? The chat mapping and allowed people are kept.')){await api('/api/teams',{method:'DELETE'});loadTeams()}});
+setInterval(()=>{if(location.hash==='#channels'&&!document.hidden&&(mState?.configured||mState?.sign_in||!mState))loadTeams()},3000);
 // -- Agents: outside agents over MCP. Clients are added with the CLI (the token never passes through here); where they
 // land, the switch and the port are set here, and a client can be switched off or revoked here.
 let aState=null,aShown=null;
@@ -1305,7 +1356,7 @@ document.addEventListener('click',async e=>{const t=e.target.closest('button');i
 setInterval(()=>{if(location.hash==='#channels'&&!document.hidden)loadAgents()},5000);
 // Invited in another tab, or back from the Developer Portal: look again when this tab gets focus.
 window.addEventListener('focus',()=>{if(location.hash==='#channels'&&dState?.configured){dGuilds=null;loadDiscord(true)}});
-window.addEventListener('hashchange',()=>{if(location.hash==='#discord')location.hash='#channels';if(location.hash==='#channels'){loadDiscord();loadTelegram();loadSlack();loadAgents()}});
+window.addEventListener('hashchange',()=>{if(location.hash==='#discord')location.hash='#channels';if(location.hash==='#channels'){loadDiscord();loadTelegram();loadSlack();loadTeams();loadAgents()}});
 
 // Standing rules, on their own page: yours to add, change, turn off or delete; an agent's proposal to approve.
 let allRules=[];
@@ -1369,6 +1420,6 @@ async function tick(){
   catch(e){if(!signedOut){misses++;offline(e)}}
   if(signedOut){live?.close();return}
   setTimeout(tick,streamOk?30000:misses?10000:2000)}
-show();loadCfg().then(()=>refresh(true)).then(()=>{if(location.hash==='#discord')location.hash='#channels';else if(location.hash==='#channels'){loadDiscord();loadTelegram();loadSlack();loadAgents()}}).catch(e=>{misses=1;offline(e)}).finally(()=>{connect();setTimeout(tick,2000)});
+show();loadCfg().then(()=>refresh(true)).then(()=>{if(location.hash==='#discord')location.hash='#channels';else if(location.hash==='#channels'){loadDiscord();loadTelegram();loadSlack();loadTeams();loadAgents()}}).catch(e=>{misses=1;offline(e)}).finally(()=>{connect();setTimeout(tick,2000)});
 </script></body></html>
 """
