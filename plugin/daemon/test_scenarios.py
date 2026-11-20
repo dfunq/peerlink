@@ -472,6 +472,27 @@ class ScenarioTest(unittest.TestCase):
         loop.expect("Ship the retry fix")
         self.assertEqual(lead.peers()["loop"]["agent"], agent)
 
+    def test_a_session_resumed_in_another_folder_leaves_its_old_name_behind_across_a_daemon_restart(self):
+        rig = self.rig()
+        lead = rig.agent("lead", space="acme")
+        loop, pixel = rig.agent("loop", space="acme"), rig.agent("pixel", space="acme")
+        loop.quit()
+
+        def register(sid, name, cwd, had):  # as the plugin does: it says the name it last had
+            code, out = rig.call("POST", "/api/sessions", {"id": sid, "name": name, "had_name": had, "cwd": cwd, "plugin": "rig"})
+            self.assertEqual(code, 200, out)
+            return out["name"]
+        # Resumed in pixel's folder, its plugin still says it was loop: that name stays with loop's folder.
+        self.assertEqual(register(loop.sid, "pixel", pixel.cwd, "loop"), "pixel-2")
+        # A new session in loop's folder is loop, and a daemon restart doesn't swap them, whoever registers first.
+        fresh = Agent(rig, "loop", loop.cwd)
+        fresh.register()
+        self.assertEqual(fresh.name, "loop")
+        rig.restart()
+        self.assertEqual(register(fresh.sid, "loop", loop.cwd, None), "loop")  # a reloaded plugin has no name to say
+        self.assertEqual(register(loop.sid, "pixel", pixel.cwd, "pixel-2"), "pixel-2")
+        self.assertEqual(lead.peers()["loop"]["cwd"], loop.cwd)
+
     def test_one_folder_spelled_two_ways_stays_one_agent(self):
         rig = self.rig()
         lead = rig.agent("lead", space="acme")
