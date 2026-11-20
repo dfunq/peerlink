@@ -33,7 +33,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.53"
+VERSION = "0.9.54"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -6070,8 +6070,7 @@ class Handler(BaseHTTPRequestHandler):
             with lock:
                 fresh = sid not in sessions and not b.get("succeeds")
                 rec = sessions.get(sid, {"id": sid, "started": time.time()})
-                if not b.get("succeeds"):
-                    moved_folder(rec, b.get("cwd") or "")
+                moved = not b.get("succeeds") and moved_folder(rec, b.get("cwd") or "")
                 # One a spawn started, in a folder that may already have its agent: it takes the name and role it
                 # was asked for, never the folder's, which belong to the agent already there.
                 spawn = spawn_of({"cwd": b.get("cwd") or "", "pid": b.get("pid")}, fresh) if sid not in sessions else None
@@ -6088,8 +6087,9 @@ class Handler(BaseHTTPRequestHandler):
                     rec["name"] = unique_name(spawn["name"], sid)
                 if b.get("name") and not rec.get("name"):
                     # A folder keeps the name it was given: a new session there (a restart, a resume) is still "notes".
-                    # One registering again after a daemon restart keeps the name it had, not whichever is free first.
-                    given = b.get("had_name") or (config.get("folder_names") or {}).get(b.get("cwd") or "")
+                    # One registering again after a daemon restart keeps the name it had, not whichever is free first;
+                    # one that just moved folder doesn't: the name it had belongs to the agent it was, in the old folder.
+                    given = (not moved and b.get("had_name")) or (config.get("folder_names") or {}).get(b.get("cwd") or "")
                     # One the daemon started for a schedule comes up as the agent the schedule is for.
                     claims = name_claims.get(b.get("cwd") or "")
                     if claims and not b.get("succeeds"):
