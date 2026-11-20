@@ -7,7 +7,9 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.parse
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -94,6 +96,8 @@ class FakeMicrosoft:
                     self.pending -= 1
                     return 400, {"error": "authorization_pending"}
                 return 200, {"access_token": "fresh", "refresh_token": "r1", "expires_in": 3600}
+            if body.get("grant_type") == "authorization_code":
+                return 200, {"access_token": "fresh", "refresh_token": "r3", "expires_in": 3600}
             return 200, {"access_token": "fresh", "refresh_token": "r2", "expires_in": 3600}
         if path.endswith("/messages"):
             chat = urllib.parse.unquote(path.split("/chats/", 1)[1].rsplit("/messages", 1)[0])
@@ -161,6 +165,42 @@ class TeamsTest(unittest.TestCase):
         self.assertEqual(teamslink.finish_sign_in("", "", "dev")["refresh_token"], "r1")
         with self.assertRaises(teamslink.TeamsError):
             teamslink.start_sign_in("not-an-id", "")
+
+    def test_signing_in_in_the_browser_comes_back_to_a_localhost_port_with_pkce(self):
+        import base64
+        import hashlib
+        got, errors = [], []
+        flow = teamslink.browser_sign_in("", "", got.append, errors.append)
+        self.addCleanup(flow["close"])
+        url = urllib.parse.urlsplit(flow["auth_url"])
+        q = dict(urllib.parse.parse_qsl(url.query))
+        self.assertEqual(url.path, "/organizations/oauth2/v2.0/authorize")
+        self.assertEqual((q["client_id"], q["response_type"], q["code_challenge_method"]), (teamslink.CLIENT_ID, "code", "S256"))
+        self.assertRegex(q["redirect_uri"], r"^http://localhost:\d+$")
+        back = q["redirect_uri"].replace("localhost", "127.0.0.1")
+        with self.assertRaises(urllib.error.HTTPError):  # someone else's state isn't taken
+            urllib.request.urlopen(back + "/?code=x&state=wrong", timeout=5)
+        page = urllib.request.urlopen(back + "/?" + urllib.parse.urlencode({"code": "c1", "state": q["state"]}), timeout=5).read().decode()
+        self.assertIn("Signed in to Teams", page)
+        self.assertEqual([t["refresh_token"] for t in got], ["r3"])
+        sent = [c[2] for c in self.ms.calls if c[1].endswith("/token")][-1]
+        self.assertEqual((sent["code"], sent["redirect_uri"]), ("c1", q["redirect_uri"]))
+        made = base64.urlsafe_b64encode(hashlib.sha256(sent["code_verifier"].encode()).digest()).rstrip(b"=").decode()
+        self.assertEqual(made, q["code_challenge"])
+        self.assertEqual(errors, [])
+
+    def test_a_browser_sign_in_your_company_blocks_says_so(self):
+        errors = []
+        flow = teamslink.browser_sign_in("", "", lambda t: None, errors.append)
+        self.addCleanup(flow["close"])
+        q = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(flow["auth_url"]).query))
+        back = q["redirect_uri"].replace("localhost", "127.0.0.1")
+        page = urllib.request.urlopen(back + "/?" + urllib.parse.urlencode({
+            "error": "access_denied", "error_description": "AADSTS53003: Access has been blocked by Conditional Access policies.",
+            "state": q["state"]}), timeout=5).read().decode()
+        self.assertIn("didn't finish", page)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("Conditional Access", errors[0])
 
     def test_a_new_refresh_token_is_kept_and_a_stale_access_token_is_renewed(self):
         kept = []

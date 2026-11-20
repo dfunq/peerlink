@@ -1,7 +1,8 @@
 """peerlink's Teams channel: talk to your agents in a Microsoft Teams chat, signed in as you.
 
 Teams has no bot token to paste, and a real Teams bot needs a public address. So this one signs in as you (Microsoft's
-device code flow: a code you enter at microsoft.com/devicelogin) and reads and posts in your chats through Microsoft
+device code flow: a code you enter at microsoft.com/devicelogin; or, where a company blocks that, Microsoft's sign-in
+page in a browser here, sent back to a localhost port) and reads and posts in your chats through Microsoft
 Graph, by polling, so nothing needs a public URL. Standard library only, like the rest of the daemon.
 
 **The app.** Every sign-in names an app registered in Entra. With none given it's `CLIENT_ID`, Microsoft's Graph
@@ -98,6 +99,10 @@ def _auth_error(out):
         desc = "the app doesn't allow public client flows; turn on Authentication > Allow public client flows in Entra"
     elif "AADSTS700016" in desc:
         desc = "no app with that client id in that tenant; check the id, or set the tenant to the one it's registered in"
+    elif "AADSTS50011" in desc:
+        desc = "the app doesn't take sign-ins back to http://localhost; add it as a Mobile and desktop redirect URI in Entra"
+    elif "AADSTS53003" in desc:
+        desc = "your organization's sign-in rules (Conditional Access) blocked this; your IT admin decides that"
     elif "AADSTS65001" in desc or "consent" in desc.lower():
         desc = "your tenant needs an admin to approve this app's permissions (User.Read, Chat.ReadWrite)"
     return TeamsError(f"Microsoft said: {desc[:300]}")
@@ -129,6 +134,90 @@ def finish_sign_in(client_id, tenant, device_code):
     if "refresh_token" not in out:
         raise _auth_error(out)
     return out
+
+
+SIGNED_IN_PAGE = """<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>peerlink</title><style>body{{font:16px system-ui,sans-serif;margin:15vh auto;max-width:28em;padding:0 16px;
+background:#111;color:#eee}}@media(prefers-color-scheme:light){{body{{background:#fff;color:#111}}}}</style>
+<h1>{head}</h1><p>{body}</p>"""
+
+
+def browser_sign_in(client_id, tenant, on_tokens, on_error, timeout=600):
+    """Microsoft's own sign-in page, in a browser on this machine: for a tenant that blocks device code sign-in.
+    A listener on a free localhost port takes the one redirect back (authorization code with PKCE), trades the code
+    for tokens and calls on_tokens(tokens), or on_error(text). Returns {auth_url, expires_at, close}. Raises TeamsError."""
+    import base64
+    import hashlib
+    import http.server
+    import secrets
+    client_id, tenant = (client_id or CLIENT_ID).strip(), tenant or TENANT
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", client_id):
+        raise TeamsError("that doesn't look like an app (client) id; Entra shows one like 1b2c3d4e-…")
+    verifier = secrets.token_urlsafe(64)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    state = secrets.token_urlsafe(24)
+    done = threading.Event()
+    box = {}
+
+    class Back(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            q = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(self.path).query))
+            if urllib.parse.urlsplit(self.path).path != "/" or q.get("state") != state or done.is_set():
+                self.send_response(404)
+                self.end_headers()
+                return
+            done.set()
+            failed = ""
+            try:
+                if "code" not in q:
+                    raise _auth_error(q)
+                out = _form(f"{AUTH}/{urllib.parse.quote(tenant)}/oauth2/v2.0/token", {
+                    "grant_type": "authorization_code", "client_id": client_id, "code": q["code"], "scope": SCOPES,
+                    "redirect_uri": box["redirect"], "code_verifier": verifier})
+                if "refresh_token" not in out:
+                    raise _auth_error(out)
+                page = SIGNED_IN_PAGE.format(head="Signed in to Teams", body="peerlink has it. You can close this tab.")
+            except TeamsError as err:
+                out, failed = None, str(err)
+                page = SIGNED_IN_PAGE.format(head="Teams sign-in didn't finish", body=html.escape(failed))
+            raw = page.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            on_tokens(out) if out else on_error(failed)
+
+    try:
+        server = http.server.HTTPServer(("127.0.0.1", 0), Back)
+    except OSError as err:
+        raise TeamsError(f"couldn't open a local port for Microsoft to send you back to: {err}")
+    server.timeout = 1
+    # Microsoft takes any port on http://localhost back to a desktop app (Graph Command Line Tools is registered for it).
+    box["redirect"] = f"http://localhost:{server.server_address[1]}"
+    expires_at = time.time() + timeout
+
+    def serve():
+        try:
+            while not done.is_set() and time.time() < expires_at:
+                server.handle_request()
+            if not done.is_set() and not box.get("closed"):
+                on_error("the sign-in page wasn't finished in time; start again")
+        finally:
+            server.server_close()
+
+    def close():
+        box["closed"] = True
+        done.set()
+
+    threading.Thread(target=serve, name="teams-browser-sign-in", daemon=True).start()
+    url = f"{AUTH}/{urllib.parse.quote(tenant)}/oauth2/v2.0/authorize?" + urllib.parse.urlencode({
+        "client_id": client_id, "response_type": "code", "redirect_uri": box["redirect"], "response_mode": "query",
+        "scope": SCOPES, "state": state, "code_challenge": challenge, "code_challenge_method": "S256", "prompt": "select_account"})
+    return {"auth_url": url, "expires_at": expires_at, "close": close}
 
 
 class Auth:
