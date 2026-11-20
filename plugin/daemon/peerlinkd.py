@@ -5798,7 +5798,7 @@ class Handler(BaseHTTPRequestHandler):
         return bool(token) and hmac.compare_digest(self.headers.get("X-Peerlink-Token", ""), token)
 
     def same_origin(self):
-        """A browser's write says where it comes from; one that doesn't isn't taken as yours (T-564)."""
+        """A browser's write says where it comes from; one that doesn't isn't taken as yours."""
         origin = self.headers.get("Origin")
         return bool(origin) and origin == f"http://{self.headers.get('Host', '')}"
 

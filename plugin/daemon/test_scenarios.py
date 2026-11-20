@@ -36,7 +36,7 @@ class ScenarioTest(unittest.TestCase):
         self.assertEqual(core.poll(), [])
 
     def test_an_answer_from_another_machine_threads_onto_the_question(self):
-        """T-550 (6): alice on host a asks bob on host b; bob answers with reply_to alone, and the answer comes back
+        """Alice on host a asks bob on host b; bob answers with reply_to alone, and the answer comes back
         to alice as the answer to her question, which no longer reads as waiting."""
         ports = [__import__("rig").free_port() for _ in range(2)]
         a = Rig(config={"token": "t0k", "remotes": [f"http://127.0.0.1:{ports[1]}"]}, env={"PEERLINK_HOSTNAME": "hosta"})

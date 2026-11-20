@@ -93,22 +93,22 @@ class ChatTest(unittest.TestCase):
         peerlinkd.load_config()  # PEERLINK_HOME is a fresh temp folder: the defaults
         now = peerlinkd.time.time()
         for sid, name in (("s-notes", "notes"), ("s-tg", "telegram")):
-            peerlinkd.sessions[sid] = {"id": sid, "name": name, "cwd": "/x/notes", "last_seen": now}
+            peerlinkd.sessions[sid] = {"id": sid, "name": name, "cwd": "/x/Notes", "last_seen": now}
         self.addCleanup(lambda: [peerlinkd.sessions.pop(k, None) for k in ("s-notes", "s-tg")])
         route = peerlinkd.clean_route({"channel_id": "tg:5", "agents": [
-            {"cwd": "/x/notes", "name": "telegram", "receives": True, "sends": True},
-            {"cwd": "/x/notes", "receives": False, "sends": True}]})  # a folder alone, as before 0.8.64
+            {"cwd": "/x/Notes", "name": "telegram", "receives": True, "sends": True},
+            {"cwd": "/x/Notes", "receives": False, "sends": True}]})  # a folder alone, as before 0.8.64
         self.assertEqual(len(route["agents"]), 2)
         peerlinkd.discord["routes"] = [route]
         self.addCleanup(lambda: peerlinkd.discord.update({"routes": []}))
         self.assertEqual(peerlinkd.entry_agent(route["agents"][0])["id"], "s-tg")
         self.assertEqual(peerlinkd.entry_agent(route["agents"][1])["id"], "s-notes")  # the folder's own agent
-        self.assertTrue(peerlinkd.routes_for("/x/notes", "telegram")[0]["master"])
-        self.assertFalse(peerlinkd.routes_for("/x/notes", "notes")[0]["master"])
+        self.assertTrue(peerlinkd.routes_for("/x/Notes", "telegram")[0]["master"])
+        self.assertFalse(peerlinkd.routes_for("/x/Notes", "notes")[0]["master"])
         self.assertEqual(peerlinkd.channel_agent("tg:5", False)["id"], "s-tg")
         # Not running, the named agent's message waits for it by name, not for another agent in its folder.
         peerlinkd.sessions["s-tg"]["last_seen"] = 0
-        msg = {"id": "m-test", "text": "hi", "to_cwd": "/x/notes"}
+        msg = {"id": "m-test", "text": "hi", "to_cwd": "/x/Notes"}
         self.assertIsNone(peerlinkd.queue_for_entry(route["agents"][0], msg))
         self.assertEqual(msg["to"], "agent:telegram")
         peerlinkd.inboxes.pop("agent:telegram", None)
@@ -119,15 +119,15 @@ class ChatTest(unittest.TestCase):
         self.addCleanup(lambda: (peerlinkd.messages.__setitem__(slice(None), kept), peerlinkd.next_msg.__setitem__(0, next_id),
                                  peerlinkd.reaction_jobs.clear(), peerlinkd.tasks.clear()))
         now = peerlinkd.time.time()
-        for sid, name, cwd in (("s-chief", "hq", "/x/hq"), ("s-notes", "notes", "/x/notes"), ("s-quiet", "quiet", "/x/quiet")):
+        for sid, name, cwd in (("s-hq", "hq", "/x/hq"), ("s-notes", "notes", "/x/Notes"), ("s-quiet", "quiet", "/x/quiet")):
             peerlinkd.sessions[sid] = {"id": sid, "name": name, "cwd": cwd, "last_seen": now}
-        self.addCleanup(lambda: [peerlinkd.sessions.pop(k, None) or peerlinkd.inboxes.pop(k, None) for k in ("s-chief", "s-notes", "s-quiet")])
+        self.addCleanup(lambda: [peerlinkd.sessions.pop(k, None) or peerlinkd.inboxes.pop(k, None) for k in ("s-hq", "s-notes", "s-quiet")])
         peerlinkd.discord["routes"] = [peerlinkd.clean_route({"channel_id": "77", "agents": [
             {"cwd": "/x/hq", "receives": True, "sends": True},
-            {"cwd": "/x/notes", "name": "notes", "receives": True, "sends": False},
+            {"cwd": "/x/Notes", "name": "notes", "receives": True, "sends": False},
             {"cwd": "/x/quiet", "receives": False, "sends": True}]})]
         self.addCleanup(lambda: peerlinkd.discord.update({"routes": []}))
-        peerlinkd.discord_bot[0] = type("Bot", (), {"reads_messages": True, "channel_name": lambda self, c: "delegator"})()
+        peerlinkd.discord_bot[0] = type("Bot", (), {"reads_messages": True, "channel_name": lambda self, c: "team"})()
         n = [0]
 
         def say(text):
@@ -139,13 +139,13 @@ class ChatTest(unittest.TestCase):
             return [m["text"] for m in peerlinkd.inboxes.get(sid, [])]
 
         say("test")
-        self.assertEqual((got("s-chief"), got("s-notes"), got("s-quiet")), (["test"], ["test"], []))
+        self.assertEqual((got("s-hq"), got("s-notes"), got("s-quiet")), (["test"], ["test"], []))
         copies = [m for m in peerlinkd.messages if m.get("discord", {}).get("message_id") == "p1"]
         self.assertEqual(len({m["id"] for m in copies}), 2)  # each its own message, to answer on its own
         say("@notes only you")
         say("Task: rotate the key")
         self.assertEqual(got("s-notes"), ["test", "only you"])
-        self.assertEqual(got("s-chief"), ["test", "Task: rotate the key"])  # a task has one owner: the first receiver
+        self.assertEqual(got("s-hq"), ["test", "Task: rotate the key"])  # a task has one owner: the first receiver
 
     def test_a_reaction_on_a_post_several_messages_share_comes_off_only_when_none_has_it(self):
         jobs = peerlinkd.reaction_jobs

@@ -316,7 +316,7 @@ class AgentsChannelTest(unittest.TestCase):
         return t, box
 
     def test_reply_and_post_files_are_read_on_and_kept_to_the_newest(self):
-        """T-550 (8): a read parses only what was added since the last one, and the files stop growing."""
+        """A read parses only what was added since the last one, and the files stop growing."""
         keep = agentslink.KEEP_REPLIES, agentslink.KEEP_POSTS
         agentslink.KEEP_REPLIES = agentslink.KEEP_POSTS = 8
         self.addCleanup(lambda: setattr(agentslink, "KEEP_REPLIES", keep[0]) or setattr(agentslink, "KEEP_POSTS", keep[1]))
@@ -372,7 +372,7 @@ class AgentsChannelTest(unittest.TestCase):
         try:
             now = {"since": time.time(), "wait_s": 4}  # under the 5 s the test client waits for an answer
             waiters = [self.background(GROK, now) for _ in range(2)] + [self.background(OTHER, now)]
-            with self.bot.arrived:  # each read says when it waits; a slow runner takes its time getting there (T-626)
+            with self.bot.arrived:  # each read says when it waits; a slow runner takes its time getting there
                 self.bot.arrived.wait_for(lambda: self.bot.waiting == {"grok": 2, "other": 1}, timeout=30)
             self.assertEqual(self.bot.waiting, {"grok": 2, "other": 1})
             # A third for grok is over its cap, and one more for other is over the cap for everyone: both refused at once.
@@ -399,7 +399,7 @@ class AgentsChannelTest(unittest.TestCase):
 
     def test_switching_the_channel_off_ends_waiting_reads(self):
         # A wait far longer than the test, so only the close can end it; and closed only once the read says it waits,
-        # or it never tests the wake. A slow runner can take seconds to get there (T-626).
+        # or it never tests the wake. A slow runner can take seconds to get there.
         t, box = self.background(GROK, {"since": time.time(), "wait_s": 60})
         with self.bot.arrived:
             self.assertTrue(self.bot.arrived.wait_for(lambda: self.bot.waiting, timeout=30), "the read never started waiting")
