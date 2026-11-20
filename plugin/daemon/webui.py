@@ -595,7 +595,8 @@ async function refresh(force,snap){
   const ghosts=Object.entries(leadOf).filter(([n,l])=>!l.live).map(([n,l])=>ghost(n,l));
   const inside={},kids={},leads={};for(const x of [...p.peers,...ghosts])if(x.parent){(leads[x.space]??=[]).push(x);if(!inside[x.space]){inside[x.space]={parent:x.parent,lead:x.name,peer:x};(kids[x.parent]??=[]).push(x.space)}}
   for(const n in inside)inside[n].lead=leads[n].map(x=>x.name).join(', ');
-  for(const n of Object.keys(kids))if(!groups[n])groups[n]=[];
+  // A nested space whose only agent is its offline lead has no live members, but it still gets a box.
+  for(const n of [...Object.keys(kids),...Object.keys(inside)])if(!groups[n])groups[n]=[];
   // An agent you added to other spaces shows once, in its own space, with a badge for each space it also joined.
   // The Spaces chart still names it in each of them, with its own space beside it.
   const joined={};for(const x of p.peers)for(const n of x.also||[])(joined[n]??=[]).push(x);
@@ -606,7 +607,7 @@ async function refresh(force,snap){
   const tops=n=>[...(groups[n]||[]).filter(x=>x.leads&&!x.parent),...ghosts.filter(x=>x.space===n&&!x.parent)].sort(rank);
   // A space's box: its members, then the leads of the spaces under it.
   const isLead=(x,n)=>!!(inside[n]&&inside[n].parent!==n&&x.parent&&x.space===n);
-  const members=n=>[...groups[n].filter(x=>!isLead(x,n)&&!(x.leads&&!x.parent)).sort(rank).sort((a,b)=>a.name.localeCompare(b.name)),
+  const members=n=>[...(groups[n]||[]).filter(x=>!isLead(x,n)&&!(x.leads&&!x.parent)).sort(rank).sort((a,b)=>a.name.localeCompare(b.name)),
     ...(kids[n]||[]).filter(c=>c!==n).sort().map(c=>inside[c].peer)];
   const short=d=>{const t=tilde(d).split('/');return t.length>3?'…/'+t.slice(-2).join('/'):t.join('/')};
   const state=x=>(x.busy?'working':'idle')+(x.busy_since?' '+ago(x.busy_since):'');
@@ -647,7 +648,7 @@ async function refresh(force,snap){
     return `<div class="spick"><label>Lead<select data-splead="${esc(n)}"><option value="">${cur?'no lead':'none yet'}</option>${folders.map(([c,nm])=>`<option value="${esc(c)}" ${cur&&cur.cwd===c?'selected':''}>${esc(nm)}${cur&&cur.cwd===c&&cur.how==='only'?' (was alone)':''}</option>`).join('')}</select></label>
       <label>Inside<select data-spparent="${esc(n)}"><option value="">top level</option>${others.map(o=>`<option ${o===up?'selected':''}>${esc(o)}</option>`).join('')}</select></label></div>`};
   const sunit=(n,seen)=>{if(seen.has(n))return '';seen.add(n);
-    const own=[...groups[n].filter(x=>!isLead(x,n)&&!(x.leads&&!x.parent)).map(x=>esc(x.name)),...(joined[n]||[]).map(x=>esc(x.name)+` <span class="mut">(${esc(x.space||'default')})</span>`)];
+    const own=[...(groups[n]||[]).filter(x=>!isLead(x,n)&&!(x.leads&&!x.parent)).map(x=>esc(x.name)),...(joined[n]||[]).map(x=>esc(x.name)+` <span class="mut">(${esc(x.space||'default')})</span>`)];
     const ledBy=inside[n]?inside[n].lead:tops(n).map(x=>x.name+(x.offline?' (offline)':'')).join(', ');
     const ch=(kids[n]||[]).filter(c=>c!==n&&!seen.has(c)).sort();
     return `<div class="ocol"><div class="sbox${ledBy?' led':''}"><div class="name">${esc(lbl(n))}</div>
@@ -666,7 +667,7 @@ async function refresh(force,snap){
   const lspace=(n,seen)=>{if(seen.has(n))return '';seen.add(n);
     const nested=inside[n]&&inside[n].parent!==n;
     const head=nested?(leads[n]||[]):tops(n);
-    const own=[...groups[n].filter(x=>!isLead(x,n)&&!(x.leads&&!x.parent)).sort(rank).sort((a,b)=>a.name.localeCompare(b.name))];
+    const own=[...(groups[n]||[]).filter(x=>!isLead(x,n)&&!(x.leads&&!x.parent)).sort(rank).sort((a,b)=>a.name.localeCompare(b.name))];
     const ch=(kids[n]||[]).filter(c=>c!==n&&!seen.has(c)).sort();
     const body=own.map(lrow).join('')+ch.map(c=>lspace(c,seen)).join('');
     // Counted as the chart counts: a top-level lead and the leads of teams inside sit with this space; a team's own lead sits with its parent.
