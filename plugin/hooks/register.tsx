@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.9.62'
+const DAEMON_VERSION = '0.9.63'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -784,8 +784,15 @@ async function clearNow($: EngineInterface) {
   if (!clearing) return
   clearing = false
   $.ui.toast(`peerlink: clearing context, as asked ${clearAskedBy || 'from the web UI'}`)
+  const own = !!handoff
   clearAskedBy = ''
   await $.command.run({ command: 'clear' }).catch(() => undefined)
+  // Cleared by its own choice between tasks: start the fresh context on its notes rather than leave it idle until
+  // someone writes, since the notes usually name what's next. Not while the usage limit holds, nor with wake off.
+  if (own && !limit && cfg?.auto_wake_idle !== false)
+    await $.prompt
+      .submit({ text: "You cleared your context after your last task. Carry on from the notes you left yourself: start what they name as next, or, if nothing is, end the turn in one line." })
+      .catch(() => undefined)
 }
 
 async function poll($: EngineInterface) {
@@ -1682,7 +1689,7 @@ export const register: Register = (on, options) => {
     await $.tool.register({
       name: 'clear_context',
       description:
-        "Clear your own context when you finish a task, so the next one starts small: every turn re-reads your whole context, and a large one drains your user's usage limit fast. First save anything worth keeping past this task to your memory (or the project's notes), then call this with a short handoff. Your context clears once this turn ends; messages waiting for you, your open tasks and your open threads all carry over.",
+        "Clear your own context when you finish a task, so the next one starts small: every turn re-reads your whole context, and a large one drains your user's usage limit fast. First save anything worth keeping past this task to your memory (or the project's notes), then call this with a short handoff. Your context clears once this turn ends and a fresh turn starts on your notes, so name what's next in them; messages waiting for you, your open tasks and your open threads all carry over.",
       inputSchema: {
         type: 'object',
         properties: {
