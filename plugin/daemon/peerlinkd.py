@@ -33,7 +33,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.50"
+VERSION = "0.9.51"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -5798,7 +5798,7 @@ class Handler(BaseHTTPRequestHandler):
         return bool(token) and hmac.compare_digest(self.headers.get("X-Peerlink-Token", ""), token)
 
     def same_origin(self):
-        """A browser's write says where it comes from; one that doesn't isn't taken as yours (T-564)."""
+        """A browser's write says where it comes from; one that doesn't isn't taken as yours."""
         origin = self.headers.get("Origin")
         return bool(origin) and origin == f"http://{self.headers.get('Host', '')}"
 

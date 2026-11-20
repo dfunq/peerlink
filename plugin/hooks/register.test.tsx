@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.9.50', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.9.51', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (state.forget && path.endsWith('/heartbeat') && 'busy' in body) {
       state.forget = false
       return { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'unknown agent; register again' }) } }
@@ -410,14 +410,14 @@ test('the summary model writes a headline for lists, then the summary', async ($
 
 test('a headline and summary the model labelled on one line are split, without the labels', async ($, on) => {
   const { answer } = engine(on, { turns: 4 })
-  answer('Line 1: Pushing the webhook fix Line 2: Fixing webhook ordering in webshop; can answer on T-294')
+  answer('Line 1: Pushing the webhook fix Line 2: Fixing webhook ordering in webshop; can answer on ACME-294')
   const daemon = fakeDaemon(on)
   await $.session.start(START)
   await settle()
 
   const last = daemon.posted.filter(p => p.body?.summary).pop()
   expect(last?.body.headline).toBe('Pushing the webhook fix')
-  expect(last?.body.summary).toBe('Fixing webhook ordering in webshop; can answer on T-294')
+  expect(last?.body.summary).toBe('Fixing webhook ordering in webshop; can answer on ACME-294')
 })
 
 test('closing a task rewrites the summary when the turn ends, not eight turns later', async ($, on) => {
@@ -598,7 +598,7 @@ test('a message that arrives mid-turn and is left unanswered is put to the agent
   expect(woke.length).toBe(1)
 })
 
-test('deliveries asked for at once, by the wake timer and turns ending, submit a message once (T-550)', async ($, on) => {
+test('deliveries asked for at once, by the wake timer and turns ending, submit a message once', async ($, on) => {
   const { clock, woke } = engine(on)
   mock.session(on)
   on('turn.start', (_: any, e: any) => ({ turnId: e.turnId }))
@@ -980,7 +980,7 @@ test('a message acked on a turn that was not its prompt\'s is found missing from
   await settle()
   // The prompt is taken but never runs; a turn Claude Code runs of its own ends meanwhile, and reads as the prompt's.
   submits.lose = true
-  inbox.push({ id: 'm9', from: 'hq-id', from_name: 'hq', from_host: 'Mac', text: 'T-494: go', expects_reply: false, reply_to: null, hops: 0 })
+  inbox.push({ id: 'm9', from: 'hq-id', from_name: 'hq', from_host: 'Mac', text: 'ACME-494: go', expects_reply: false, reply_to: null, hops: 0 })
   await clock.advance(600000)
   for (let i = 0; i < 10; i++) await settle()
   expect(woke.length).toBe(1)
@@ -1034,13 +1034,13 @@ test('an agent clears its own context between tasks, and its notes start the fre
   await settle()
   const empty: any = await $.tool.call({ tool: 'mcp__peerlink__clear_context', notes: ' ' } as any)
   expect(JSON.stringify(empty)).toContain('Not cleared')
-  await $.tool.call({ tool: 'mcp__peerlink__clear_context', notes: 'T-32 server half on feat/pg-053; PR not opened yet' } as any)
+  await $.tool.call({ tool: 'mcp__peerlink__clear_context', notes: 'ACME-32 server half on feat/pg-053; PR not opened yet' } as any)
   expect(ran).toEqual([])
   await $.turn.complete(TURN)
   for (let i = 0; i < 5; i++) await settle()
   expect(ran).toEqual(['clear'])
   const out: any = await $.prompt.context({ blocks: [] } as any)
-  expect(out.blocks.find((b: any) => b.name === 'peerlink handoff').text).toContain('T-32 server half on feat/pg-053')
+  expect(out.blocks.find((b: any) => b.name === 'peerlink handoff').text).toContain('ACME-32 server half on feat/pg-053')
   const again: any = await $.prompt.context({ blocks: [] } as any)
   expect(again.blocks.some((b: any) => b.name === 'peerlink handoff')).toBe(false)
 })
@@ -1091,7 +1091,7 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.9.50 · daemon 0.9.50 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.9.51 · daemon 0.9.51 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the space is listed once', async ($, on) => {
@@ -1124,7 +1124,7 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.9.50')
+  expect(reg.plugin).toBe('0.9.51')
 })
 
 test('an agent registers again under the folder it started in, wherever the host has moved its root since', async ($, on) => {
@@ -1247,7 +1247,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.9.51', true], ['0.9.50', false]] as const)
+for (const [installed, reloads] of [['0.9.52', true], ['0.9.51', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     const daemon = fakeDaemon(on)

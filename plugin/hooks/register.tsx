@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.9.50'
+const DAEMON_VERSION = '0.9.51'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -1380,7 +1380,7 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
   if (!(await ensureDaemon($))) return 'The peerlink daemon is not running and could not start (it needs Python 3, as python3, python or py -3 on the PATH).'
   switch (sub) {
     case 'web': {
-      // The daemon asks you on screen and opens your browser itself: no agent ever holds a sign-in link (T-564).
+      // The daemon asks you on screen and opens your browser itself: no agent ever holds a sign-in link.
       const res = await call($, 'POST', '/api/web/link', {})
       if (!res.ok) return `Could not open the web UI: ${res.data.error ?? res.status}`
       if (res.data.url) {
