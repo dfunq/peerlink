@@ -33,7 +33,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.52"
+VERSION = "0.9.53"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -799,6 +799,71 @@ def set_lead(space, cwd, sid=""):
     return 200, {"space": space, "lead": new, "how": space_lead(space)[1]}
 
 
+def delete_space(space):
+    """You delete a space in the web UI: every setting that names it goes, so its folders and agents fall back to the
+    next source of their space (a .peerlink, else default) and spaces inside it move to the top. Running agents
+    whose .peerlink still names it stay in it; the answer lists those folders."""
+    space = clean_space(space)
+    if not space or space == DEFAULT_SPACE:
+        return 400, {"error": "pick a named space; the default space can't be deleted"}
+    with lock:
+        for k in ("space_leads", "space_parents"):
+            (config.get(k) or {}).pop(space, None)
+        for k in ("space_parents", "folder_spaces", "agent_spaces"):
+            d = config.get(k) or {}
+            for key in [key for key, v in d.items() if v == space]:
+                d.pop(key)
+        for k in ("space_members", "agent_members"):
+            for key, spaces in list((config.get(k) or {}).items()):
+                if space in spaces:
+                    config[k][key] = [s for s in spaces if s != space]
+        for s in config["sessions"].values():
+            if s.get("started_in") == space:
+                s.pop("started_in")
+        save_config()
+        forget_spaces()
+        files = sorted({r.get("cwd", "") for r in sessions.values() if is_live(r) and space_of(r)[0] == space})
+    log("space", space, "deleted in the web UI" + (f"; still named by the .peerlink in {', '.join(files)}" if files else ""))
+    return 200, {"space": space, "still_in_files": [tilde_path(f) for f in files]}
+
+
+def offline_agents(limit=300):
+    """Agents that aren't running now, newest first, for the web UI to list and delete."""
+    out = [{"id": a["id"], "name": a.get("name") or folder_name(a.get("cwd", "")), "cwd": a.get("cwd", ""), "seen": a.get("seen", 0)}
+           for a in agents.values() if not agent_session(a["id"])]
+    return sorted(out, key=lambda a: -a["seen"])[:limit]
+
+
+def delete_agent(aid):
+    """You delete an agent that isn't running, in the web UI: its record, its sessions' settings, the spaces and
+    links you set for it, and a lead it held that nobody runs in now. Messages queued for it still wait for its
+    folder's next agent."""
+    with lock:
+        a = agents.get(aid)
+        if not a:
+            return 404, {"error": "no such agent"}
+        if agent_session(aid):
+            return 409, {"error": f"{a.get('name') or aid} is running; end it first, or it registers again"}
+        agents.pop(aid)
+        for sid in [s for s, v in agent_of.items() if v == aid]:
+            agent_of.pop(sid)
+            config["sessions"].pop(sid, None)
+        for k in ("agent_spaces", "agent_members"):
+            (config.get(k) or {}).pop(aid, None)
+        if config.get("agent_links"):
+            config["agent_links"] = [p for p in config["agent_links"] if aid not in p]
+        cwd = a.get("cwd", "")
+        nobody_there = not any(is_live(r) and r.get("cwd") == cwd for r in sessions.values())
+        for space, lead in list((config.get("space_leads") or {}).items()):
+            if lead.get("agent") == aid or (cwd and lead.get("cwd") == cwd and nobody_there):
+                config["space_leads"].pop(space)
+        save_agents()
+        save_config()
+        forget_spaces()
+    log("agent", a.get("name") or aid, "deleted in the web UI")
+    return 200, {"deleted": aid, "name": a.get("name", "")}
+
+
 def leads_view():
     """Every space's lead for the web UI, an offline one too, so it stays pinned (greyed) at the top of its space."""
     with lock:
@@ -1160,7 +1225,8 @@ def snapshot():
         issues = sorted(feedback.values(), key=lambda i: i["ts"])[-500:]
         sched = sorted(schedules.values(), key=lambda c: -c["created"])[:200]
         status["limit"] = limit_view()
-    return {"schedules": {"schedules": [sched_view(c) for c in sched]},"status": status, "peers": {"host": HOSTNAME, "peers": peers, "leads": leads_view()}, "messages": {"messages": msgs},
+        offline = offline_agents()
+    return {"schedules": {"schedules": [sched_view(c) for c in sched]},"status": status, "peers": {"host": HOSTNAME, "peers": peers, "leads": leads_view(), "offline": offline}, "messages": {"messages": msgs},
             "tasks": {"tasks": task_list}, "issues": {"issues": issues, "path": ISSUES_PATH}, "inbox": {"items": inbox_items(), "user": USER_NAME}}
 
 
@@ -5393,6 +5459,72 @@ def ended_and_old(items, live, now):
             and now - (x.get("updated") or x.get("created") or x.get("ts") or now) > KEEP_ENDED_S]
 
 
+CLEAN_PARTS = ("spaces", "agents", "history", "tasks", "schedules")
+SPACE_KEYS = ("folder_spaces", "space_parents", "space_leads", "space_members", "agent_spaces", "agent_members", "agent_links")
+
+
+def start_clean(parts):
+    """Start the chosen parts of peerlink over, from the web UI. What each clears:
+    spaces    the spaces, leads, nesting and links you set; a folder's .peerlink still applies
+    agents    every agent not running now, its settings and what it last did; running agents stay as they are
+    history   the message log, except messages still waiting to be delivered
+    tasks     every task
+    schedules every schedule
+    Rules, settings, chat channels, outside clients and the key are never touched. The files it changes are copied
+    first to backups/clean-<time>, so putting them back (with the daemon stopped) undoes it."""
+    parts = [p for p in CLEAN_PARTS if p in (parts or [])]
+    if not parts:
+        return 400, {"error": "pick at least one of: " + ", ".join(CLEAN_PARTS)}
+    cleared = {}
+    with lock:
+        stamp, n = os.path.join(HOME, "backups", time.strftime("clean-%Y%m%d-%H%M%S")), 1
+        backup = stamp
+        while os.path.exists(backup):  # two in one second each keep their own
+            n += 1
+            backup = f"{stamp}-{n}"
+        os.makedirs(backup, mode=0o700)
+        for path in (CONFIG_PATH, AGENTS_PATH, DIRS_PATH, TASKS_PATH, SCHEDULES_PATH, MESSAGES_PATH, MESSAGES_PATH + ".1"):
+            if os.path.exists(path):
+                shutil.copy2(path, backup)
+        if "spaces" in parts:
+            cleared["spaces"] = sum(len(config.get(k) or ()) for k in SPACE_KEYS)
+            for k in SPACE_KEYS:
+                config[k] = [] if k == "agent_links" else {}
+            for s in config["sessions"].values():
+                s.pop("started_in", None)
+        if "agents" in parts:
+            gone = [aid for aid in agents if not agent_session(aid)]
+            for aid in gone:
+                agents.pop(aid)
+            for sid in [s for s, aid in agent_of.items() if aid not in agents]:
+                agent_of.pop(sid)
+            for sid in [s for s in config["sessions"] if not (s in sessions and is_live(sessions[s]))]:
+                config["sessions"].pop(sid)
+            dir_summaries.clear()
+            write_json(DIRS_PATH, dir_summaries)
+            save_agents()
+            cleared["agents"] = len(gone)
+        if "spaces" in parts or "agents" in parts:
+            save_config()
+            forget_spaces()
+        if "history" in parts:
+            waiting = [m for m in messages if m.get("status") == "queued"]
+            cleared["history"] = len(messages) - len(waiting)
+            messages[:] = waiting
+            if os.path.exists(MESSAGES_PATH + ".1"):
+                os.remove(MESSAGES_PATH + ".1")
+            write_file(MESSAGES_PATH, "".join(json.dumps(m) + "\n" for m in waiting), backup=False)
+            with log_index.lock:
+                log_index.reset()
+        for name, items, save in (("tasks", tasks, save_tasks), ("schedules", schedules, save_schedules)):
+            if name in parts:
+                cleared[name] = len(items)
+                items.clear()
+                save()
+    log("start clean: " + ", ".join(f"{k} {v}" for k, v in cleared.items()) + "; the files before it are in", backup)
+    return 200, {"cleared": cleared, "backup": backup}
+
+
 def tidy():
     now = time.time()
     last_tidy[0] = now
@@ -5869,6 +6001,12 @@ class Handler(BaseHTTPRequestHandler):
             log("key rotated")
             return self.reply(200, {"ok": True})
 
+        if rest == ["clean"] and method == "POST":
+            # Only you, in the browser: no agent wipes the record of what other agents did.
+            if not browser or self.key_ok():
+                return self.reply(403, {"error": "Start clean works only from the web UI in your browser"})
+            return self.reply(*start_clean(self.body().get("parts")))
+
         if rest == ["snapshot"] and method == "GET":
             return self.reply(200, snapshot())
         if rest == ["stream"] and method == "GET":
@@ -6210,6 +6348,15 @@ class Handler(BaseHTTPRequestHandler):
             # With an agent's id, that agent alone; without, the folder (agents opened there later, and any not placed).
             code, out = set_agent_space(str(b["id"]), b.get("space")) if b.get("id") else set_folder_space(str(b.get("cwd") or ""), b.get("space"))
             return self.reply(code, out)
+        if len(rest) == 3 and rest[0] == "spaces" and rest[2] == "delete" and method == "POST":
+            if not browser or self.key_ok():
+                return self.reply(403, {"error": "a space is deleted in the web UI"})
+            return self.reply(*delete_space(rest[1]))
+        if len(rest) == 3 and rest[0] == "agents" and rest[2] == "delete" and method == "POST":
+            # Only you, in the browser: no agent erases another.
+            if not browser or self.key_ok():
+                return self.reply(403, {"error": "an agent is deleted in the web UI"})
+            return self.reply(*delete_agent(rest[1]))
         if len(rest) == 3 and rest[0] == "spaces" and rest[2] == "parent" and method == "POST":
             if not browser or self.key_ok():
                 return self.reply(403, {"error": "where a space sits is set in the web UI"})

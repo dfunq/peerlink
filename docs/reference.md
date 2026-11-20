@@ -16,7 +16,7 @@ Everything peerlink does, in detail. For what it is and how to start, see the [R
 | `clear_context` | Clears the agent's own context once a task is done, after it saves what matters to memory; its handoff notes start the fresh context. The default guidance asks every agent to do this between tasks, since each turn re-reads the whole context and a large one drains the usage limit |
 | `report_issue` | Reports a bug in peerlink itself, such as a reply that never arrived, or an idea for improving it. Only when the `feedback` setting is on; see [Feedback: bugs and ideas](#feedback-bugs-and-ideas) |
 | `rename` | Changes the agent's own name, such as when it shares a folder with another agent. Kept across `/clear` |
-| `set_role` | For a [space lead](#space-leads): sets the role of an agent in its space or a space inside it. Kept across `/clear`, and the agent is told |
+| `set_role` | Sets the agent's own role, such as when you ask it to, or, for a [space lead](#space-leads), the role of an agent in its space or a space inside it. Kept across `/clear`, and another agent whose role is set is told |
 
 `rename` and `set_role` are deferred: Claude Code loads them when an agent needs them, so they don't take up room in every prompt. `report_issue` is for people developing peerlink, so it's off unless you turn it on.
 
@@ -59,6 +59,8 @@ An agent's space belongs to its folder, so every agent opened there is in it, ac
 **Also in other spaces.** Rarely needed: under **Also in other spaces** on the Details tab, you can make an agent a member of more spaces on top of its own. It sees and messages their agents, and they see it. On the Agents page it stays in its own space, with a badge for each extra one, such as `+acme`. It's kept for its folder (`space_members` in the config). Only you can set it, in the web UI: an agent can't add itself to a space.
 
 **Linked agents.** To let two agents talk without changing anyone's space, open one on the Agents page and list the other under **Linked with other agents** on its Details tab. The two then see each other in `list_peers` and message each other, whatever spaces they're in, and both are told. Nobody else's reach changes, and announcements still go by space. A link is kept for the agents (`agent_links` in the config), so it lasts through `/clear` and restarts. It works between agents on this machine. On the Agents page each shows a badge such as `↔core`. Only you can set links, in the web UI.
+
+**Deleting a space.** Press **Delete space** in its box on the Spaces page. Every setting that names it goes: its folders and agents fall back to their `.peerlink` space, else unassigned, its lead is cleared, and spaces inside it move to the top. A running agent whose `.peerlink` still names the space stays in it, and you're told which folders those are.
 
 Space names are lowercased. Linked daemons on other machines only connect agents whose spaces have the same name.
 
@@ -239,6 +241,10 @@ Once approved, the daemon starts Claude Code in that folder: in tmux when tmux i
 **Clearing its context:** open an agent's panel in the web UI and press **Clear context** on its **Controls** tab. The agent runs `/clear` once the turn it's in ends. It keeps its name, space and role, and is given back what it still owes peers. Only you can do this, from the web UI.
 
 **Ending:** open an agent's panel in the web UI and press **Terminate** on its **Controls** tab, or send `/kill <name>` on Discord and confirm with the button. The agent finishes the turn it's in, then its session exits. If it's still running a minute later, the daemon stops its process, after checking it is a Claude Code process. Agents can't end each other. Every termination is logged in `~/.peerlink/terminations.jsonl`, with who asked.
+
+**Deleting an offline agent:** the Agents page lists the agents that aren't running under **Offline agents**, kept 60 days. **Delete** removes one with its settings, the spaces and links you set for it, and a lead it held in a folder where nothing runs now. Messages queued for it still wait for its folder's next agent. A running agent can't be deleted, because it would register again at once; end it first. An offline lead pinned at the top of its space has a **Remove** button that does the same, and if no record of the agent is left, it just stops leading.
+
+**Starting clean:** on the Controls page, tick what to clear and press **Start clean**. You can clear spaces, leads and links, offline agents, message history (messages still waiting to be delivered stay), tasks, and schedules. Rules, settings, chat channels, outside clients, the key and running agents are never touched. The files it changes are first copied to `~/.peerlink/backups/clean-<time>/`; to undo it, stop the daemon and copy them back. Like deleting agents and spaces, it works only from your browser. An agent holding the key is refused.
 
 ## Schedules
 

@@ -1,8 +1,10 @@
 """Tests for what 0.9.0 added to the daemon: a task's record and its notes, standing rules, and questions with a
 default. Run: python3 -m unittest discover -s plugin/daemon"""
+import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 import unittest.mock
 
@@ -548,3 +550,101 @@ class SpawnToldTest(unittest.TestCase):
             peerlinkd.config["folder_names"], peerlinkd.config["auto_approve_folders"] = keep[0], keep[1]
             peerlinkd.launch, peerlinkd.save_spawns = keep[2], keep[3]
             peerlinkd.inboxes.clear()
+
+
+class CleanTest(unittest.TestCase):
+    """Starting clean, and deleting one agent or one space, from the web UI: only what you pick goes, rules never."""
+
+    KEYS = peerlinkd.SPACE_KEYS + ("sessions",)
+
+    def setUp(self):
+        import copy
+        peerlinkd.load_config()
+        d = peerlinkd
+        self.kept = copy.deepcopy(({k: d.config.get(k) for k in self.KEYS}, d.agents, d.agent_of, d.tasks, d.schedules,
+                                   d.messages, d.rules, d.dir_summaries))
+        self.addCleanup(self.restore)
+        now = time.time()
+        d.config.update({"folder_spaces": {"/x/a": "team", "/x/b": "sub"}, "space_parents": {"sub": "team"},
+                         "space_leads": {"team": {"cwd": "/x/old", "how": "set"}, "sub": {"cwd": "/x/b", "how": "only"}},
+                         "space_members": {"/x/a": ["team", "ops"]}, "agent_spaces": {"a-old": "team"},
+                         "agent_members": {"a-live": ["team"]}, "agent_links": [["a-live", "a-old"]],
+                         "sessions": {"s-live": {"role": "builds"}, "s-old": {"nickname": "gone"}, "s-gone@a-old": {}}})
+        d.sessions["s-live"] = {"id": "s-live", "name": "live", "cwd": "/x/a", "agent": "a-live", "last_seen": now}
+        self.addCleanup(lambda: d.sessions.pop("s-live", None))
+        d.agents.clear()
+        d.agents.update({"a-live": {"id": "a-live", "name": "live", "cwd": "/x/a", "seen": now},
+                         "a-old": {"id": "a-old", "name": "old", "cwd": "/x/old", "seen": now - 86400}})
+        d.agent_of.clear()
+        d.agent_of.update({"s-live": "a-live", "s-old": "a-old", "s-gone@a-old": "a-old"})
+        d.messages[:] = [{"id": "m1", "status": "delivered", "text": "done"}, {"id": "m2", "status": "queued", "text": "waiting"}]
+        d.tasks.clear()
+        d.tasks["t1"] = {"id": "t1", "status": "open", "created": now}
+        d.schedules.clear()
+        d.schedules["c1"] = {"id": "c1", "status": "active", "created": now}
+        d.rules.clear()
+        d.rules["r1"] = {"id": "r1", "text": "Never merge on Friday."}
+
+    def restore(self):
+        d = peerlinkd
+        conf, agents, agent_of, tasks, schedules, messages, rules, dirs = self.kept
+        d.config.update(conf)
+        for store, was in ((d.agents, agents), (d.agent_of, agent_of), (d.tasks, tasks), (d.schedules, schedules),
+                           (d.rules, rules), (d.dir_summaries, dirs)):
+            store.clear()
+            store.update(was)
+        d.messages[:] = messages
+        d.forget_spaces()
+
+    def test_start_clean_clears_what_you_tick_keeps_rules_and_running_agents_and_backs_up_first(self):
+        d = peerlinkd
+        self.assertEqual(d.start_clean([])[0], 400)
+        self.assertEqual(d.start_clean(["rules"])[0], 400)  # not something it clears
+        code, out = d.start_clean(["spaces", "agents", "history", "tasks", "schedules"])
+        self.assertEqual(code, 200, out)
+        self.assertEqual(out["cleared"], {"spaces": 9, "agents": 1, "history": 1, "tasks": 1, "schedules": 1})
+        self.assertTrue(os.path.exists(os.path.join(out["backup"], "config.json")))
+        self.assertEqual({k: d.config[k] for k in d.SPACE_KEYS}, {k: [] if k == "agent_links" else {} for k in d.SPACE_KEYS})
+        self.assertEqual(list(d.agents), ["a-live"])
+        self.assertEqual(d.agent_of, {"s-live": "a-live"})
+        self.assertEqual(d.config["sessions"], {"s-live": {"role": "builds"}})  # a running agent keeps its role
+        self.assertEqual([m["id"] for m in d.messages], ["m2"])  # still waiting to be delivered
+        with open(d.MESSAGES_PATH) as f:
+            self.assertEqual([json.loads(line)["id"] for line in f], ["m2"])
+        self.assertEqual((d.tasks, d.schedules), ({}, {}))
+        self.assertEqual(list(d.rules), ["r1"])
+
+    def test_start_clean_of_history_alone_leaves_spaces_and_agents(self):
+        d = peerlinkd
+        code, out = d.start_clean(["history"])
+        self.assertEqual(out["cleared"], {"history": 1})
+        self.assertEqual(sorted(d.agents), ["a-live", "a-old"])
+        self.assertEqual(d.config["folder_spaces"]["/x/a"], "team")
+        self.assertEqual(list(d.tasks), ["t1"])
+
+    def test_deleting_a_space_drops_every_setting_that_names_it_and_its_children_move_to_the_top(self):
+        d = peerlinkd
+        self.assertEqual(d.delete_space("default")[0], 400)
+        code, out = d.delete_space("team")
+        self.assertEqual(code, 200, out)
+        self.assertEqual(d.config["folder_spaces"], {"/x/b": "sub"})
+        self.assertEqual(d.config["space_parents"], {})
+        self.assertNotIn("team", d.config["space_leads"])
+        self.assertEqual(d.config["space_members"], {"/x/a": ["ops"]})
+        self.assertEqual((d.config["agent_spaces"], d.config["agent_members"]), ({}, {"a-live": []}))
+        self.assertEqual(d.space_of(d.sessions["s-live"])[0], d.DEFAULT_SPACE)
+
+    def test_deleting_an_agent_takes_an_offline_one_whole_and_refuses_a_running_one(self):
+        d = peerlinkd
+        self.assertEqual([a["id"] for a in d.offline_agents()], ["a-old"])
+        self.assertEqual(d.delete_agent("a-live")[0], 409)
+        self.assertEqual(d.delete_agent("nobody")[0], 404)
+        code, out = d.delete_agent("a-old")
+        self.assertEqual(code, 200, out)
+        self.assertEqual(list(d.agents), ["a-live"])
+        self.assertEqual(d.agent_of, {"s-live": "a-live"})
+        self.assertEqual(sorted(d.config["sessions"]), ["s-live"])
+        self.assertEqual((d.config["agent_spaces"], d.config["agent_links"]), ({}, []))
+        self.assertNotIn("team", d.config["space_leads"])  # it led from a folder where nothing runs now
+        self.assertIn("sub", d.config["space_leads"])
+        self.assertEqual(d.offline_agents(), [])
