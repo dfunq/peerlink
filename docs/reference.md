@@ -188,6 +188,22 @@ Talk to your agents from Slack, in a direct message with your app or a channel i
 - **Agents send** to `"slack"`, or `"slack#<channel>"` when they're in several.
 - **Allowed people** are Slack member ids (`U…`); another app's bot can be trusted by its user id through `trusted_bots` in `~/.peerlink/discord.json`.
 
+## Teams
+
+Talk to your agents in a Microsoft Teams chat. There's no bot and nothing to register: peerlink signs in as you and reads and posts in the chats you map, through Microsoft Graph. Open **Channels** in the web UI:
+
+1. **Sign in with Microsoft.** You get a code to enter at microsoft.com/devicelogin, then sign in with your work account. The sign-in goes through Microsoft's own **Graph Command Line Tools** app (the one PowerShell's `Connect-MgGraph` uses), asking for `User.Read` and `Chat.ReadWrite`. That name is what your company's sign-in log shows. If your company blocks that app, or won't let you approve chat access yourself, use **Use your own app instead** with an Entra app of your own: a public client ("Allow public client flows" on) with those two delegated permissions.
+2. **Map chats to agents**, under Channel ⇄ Agent Mappings. Your chats are listed, with **Chat with yourself** where your tenant allows it. Only mapped chats are read, every few seconds.
+
+- **Your agents post as you,** each post starting with the agent's name. A mark you can't see tells peerlink which posts are its own, so it never reads them back as yours.
+- **Questions** come as a numbered list, because Teams chats have no buttons. Answer with the number or the option's words. Quote the question when several are open.
+- **Commands are typed as words,** `peerlink status` or `peerlink run loop 5m check the deploy`, because Teams keeps `/` for its own.
+- **Files:** images you paste reach the agent. Files shared from OneDrive or SharePoint are named but not opened, and agents can't send files to Teams.
+- **In a group chat,** only you are heard until you allow others. Whoever writes is listed on the Channels page with an **Allow** button. Allowed people are Entra user ids.
+- **Agents send** to `"teams"`, or `"teams#<chat>"` when they're in several.
+- **Messages from before peerlink started reading a chat are not delivered.** A message written while the daemon restarts may be missed.
+- **Setup is from your browser only.** The refresh token is kept in `~/.peerlink/discord.json` (0600) and never sent back to the browser. Signing out keeps the chat mappings.
+
 ## Agents (outside agents over MCP)
 
 An AI agent that isn't on this machine, any MCP client (Grok, another company's bot), can talk to one of your agents through the **Agents** channel. Each client is a chat of its own, `agents:<name>`, mapped to agents under Channel ⇄ Agent Mappings like any other chat.
@@ -484,7 +500,9 @@ plugin/daemon/telegramlink.py     the Telegram bot: long polling, buttons, comma
 plugin/daemon/test_chat.py        tests for the chat layer, against a fake Discord
 plugin/daemon/test_telegram.py    tests for the Telegram bot, against a fake Bot API
 plugin/daemon/slacklink.py        the Slack app: Socket Mode, buttons, the /peerlink command, reactions
+plugin/daemon/teamslink.py        Teams, signed in as you: device-code sign-in, Graph polling, numbered answers
 plugin/daemon/test_slack.py       tests for the Slack app, against a fake Web API and websocket
+plugin/daemon/test_teams.py       tests for Teams, against a fake Microsoft sign-in and Graph
 plugin/daemon/agentslink.py       the Agents channel: outside agents over MCP, two tools, per-client tokens
 plugin/daemon/test_agents.py      its tests
 plugin/daemon/peerlink_mcp.py     an MCP endpoint for clients outside Claude Code

@@ -33,13 +33,14 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.55"
+VERSION = "0.9.56"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
 import chatlink  # noqa: E402  (beside this file; installs nothing)
 import discordlink  # noqa: E402
 import telegramlink  # noqa: E402
+import teamslink  # noqa: E402
 import slacklink  # noqa: E402
 import agentslink  # noqa: E402
 from cronlib import cron_next, parse_cron  # noqa: E402,F401
@@ -47,7 +48,7 @@ from webui import UI_HTML  # noqa: E402
 
 # A fingerprint of the daemon's code: this file and the modules beside it together.
 _h = hashlib.sha256()
-for _name in ("peerlinkd.py", "chatlink.py", "discordlink.py", "telegramlink.py", "slacklink.py", "cronlib.py", "webui.py"):
+for _name in ("peerlinkd.py", "chatlink.py", "discordlink.py", "telegramlink.py", "slacklink.py", "teamslink.py", "cronlib.py", "webui.py"):
     with open(os.path.join(_here, _name), "rb") as _f:
         _h.update(_f.read())
 CODE = _h.hexdigest()[:16]
@@ -1541,6 +1542,12 @@ SLACK = {"token": "", "app_token": "", "user": "", "team": "", "enabled": True,
          "trusted_bots": [],
          "chats": {},  # "slack:<id>" -> name, every conversation the app is in
          "strangers": []}
+# Teams, signed in as you (teamslink): `token` is the refresh token, `client_id` an app of your own or "" for the
+# default. Its chats map to agents in `routes`, as "teams:<chat id>"; only mapped chats are read.
+TEAMS = {"token": "", "client_id": "", "tenant": "", "user": "", "enabled": True,
+         "allowed_users": [],  # Entra user ids besides yours, for group chats
+         "chats": {},  # "teams:<id>" -> title, your chats
+         "strangers": []}
 # Agents outside this machine, over MCP (agentslink): each client is a chat, "agents:<name>", mapped like any other.
 # Only its token's sha256 is kept. Clients are added and revoked with `peerlinkd.py agents ...`; where a new one lands
 # (default_to) and the channel's switch are yours, from the web UI.
@@ -1558,7 +1565,9 @@ DISCORD_FILES = os.path.join(HOME, "files", "discord")  # what you attach on Dis
 discord_bot = [None]
 telegram_bot = [None]
 slack_bot = [None]
+teams_bot = [None]
 agents_bot = [None]
+teams_signin = {}  # a device code waiting to be entered: {user_code, verification_uri, expires_at, error}
 
 
 def load_discord():
@@ -1566,7 +1575,7 @@ def load_discord():
     if isinstance(data, dict):
         discord.update(data)
     discord["routes"] = [clean_route(r) for r in discord.get("routes", []) if r.get("channel_id")]
-    for key, defaults in (("telegram", TELEGRAM), ("slack", SLACK), ("agents", AGENTS)):
+    for key, defaults in (("telegram", TELEGRAM), ("slack", SLACK), ("teams", TEAMS), ("agents", AGENTS)):
         own = discord.setdefault(key, {})
         for k, v in defaults.items():
             own.setdefault(k, json.loads(json.dumps(v)))
@@ -1657,6 +1666,64 @@ def start_slack():
         bot.chats = dict(sl.get("chats") or {})
         bot.on_command = on_slash
         bot.on_chat, bot.on_stranger = chat_seen("slack"), chat_stranger("slack")
+
+
+def teams_watch():
+    """The Teams chats mapped to an agent: the ones read."""
+    return [r["channel_id"] for r in discord.get("routes", []) if r["channel_id"].startswith("teams:")]
+
+
+def teams_refreshed(token):
+    with lock:
+        discord["teams"]["token"] = token
+        save_discord()
+
+
+def start_teams():
+    old = teams_bot[0]
+    if old:
+        old.close()
+    teams_bot[0] = None
+    tm = discord["teams"]
+    if tm.get("token") and tm.get("enabled", True):
+        auth = teamslink.Auth(tm.get("client_id", ""), tm.get("tenant", ""), tm["token"], teams_refreshed)
+        bot = teams_bot[0] = teamslink.Bot(auth, on_discord, log, on_press, teams_watch)
+        bot.allowed_users = set(tm.get("allowed_users") or [])
+        bot.chats = dict(tm.get("chats") or {})
+        bot.on_command = on_slash
+        bot.on_chat, bot.on_stranger = chat_seen("teams"), chat_stranger("teams")
+
+
+def teams_sign_in(client_id, tenant):
+    """Starts Microsoft's device code sign-in; a thread waits for the code to be entered, then keeps the token."""
+    code = teamslink.start_sign_in(client_id, tenant)
+    with lock:
+        teams_signin.clear()
+        teams_signin.update({k: code[k] for k in ("user_code", "verification_uri", "expires_at")}, error="")
+    me = teams_signin
+
+    def wait():
+        while time.time() < code["expires_at"] and teams_signin is me and me.get("user_code") == code["user_code"]:
+            time.sleep(code["interval"])
+            try:
+                tokens = teamslink.finish_sign_in(client_id, tenant, code["device_code"])
+            except teamslink.TeamsError as err:
+                me["error"] = str(err)
+                return
+            if tokens:
+                with lock:
+                    discord["teams"].update({"token": tokens["refresh_token"], "client_id": client_id, "tenant": tenant, "enabled": True})
+                    save_discord()
+                    me.clear()
+                start_teams()
+                bot = teams_bot[0]
+                if bot:
+                    bot.auth.take(tokens)
+                return
+        if me.get("user_code") == code["user_code"]:
+            me["error"] = "the code expired before it was entered; start again"
+    threading.Thread(target=wait, name="teams-sign-in", daemon=True).start()
+    return code
 
 
 def start_agents():
@@ -2261,7 +2328,7 @@ def telegram_migrate(old, new):
 # Chat platforms: every post, reaction and button press goes through these, which pick the platform's module by the
 # channel id (chatlink): Discord's are bare digits, Telegram's "tg:<chat id>", Slack's "slack:<channel id>".
 ChatError = chatlink.ChatError
-CHAT_LINKS = {"discord": discordlink, "telegram": telegramlink, "slack": slacklink, "agents": agentslink}
+CHAT_LINKS = {"discord": discordlink, "telegram": telegramlink, "slack": slacklink, "teams": teamslink, "agents": agentslink}
 
 
 def chat_token(platform):
@@ -2281,7 +2348,7 @@ def chat_link(channel_id):
 def chat_bot(channel_id):
     """The running bot for the platform a channel is on, or None."""
     platform = chatlink.platform(channel_id)
-    bot = {"discord": discord_bot, "telegram": telegram_bot, "slack": slack_bot, "agents": agents_bot}.get(platform, [None])[0]
+    bot = {"discord": discord_bot, "telegram": telegram_bot, "slack": slack_bot, "teams": teams_bot, "agents": agents_bot}.get(platform, [None])[0]
     return bot if chat_token(platform) else None
 
 
@@ -2289,7 +2356,7 @@ def chat_ready(channel_id=""):
     """Whether the platform a channel is on is set up with its bot running; with no channel, whether any is."""
     if channel_id:
         return chat_bot(channel_id) is not None
-    return any(chat_bot(c) is not None for c in ("0", "tg:0", "slack:0", "agents:x"))
+    return any(chat_bot(c) is not None for c in ("0", "tg:0", "slack:0", "teams:x", "agents:x"))
 
 
 def chat_configured():
@@ -2436,7 +2503,8 @@ def save_discord_files(d):
     # Telegram's message ids count up per chat, so its folders name the chat too.
     cid = d["channel_id"]
     folder = (os.path.join(DISCORD_FILES, d["message_id"]) if chatlink.platform(cid) == "discord"
-              else os.path.join(HOME, "files", chatlink.platform(cid), f"{cid.split(':', 1)[1]}-{d['message_id']}"))
+              # A Teams chat id has colons and an @, which Windows won't put in a folder name.
+              else os.path.join(HOME, "files", chatlink.platform(cid), re.sub(r"[^\w.-]", "_", f"{cid.split(':', 1)[1]}-{d['message_id']}")))
     lines = []
     for f in d["files"][:10]:
         name = os.path.basename(f["filename"]) or "file"
@@ -2912,7 +2980,7 @@ def chat_target(word):
     """A chat `to` names: "discord", "telegram", "slack", "telegram#family", as (platform name or "" for any, "#channel" or "").
     None when it names no chat. "discord" is any platform, as it was before there were others."""
     head, sep, channel = word.partition("#")
-    if head not in ("discord", "telegram", "slack", "agents"):
+    if head not in ("discord", "telegram", "slack", "teams", "agents"):
         return None
     return ("" if head == "discord" else chatlink.NAMES[head]), ("#" + channel.lstrip("#") if sep else "")
 
@@ -5723,7 +5791,7 @@ class Handler(BaseHTTPRequestHandler):
         if rest == ["channels"] and method == "GET":
             # Telegram's and Slack's chats come as one more group each, the ones their bots know of.
             chats = [{"id": key, "name": chatlink.NAMES[key], "channels": sorted(({"id": k, "name": v} for k, v in discord[key]["chats"].items()), key=lambda c: c["name"].lower())}
-                     for key in ("telegram", "slack", "agents") if chat_token(key)]
+                     for key in ("telegram", "slack", "teams", "agents") if chat_token(key)]
             if not discord.get("token"):
                 return self.reply(200, {"guilds": chats})
             # ↻ Refresh asks Discord itself (fresh=1), and what it says replaces the gateway's view.
@@ -5791,6 +5859,59 @@ class Handler(BaseHTTPRequestHandler):
                 tg.update({"token": "", "user": ""})
                 save_discord()
             start_telegram()
+            return self.reply(200, {"ok": True})
+        return self.reply(404, {"error": "not found"})
+
+    def teams_api(self, rest, method):
+        tm, bot = discord["teams"], teams_bot[0]
+        if rest == [] and method == "GET":
+            waiting = dict(teams_signin) if teams_signin.get("user_code") else {}
+            return self.reply(200, {
+                "configured": bool(tm.get("token")), "user": tm.get("user") or (bot.user if bot else ""),
+                "client_id": tm.get("client_id", ""), "tenant": tm.get("tenant", ""), "default_client_id": teamslink.CLIENT_ID,
+                "enabled": tm.get("enabled", True), "state": bot.state if bot else ("off" if tm.get("token") else "unconfigured"),
+                "error": bot.error if bot else "", "allowed_users": tm.get("allowed_users", []), "strangers": tm.get("strangers", []),
+                "chats": tm.get("chats", {}), "watching": len(teams_watch()),
+                "sign_in": {k: waiting.get(k) for k in ("user_code", "verification_uri", "expires_at", "error")} if waiting else None,
+            })
+        if rest == ["sign-in"] and method == "POST":
+            b = self.body()
+            client_id = str(b.get("client_id") or "").strip()
+            tenant = str(b.get("tenant") or "").strip()
+            try:
+                code = teams_sign_in(client_id, tenant)
+            except teamslink.TeamsError as err:
+                return self.reply(400, {"error": str(err)})
+            return self.reply(200, {"user_code": code["user_code"], "verification_uri": code["verification_uri"], "expires_at": code["expires_at"]})
+        if rest == ["sign-in"] and method == "DELETE":
+            teams_signin.clear()
+            return self.reply(200, {"ok": True})
+        if rest == [] and method == "PUT":
+            b = self.body()
+            restart = False
+            with lock:
+                if "enabled" in b:
+                    tm["enabled"], restart = bool(b["enabled"]), True
+                if "allowed_users" in b:
+                    raw = b["allowed_users"]
+                    tm["allowed_users"] = list(dict.fromkeys(re.findall(r"[0-9a-fA-F-]{36}", raw if isinstance(raw, str) else " ".join(map(str, raw or [])))))
+                if b.get("allow"):
+                    who = str(b["allow"])
+                    tm["allowed_users"] = list(dict.fromkeys(tm["allowed_users"] + [who]))
+                    tm["strangers"] = [s for s in tm["strangers"] if s["id"] != who]
+                if b.get("dismiss"):
+                    tm["strangers"] = [s for s in tm["strangers"] if s["id"] != str(b["dismiss"])]
+                if bot:
+                    bot.allowed_users = set(tm["allowed_users"]) | ({bot.user_id} if bot.user_id else set())
+                save_discord()
+            if restart:
+                start_teams()
+            return self.reply(200, {"ok": True})
+        if rest == [] and method == "DELETE":
+            with lock:
+                tm.update({"token": "", "user": ""})
+                save_discord()
+            start_teams()
             return self.reply(200, {"ok": True})
         return self.reply(404, {"error": "not found"})
 
@@ -6475,6 +6596,11 @@ class Handler(BaseHTTPRequestHandler):
             if method != "GET" and (not browser or self.key_ok()):
                 return self.reply(403, {"error": "Slack is set up from the web UI"})
             return self.slack_api(rest[1:], method)
+        if rest and rest[0] == "teams":
+            # Signing in as you is yours alone: from your browser, never an agent holding the key.
+            if method != "GET" and (not browser or self.key_ok()):
+                return self.reply(403, {"error": "Teams is set up from the web UI"})
+            return self.teams_api(rest[1:], method)
 
         if len(rest) == 2 and rest[0] == "issues" and method == "POST":
             code, out = update_feedback(rest[1], self.body())
@@ -6631,6 +6757,7 @@ def serve():
     start_discord()
     start_telegram()
     start_slack()
+    start_teams()
     start_agents()
     try:
         write_launcher()
