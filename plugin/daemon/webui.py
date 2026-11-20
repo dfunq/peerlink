@@ -1276,13 +1276,15 @@ function renderTeams(){const t=mState;if(!t)return;
   // The app-id fields are left alone while they're being filled in: the page polls.
   if(document.activeElement?.closest?.('#mstep1b')&&!s)return;
   $('#mstep1b').innerHTML=s?(s.error?`<p class="small err">${esc(s.error)}</p><p><button data-mact="cancel">Start again</button></p>`
+     :s.browser?`<p class="meta">Finish signing in on Microsoft's page, in the tab that opened. Microsoft sends you back to peerlink when you're done.</p>
+       <p class="small mut">Waiting for you to sign in. This updates by itself. <a href="${esc(s.auth_url)}" target="_blank" rel="noreferrer">Open the page again ↗</a> <button class="ghost small" data-mact="cancel">Cancel</button></p>`
      :`<p class="meta">Open <a href="${esc(s.verification_uri)}" target="_blank" rel="noreferrer">${esc(s.verification_uri)} ↗</a> and enter this code, then sign in with your work account:</p>
        <p><span class="mono" style="font-size:1.6em;letter-spacing:.12em">${esc(s.user_code)}</span> <button class="ghost small" data-mcopy="${esc(s.user_code)}">Copy</button></p>
        <p class="small mut">Waiting for you to sign in. This updates by itself. <button class="ghost small" data-mact="cancel">Cancel</button></p>`)
    :t.configured&&t.state!=='error'?`<p class="meta">Signed in${t.user?` as <b>${esc(t.user)}</b>`:''}${t.client_id?` through your app <span class="mono">${esc(t.client_id)}</span>`:''}. <label class="small"><input type="checkbox" data-mact="enabled" ${t.enabled?'checked':''}> Reading chats</label> <button class="ghost small" data-mact="forget">Sign out</button></p>`
-   :`<p class="meta">${t.configured?'Teams signed you out; sign in again. ':''}You get a code to enter at microsoft.com/devicelogin. There's nothing to register: the sign-in goes through Microsoft's own <b>Graph Command Line Tools</b> app, which is what your company's sign-in log will show, asking to read and send your chat messages.</p>
-     <p><button data-mact="sign-in" ${mBusy?'disabled':''}>${mBusy?'Asking Microsoft…':'Sign in with Microsoft'}</button> <button class="ghost small" data-mact="own">${mOwn?'Use Microsoft\'s app':'Use your own app instead'}</button></p>
-     ${mOwn?`<p class="meta">An app registered in Entra, for when your company blocks Microsoft's or won't let you approve chat access: a public client (<b>Allow public client flows</b> on) with the delegated permissions <span class="mono">User.Read</span> and <span class="mono">Chat.ReadWrite</span>.</p>
+   :`<p class="meta">${t.configured?'Teams signed you out; sign in again. ':''}You get a code to enter at microsoft.com/devicelogin. There's nothing to register: the sign-in goes through Microsoft's own <b>Graph Command Line Tools</b> app, which is what your company's sign-in log will show, asking to read and send your chat messages. If your company blocks signing in with a code ("You don't have access to this"), use <b>Sign in in this browser</b> on the computer peerlink runs on.</p>
+     <p><button data-mact="sign-in" ${mBusy?'disabled':''}>${mBusy?'Asking Microsoft…':'Sign in with Microsoft'}</button> <button class="ghost" data-mact="sign-in-browser" ${mBusy?'disabled':''} title="For a company that blocks signing in with a code. Use a browser on the computer peerlink runs on.">Sign in in this browser</button> <button class="ghost small" data-mact="own">${mOwn?'Use Microsoft\'s app':'Use your own app instead'}</button></p>
+     ${mOwn?`<p class="meta">An app registered in Entra, for when your company blocks Microsoft's or won't let you approve chat access: a public client (<b>Allow public client flows</b> on) with the delegated permissions <span class="mono">User.Read</span> and <span class="mono">Chat.ReadWrite</span>, and <span class="mono">http://localhost</span> as a Mobile and desktop redirect URI for signing in in this browser.</p>
        <div class="addline"><input class="mono grow" id="mclient" placeholder="Application (client) id" value="${esc(t.client_id||'')}" spellcheck="false"><input class="mono" id="mtenant" placeholder="Tenant id or domain (optional)" value="${esc(t.tenant||'')}" spellcheck="false"></div>`:''}
      <p class="small err" id="mterr"></p>`;
   const strangers=(t.strangers||[]).map(x=>`<div class="addline small"><b>${esc(x.name)}</b> <span class="mono mut">${esc(x.id)}</span> <span class="mut">in ${esc(x.chat_name||x.chat)}, ${ago(x.ts)} ago</span>
@@ -1298,9 +1300,12 @@ document.addEventListener('change',e=>{const t=e.target;
 document.addEventListener('click',async e=>{const t=e.target.closest('button');if(!t)return;
   if(t.dataset.mcopy){navigator.clipboard?.writeText(t.dataset.mcopy);t.textContent='Copied'}
   if(t.dataset.mact==='own'){mOwn=!mOwn;renderTeams()}
-  if(t.dataset.mact==='sign-in'){const client_id=mOwn?($('#mclient')?.value||'').trim():'',tenant=mOwn?($('#mtenant')?.value||'').trim():'';
-    mBusy=true;renderTeams();const r=await api('/api/teams/sign-in',{method:'POST',headers:J,body:JSON.stringify({client_id,tenant})});mBusy=false;
-    if(r.error){renderTeams();$('#mterr').textContent=r.error;return}await loadTeams()}
+  if(t.dataset.mact==='sign-in'||t.dataset.mact==='sign-in-browser'){const client_id=mOwn?($('#mclient')?.value||'').trim():'',tenant=mOwn?($('#mtenant')?.value||'').trim():'';
+    // The tab opens now, while the click still counts, or the browser blocks it as a pop-up.
+    const browser=t.dataset.mact==='sign-in-browser',tab=browser?window.open('about:blank','_blank'):null;
+    mBusy=true;renderTeams();const r=await api('/api/teams/sign-in',{method:'POST',headers:J,body:JSON.stringify({client_id,tenant,browser})});mBusy=false;
+    if(r.error){tab?.close();renderTeams();$('#mterr').textContent=r.error;return}
+    if(tab)tab.location=r.auth_url;await loadTeams()}
   if(t.dataset.mact==='cancel'){await api('/api/teams/sign-in',{method:'DELETE'});loadTeams()}
   if(t.dataset.mallow){await api('/api/teams',{method:'PUT',headers:J,body:JSON.stringify({allow:t.dataset.mallow})});loadTeams()}
   if(t.dataset.mdismiss){await api('/api/teams',{method:'PUT',headers:J,body:JSON.stringify({dismiss:t.dataset.mdismiss})});loadTeams()}

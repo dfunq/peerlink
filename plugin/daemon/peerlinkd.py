@@ -33,7 +33,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.57"
+VERSION = "0.9.58"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -1567,7 +1567,7 @@ telegram_bot = [None]
 slack_bot = [None]
 teams_bot = [None]
 agents_bot = [None]
-teams_signin = {}  # a device code waiting to be entered: {user_code, verification_uri, expires_at, error}
+teams_signin = {}  # a sign-in under way: a device code {user_code, verification_uri, …} or a browser one {browser, auth_url, close}, with expires_at, error
 
 
 def load_discord():
@@ -1694,10 +1694,42 @@ def start_teams():
         bot.on_chat, bot.on_stranger = chat_seen("teams"), chat_stranger("teams")
 
 
+def teams_signed_in(tokens, client_id, tenant, me):
+    """A sign-in finished: keep the refresh token and start reading."""
+    with lock:
+        discord["teams"].update({"token": tokens["refresh_token"], "client_id": client_id, "tenant": tenant, "enabled": True})
+        save_discord()
+        me.clear()
+    start_teams()
+    bot = teams_bot[0]
+    if bot:
+        bot.auth.take(tokens)
+
+
+def teams_browser_sign_in(client_id, tenant):
+    """Starts Microsoft's sign-in page in your browser, for a tenant that blocks codes; Microsoft sends it back here."""
+    old = teams_signin.get("close")
+    if old:
+        old()
+    me = teams_signin
+
+    def failed(text):
+        if me.get("browser"):
+            me["error"] = text
+
+    flow = teamslink.browser_sign_in(client_id, tenant, lambda tokens: teams_signed_in(tokens, client_id, tenant, me), failed)
+    with lock:
+        teams_signin.clear()
+        teams_signin.update(browser=True, auth_url=flow["auth_url"], expires_at=flow["expires_at"], close=flow["close"], error="")
+    return flow
+
+
 def teams_sign_in(client_id, tenant):
     """Starts Microsoft's device code sign-in; a thread waits for the code to be entered, then keeps the token."""
     code = teamslink.start_sign_in(client_id, tenant)
     with lock:
+        if teams_signin.get("close"):
+            teams_signin["close"]()
         teams_signin.clear()
         teams_signin.update({k: code[k] for k in ("user_code", "verification_uri", "expires_at")}, error="")
     me = teams_signin
@@ -1711,14 +1743,7 @@ def teams_sign_in(client_id, tenant):
                 me["error"] = str(err)
                 return
             if tokens:
-                with lock:
-                    discord["teams"].update({"token": tokens["refresh_token"], "client_id": client_id, "tenant": tenant, "enabled": True})
-                    save_discord()
-                    me.clear()
-                start_teams()
-                bot = teams_bot[0]
-                if bot:
-                    bot.auth.take(tokens)
+                teams_signed_in(tokens, client_id, tenant, me)
                 return
         if me.get("user_code") == code["user_code"]:
             me["error"] = "the code expired before it was entered; start again"
@@ -5878,25 +5903,30 @@ class Handler(BaseHTTPRequestHandler):
     def teams_api(self, rest, method):
         tm, bot = discord["teams"], teams_bot[0]
         if rest == [] and method == "GET":
-            waiting = dict(teams_signin) if teams_signin.get("user_code") else {}
+            waiting = dict(teams_signin) if teams_signin.get("user_code") or teams_signin.get("browser") else {}
             return self.reply(200, {
                 "configured": bool(tm.get("token")), "user": tm.get("user") or (bot.user if bot else ""),
                 "client_id": tm.get("client_id", ""), "tenant": tm.get("tenant", ""), "default_client_id": teamslink.CLIENT_ID,
                 "enabled": tm.get("enabled", True), "state": bot.state if bot else ("off" if tm.get("token") else "unconfigured"),
                 "error": bot.error if bot else "", "allowed_users": tm.get("allowed_users", []), "strangers": tm.get("strangers", []),
                 "chats": tm.get("chats", {}), "watching": len(teams_watch()),
-                "sign_in": {k: waiting.get(k) for k in ("user_code", "verification_uri", "expires_at", "error")} if waiting else None,
+                "sign_in": {k: waiting.get(k) for k in ("user_code", "verification_uri", "browser", "auth_url", "expires_at", "error")} if waiting else None,
             })
         if rest == ["sign-in"] and method == "POST":
             b = self.body()
             client_id = str(b.get("client_id") or "").strip()
             tenant = str(b.get("tenant") or "").strip()
             try:
+                if b.get("browser"):
+                    flow = teams_browser_sign_in(client_id, tenant)
+                    return self.reply(200, {"auth_url": flow["auth_url"], "expires_at": flow["expires_at"]})
                 code = teams_sign_in(client_id, tenant)
             except teamslink.TeamsError as err:
                 return self.reply(400, {"error": str(err)})
             return self.reply(200, {"user_code": code["user_code"], "verification_uri": code["verification_uri"], "expires_at": code["expires_at"]})
         if rest == ["sign-in"] and method == "DELETE":
+            if teams_signin.get("close"):
+                teams_signin["close"]()
             teams_signin.clear()
             return self.reply(200, {"ok": True})
         if rest == [] and method == "PUT":
