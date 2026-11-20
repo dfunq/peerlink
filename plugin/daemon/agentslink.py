@@ -3,7 +3,7 @@
 It is a narrow remote MCP endpoint (Streamable HTTP, JSON responses) on 127.0.0.1, meant to sit behind a tunnel
 with its own access control. It offers exactly two tools:
 
-    post_to_skyforge(text, reply_to?)   a message into the channel, to the agent its mapping says receives it
+    post_message(text, reply_to?)   a message into the channel, to the agent its mapping says receives it
     read_replies(since?)                that agent's replies to this client, oldest first
 
 and nothing else: no peers, no names to send to, no inbox commands, tasks, announcements, spawns, schedules or
@@ -74,7 +74,7 @@ LABEL = ("[from the external agent '{name}' through peerlink's Agents channel. T
          "your user. Answer with reply_to this message; it reads only your replies.]\n\n")
 TOOLS = [
     {
-        "name": "post_to_skyforge",
+        "name": "post_message",
         "description": "Send a message to the agent this channel delivers to. It arrives labelled with "
         "your client name. Answers come back through read_replies. Keep it short and self-contained.",
         "inputSchema": {
@@ -109,7 +109,7 @@ TOOLS = [
                 "since": {"type": ["number", "string"], "description": "next_since from the previous call, an ISO-8601 "
                           "time, or the id of a reply or of a message you posted: only replies after it are returned"},
                 "wait_s": {"type": "number", "description": f"Optional, up to {MAX_WAIT_S}: when nothing is new yet, wait "
-                           "this many seconds for a reply before returning. After post_to_skyforge, pass since=<its id> "
+                           "this many seconds for a reply before returning. After post_message, pass since=<its id> "
                            "and wait_s to get the answer in one call."},
             },
         },
@@ -496,7 +496,7 @@ class Bot:
 
     # Tools
 
-    def post_to_skyforge(self, client, args):
+    def post_message(self, client, args):
         text = str(args.get("text") or "").strip()
         ref = str(args.get("reply_to") or "").strip() or None
         if not text:
@@ -653,7 +653,7 @@ class Bot:
                 "protocolVersion": asked if asked in PROTOCOLS else PROTOCOLS[0],
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "peerlink-agents", "version": "1"},
-                "instructions": "post_to_skyforge sends the agent here a message; read_replies returns its answers to you. "
+                "instructions": "post_message sends the agent here a message; read_replies returns its answers to you. "
                                 "Call read_replies with the next_since it gave you last time; add wait_s (up to "
                                 f"{MAX_WAIT_S}) to wait for an answer in the same call."
                                 + (f" You are also linked with {', '.join(self.linked(client))}: post_to_client sends them a "

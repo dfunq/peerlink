@@ -66,7 +66,7 @@ type ClientConfig = {
 type Previous = { summary: string; name: string; ts: number } | null
 
 const SUMMARY_SYSTEM =
-  'You keep the status other Claude agents see for this agent. Reply with two lines and nothing else: first a headline of at most 6 words saying what it is doing now, then on the next line, in at most 200 characters, what it is working on, in which repo or service, and what it could answer questions about. For example:\nReleasing PixelGrid v1.6.21\nShipping PixelGrid v1.6.21 from ~/Repos/pixelgrid; can answer on the release and its PRs.\nPlain text, no preamble, no quotes, no labels. If the current status is still accurate, reply exactly UNCHANGED.'
+  'You keep the status other Claude agents see for this agent. Reply with two lines and nothing else: first a headline of at most 6 words saying what it is doing now, then on the next line, in at most 200 characters, what it is working on, in which repo or service, and what it could answer questions about. For example:\nReleasing Webshop v1.6.21\nShipping Webshop v1.6.21 from ~/Repos/webshop; can answer on the release and its PRs.\nPlain text, no preamble, no quotes, no labels. If the current status is still accurate, reply exactly UNCHANGED.'
 
 // Summaries cost a model call, and every change is resent to each peer: refresh only this often.
 const SUMMARY_EVERY_TURNS = 8
@@ -1380,7 +1380,7 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
   if (!(await ensureDaemon($))) return 'The peerlink daemon is not running and could not start (it needs Python 3, as python3, python or py -3 on the PATH).'
   switch (sub) {
     case 'web': {
-      // The daemon asks you on screen and opens your browser itself: no agent ever holds a sign-in link (SKY-564).
+      // The daemon asks you on screen and opens your browser itself: no agent ever holds a sign-in link.
       const res = await call($, 'POST', '/api/web/link', {})
       if (!res.ok) return `Could not open the web UI: ${res.data.error ?? res.status}`
       if (res.data.url) {
@@ -1607,7 +1607,7 @@ export const register: Register = (on, options) => {
           dir: { type: 'string', description: 'The folder to start it in; it must exist already' },
           purpose: { type: 'string', description: 'Why it is needed, in a sentence your user decides on' },
           first_prompt: { type: 'string', description: 'What the new agent should do first' },
-          name: { type: 'string', description: 'Its name, like "pixelgrid-server"; needed when the folder already has an agent, which keeps the folder\'s name' },
+          name: { type: 'string', description: 'Its name, like "webshop-server"; needed when the folder already has an agent, which keeps the folder\'s name' },
           role: { type: 'string', description: 'What it is there for, shown to peers; defaults to the purpose when the folder already has an agent, so it doesn\'t take that one\'s role' },
           space: { type: 'string', description: 'The space it joins; yours if left out' },
         },
@@ -1725,7 +1725,7 @@ export const register: Register = (on, options) => {
     await $.tool.register({
       name: 'rename',
       description:
-        "Change your own name, the one peers address you by, such as when you share a folder with another agent and need a distinct one (\"pixelgrid-client\"). It's yours alone and kept across /clear; the folder's name stays as it is.",
+        "Change your own name, the one peers address you by, such as when you share a folder with another agent and need a distinct one (\"webshop-client\"). It's yours alone and kept across /clear; the folder's name stays as it is.",
       inputSchema: {
         type: 'object',
         properties: { name: { type: 'string', description: 'Letters, digits, dots, dashes or underscores' } },

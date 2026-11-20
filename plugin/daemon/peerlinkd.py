@@ -5798,7 +5798,7 @@ class Handler(BaseHTTPRequestHandler):
         return bool(token) and hmac.compare_digest(self.headers.get("X-Peerlink-Token", ""), token)
 
     def same_origin(self):
-        """A browser's write says where it comes from; one that doesn't isn't taken as yours (SKY-564)."""
+        """A browser's write says where it comes from; one that doesn't isn't taken as yours."""
         origin = self.headers.get("Origin")
         return bool(origin) and origin == f"http://{self.headers.get('Host', '')}"
 
@@ -5949,7 +5949,7 @@ class Handler(BaseHTTPRequestHandler):
                 if spawn and spawn.get("name") and not rec.get("name"):
                     rec["name"] = unique_name(spawn["name"], sid)
                 if b.get("name") and not rec.get("name"):
-                    # A folder keeps the name it was given: a new session there (a restart, a resume) is still "vault".
+                    # A folder keeps the name it was given: a new session there (a restart, a resume) is still "notes".
                     # One registering again after a daemon restart keeps the name it had, not whichever is free first.
                     given = b.get("had_name") or (config.get("folder_names") or {}).get(b.get("cwd") or "")
                     # One the daemon started for a schedule comes up as the agent the schedule is for.

@@ -410,14 +410,14 @@ test('the summary model writes a headline for lists, then the summary', async ($
 
 test('a headline and summary the model labelled on one line are split, without the labels', async ($, on) => {
   const { answer } = engine(on, { turns: 4 })
-  answer('Line 1: Pushing the webhook fix Line 2: Fixing webhook ordering in pixelgrid; can answer on SKY-294')
+  answer('Line 1: Pushing the webhook fix Line 2: Fixing webhook ordering in webshop; can answer on ACME-294')
   const daemon = fakeDaemon(on)
   await $.session.start(START)
   await settle()
 
   const last = daemon.posted.filter(p => p.body?.summary).pop()
   expect(last?.body.headline).toBe('Pushing the webhook fix')
-  expect(last?.body.summary).toBe('Fixing webhook ordering in pixelgrid; can answer on SKY-294')
+  expect(last?.body.summary).toBe('Fixing webhook ordering in webshop; can answer on ACME-294')
 })
 
 test('closing a task rewrites the summary when the turn ends, not eight turns later', async ($, on) => {
@@ -598,7 +598,7 @@ test('a message that arrives mid-turn and is left unanswered is put to the agent
   expect(woke.length).toBe(1)
 })
 
-test('deliveries asked for at once, by the wake timer and turns ending, submit a message once (SKY-550)', async ($, on) => {
+test('deliveries asked for at once, by the wake timer and turns ending, submit a message once', async ($, on) => {
   const { clock, woke } = engine(on)
   mock.session(on)
   on('turn.start', (_: any, e: any) => ({ turnId: e.turnId }))
@@ -953,7 +953,7 @@ test('a prompt the session takes but never runs is put to the agent again, and a
   await $.session.start(START)
   await settle()
   submits.lose = true
-  inbox.push({ id: 'm8', from: 'sky-id', from_name: 'hq', from_host: 'Mac', text: 'Your brief', expects_reply: true, reply_to: null, hops: 0 })
+  inbox.push({ id: 'm8', from: 'hq-id', from_name: 'hq', from_host: 'Mac', text: 'Your brief', expects_reply: true, reply_to: null, hops: 0 })
   await clock.advance(600000)
   for (let i = 0; i < 10; i++) await settle()
   expect(woke.length).toBe(1)
@@ -980,7 +980,7 @@ test('a message acked on a turn that was not its prompt\'s is found missing from
   await settle()
   // The prompt is taken but never runs; a turn Claude Code runs of its own ends meanwhile, and reads as the prompt's.
   submits.lose = true
-  inbox.push({ id: 'm9', from: 'sky-id', from_name: 'hq', from_host: 'Mac', text: 'SKY-494: go', expects_reply: false, reply_to: null, hops: 0 })
+  inbox.push({ id: 'm9', from: 'hq-id', from_name: 'hq', from_host: 'Mac', text: 'ACME-494: go', expects_reply: false, reply_to: null, hops: 0 })
   await clock.advance(600000)
   for (let i = 0; i < 10; i++) await settle()
   expect(woke.length).toBe(1)
@@ -1034,13 +1034,13 @@ test('an agent clears its own context between tasks, and its notes start the fre
   await settle()
   const empty: any = await $.tool.call({ tool: 'mcp__peerlink__clear_context', notes: ' ' } as any)
   expect(JSON.stringify(empty)).toContain('Not cleared')
-  await $.tool.call({ tool: 'mcp__peerlink__clear_context', notes: 'SKY-32 server half on feat/pg-053; PR not opened yet' } as any)
+  await $.tool.call({ tool: 'mcp__peerlink__clear_context', notes: 'ACME-32 server half on feat/pg-053; PR not opened yet' } as any)
   expect(ran).toEqual([])
   await $.turn.complete(TURN)
   for (let i = 0; i < 5; i++) await settle()
   expect(ran).toEqual(['clear'])
   const out: any = await $.prompt.context({ blocks: [] } as any)
-  expect(out.blocks.find((b: any) => b.name === 'peerlink handoff').text).toContain('SKY-32 server half on feat/pg-053')
+  expect(out.blocks.find((b: any) => b.name === 'peerlink handoff').text).toContain('ACME-32 server half on feat/pg-053')
   const again: any = await $.prompt.context({ blocks: [] } as any)
   expect(again.blocks.some((b: any) => b.name === 'peerlink handoff')).toBe(false)
 })

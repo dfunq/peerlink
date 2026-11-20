@@ -14,20 +14,20 @@ import peerlinkd  # noqa: E402
 
 
 class RecordsTest(unittest.TestCase):
-    """A lead (sky) hands core a task, and core hands part of it to loop: the tree most relayed messages ran along."""
+    """A lead hands core a task, and core hands part of it to loop: the tree most relayed messages ran along."""
 
     def setUp(self):
         peerlinkd.load_config()
         peerlinkd.config.update({"rate_limit_per_min": 100, "wake_for": "needed"})
         now = peerlinkd.time.time()
-        for name in ("sky", "core", "loop", "other"):
+        for name in ("lead", "core", "loop", "other"):
             peerlinkd.sessions["s-" + name] = {"id": "s-" + name, "name": name, "cwd": "/x/" + name, "last_seen": now}
         self.keep = (dict(peerlinkd.tasks), list(peerlinkd.messages), dict(peerlinkd.rules))
         peerlinkd.messages.clear()  # other tests' leftovers aren't whole messages
         peerlinkd.inboxes.clear()
 
     def tearDown(self):
-        for name in ("sky", "core", "loop", "other"):
+        for name in ("lead", "core", "loop", "other"):
             peerlinkd.sessions.pop("s-" + name, None)
         peerlinkd.inboxes.clear()
         for store, was in zip((peerlinkd.tasks, peerlinkd.rules), (self.keep[0], self.keep[2])):
@@ -44,7 +44,7 @@ class RecordsTest(unittest.TestCase):
         return [m["text"] for m in peerlinkd.inboxes.get("s-" + name, [])]
 
     def tree(self):
-        top = self.send("sky", to="core", kind="task", text="Ship the template engine")["task"]
+        top = self.send("lead", to="core", kind="task", text="Ship the template engine")["task"]
         # core names the task it owns without passing parent_task: the subtask is linked all the same.
         sub = self.send("core", to="loop", kind="task", text=f"Backend PR for {top}: templates and tests")["task"]
         self.assertEqual(peerlinkd.tasks[sub]["parent"], top)
@@ -53,7 +53,7 @@ class RecordsTest(unittest.TestCase):
     def test_a_note_from_above_reaches_everyone_under_the_task_at_once(self):
         top, sub = self.tree()
         peerlinkd.inboxes.clear()
-        status, out = peerlinkd.task_note(top, {"by": "s-sky", "text": "Approved: merge with a merge commit."})
+        status, out = peerlinkd.task_note(top, {"by": "s-lead", "text": "Approved: merge with a merge commit."})
         self.assertEqual((status, out["direction"], sorted(out["told"])), (200, "down", ["core", "loop"]))
         self.assertIn("Approved: merge with a merge commit.", self.inbox("core")[0])
         self.assertIn(f"through your task {sub}", self.inbox("loop")[0])  # no relay by core
@@ -72,12 +72,12 @@ class RecordsTest(unittest.TestCase):
         self.assertTrue(peerlinkd.inboxes["s-core"][-1]["wake"])
         self.assertEqual(peerlinkd.tasks[sub]["blocked"], "Need the dev AI key's limit raised.")
         # The lead two levels up reads it all on the record, without a message from anyone.
-        status, view = peerlinkd.task_view(top, peerlinkd.sessions["s-sky"])
+        status, view = peerlinkd.task_view(top, peerlinkd.sessions["s-lead"])
         self.assertEqual(status, 200)
         self.assertEqual([(t["id"], t["depth"], bool(t["blocked"])) for t in view["below"]], [(sub, 1, True)])
-        self.assertEqual(self.inbox("sky"), [])
+        self.assertEqual(self.inbox("lead"), [])
         # And the owner below sees what was decided above it.
-        peerlinkd.task_note(top, {"by": "s-sky", "text": "Limit raised."})
+        peerlinkd.task_note(top, {"by": "s-lead", "text": "Limit raised."})
         self.assertEqual(peerlinkd.tasks[sub]["blocked"], "Need the dev AI key's limit raised.")  # its own blocker is its own to clear
         self.assertEqual(peerlinkd.task_view(sub, peerlinkd.sessions["s-loop"])[1]["above"][0]["log"][-1]["text"], "Limit raised.")
         peerlinkd.update_task(sub, {"by": "s-loop", "status": "done", "note": "Merged."})
@@ -85,7 +85,7 @@ class RecordsTest(unittest.TestCase):
 
     def test_your_answer_about_a_task_is_kept_on_it_and_sent_to_everyone_under_it(self):
         top, sub = self.tree()
-        asked = self.send("sky", to="user", expects_reply=True, text=f"Merge {top}'s frontend PR today?")
+        asked = self.send("lead", to="user", expects_reply=True, text=f"Merge {top}'s frontend PR today?")
         self.assertEqual(asked["about_task"], top)  # named in the text, not passed
         peerlinkd.inboxes.clear()
         status, _ = peerlinkd.inbox_act({"kind": "question", "id": asked["id"], "action": "reply", "text": "Yes, after CI is green."})
@@ -93,55 +93,55 @@ class RecordsTest(unittest.TestCase):
         self.assertEqual(peerlinkd.tasks[top]["log"][-1]["kind"], "decision")
         for name in ("core", "loop"):
             self.assertIn("Yes, after CI is green.", self.inbox(name)[0])
-        self.assertEqual(len(self.inbox("sky")), 1)  # the asker gets the answer itself, not the fan-out too
+        self.assertEqual(len(self.inbox("lead")), 1)  # the asker gets the answer itself, not the fan-out too
 
     def test_a_question_goes_with_its_default_when_you_dont_answer_in_time(self):
-        self.assertIn("at least 10 minutes", peerlinkd.send({"from": "s-sky", "to": "user", "text": "Rebase now?", "default": "Yes", "default_after": "2m"})[1]["error"])
-        self.assertIn("one of the options", peerlinkd.send({"from": "s-sky", "to": "user", "text": "Rebase now?", "options": ["Yes", "No"], "default": "Maybe"})[1]["error"])
-        self.assertIn("question to your user", peerlinkd.send({"from": "s-sky", "to": "core", "text": "Rebase now?", "default": "Yes"})[1]["error"])
-        asked = self.send("sky", to="user", text="Rebase the branch now?", default="Yes, rebase", default_after="30m")
+        self.assertIn("at least 10 minutes", peerlinkd.send({"from": "s-lead", "to": "user", "text": "Rebase now?", "default": "Yes", "default_after": "2m"})[1]["error"])
+        self.assertIn("one of the options", peerlinkd.send({"from": "s-lead", "to": "user", "text": "Rebase now?", "options": ["Yes", "No"], "default": "Maybe"})[1]["error"])
+        self.assertIn("question to your user", peerlinkd.send({"from": "s-lead", "to": "core", "text": "Rebase now?", "default": "Yes"})[1]["error"])
+        asked = self.send("lead", to="user", text="Rebase the branch now?", default="Yes, rebase", default_after="30m")
         m = next(x for x in peerlinkd.messages if x["id"] == asked["id"])
         self.assertTrue(m["expects_reply"])
-        self.assertIn("No answer in 30 min, and sky goes with: Yes, rebase", m["text"])
+        self.assertIn("No answer in 30 min, and lead goes with: Yes, rebase", m["text"])
         with peerlinkd.lock:
             peerlinkd.apply_defaults(m["ts"] + 60)
-        self.assertEqual(self.inbox("sky"), [])  # not yet
+        self.assertEqual(self.inbox("lead"), [])  # not yet
         with peerlinkd.lock:
             peerlinkd.apply_defaults(m["ts"] + 1801)
             peerlinkd.apply_defaults(m["ts"] + 1900)
-        self.assertEqual(len(self.inbox("sky")), 1)  # once
-        self.assertIn("go with your default: Yes, rebase", self.inbox("sky")[0])
+        self.assertEqual(len(self.inbox("lead")), 1)  # once
+        self.assertIn("go with your default: Yes, rebase", self.inbox("lead")[0])
         self.assertNotIn(asked["id"], [i["id"] for i in peerlinkd.inbox_items()])
         # Answered in time, the default never applies; turned off, none is taken.
         peerlinkd.inboxes.clear()
-        again = self.send("sky", to="user", text="Squash too?", default="No", default_after="10m")
+        again = self.send("lead", to="user", text="Squash too?", default="No", default_after="10m")
         peerlinkd.inbox_act({"kind": "question", "id": again["id"], "action": "reply", "text": "Yes, squash."})
         with peerlinkd.lock:
             peerlinkd.apply_defaults(peerlinkd.time.time() + 3600)
-        self.assertEqual(self.inbox("sky"), ["Yes, squash."])
+        self.assertEqual(self.inbox("lead"), ["Yes, squash."])
         peerlinkd.config["ask_defaults"] = False
-        self.assertIn("turned defaults off", peerlinkd.send({"from": "s-sky", "to": "user", "text": "Go?", "default": "Yes"})[1]["error"])
+        self.assertIn("turned defaults off", peerlinkd.send({"from": "s-lead", "to": "user", "text": "Go?", "default": "Yes"})[1]["error"])
 
     def test_a_rule_an_agent_proposes_waits_for_you_and_then_reaches_its_space(self):
-        sky, other = peerlinkd.sessions["s-sky"], peerlinkd.sessions["s-other"]
-        space = peerlinkd.space_of(sky)[0]
+        lead, other = peerlinkd.sessions["s-lead"], peerlinkd.sessions["s-other"]
+        space = peerlinkd.space_of(lead)[0]
         peerlinkd.config["auto_approve_all"] = True  # no shortcut for rules
-        status, out = peerlinkd.add_rule({"text": "Never  merge to main on a Friday."}, sky)
+        status, out = peerlinkd.add_rule({"text": "Never  merge to main on a Friday."}, lead)
         rid = out["rule"]["id"]
         self.assertEqual((status, out["rule"]["status"], out["rule"]["space"]), (200, "pending", space))
-        self.assertEqual(peerlinkd.client_config("s-sky")["rules"], [])
+        self.assertEqual(peerlinkd.client_config("s-lead")["rules"], [])
         self.assertIn(rid, [i["id"] for i in peerlinkd.inbox_items()])
         self.assertEqual(peerlinkd.inbox_act({"kind": "approval", "id": rid, "action": "approve"})[0], 200)
         self.assertEqual([r["text"] for r in peerlinkd.client_config("s-other")["rules"]], ["Never merge to main on a Friday."])
-        self.assertIn("approved rule", self.inbox("sky")[-1])
+        self.assertIn("approved rule", self.inbox("lead")[-1])
         self.assertEqual(peerlinkd.add_rule({"text": "never merge to main on a friday."}, other)[0], 409)
         # Yours are active at once; one for another space reaches nobody here; off or deleted, it's gone.
         mine = peerlinkd.add_rule({"text": "Answer in English.", "space": "*"})[1]["rule"]
         peerlinkd.add_rule({"text": "Only for elsewhere.", "space": "elsewhere"})
-        self.assertEqual(len(peerlinkd.client_config("s-sky")["rules"]), 2)
+        self.assertEqual(len(peerlinkd.client_config("s-lead")["rules"]), 2)
         peerlinkd.edit_rule(mine["id"], {"status": "off"})
         peerlinkd.edit_rule(rid, {"delete": True})
-        self.assertEqual(peerlinkd.client_config("s-sky")["rules"], [])
+        self.assertEqual(peerlinkd.client_config("s-lead")["rules"], [])
 
     def test_a_task_nobody_touched_is_raised_with_its_owner_then_with_whoever_asked(self):
         top, _ = self.tree()
@@ -165,8 +165,8 @@ class RecordsTest(unittest.TestCase):
         at(2.2)
         at(3.3)  # two asks unanswered: whoever asked hears, once
         at(4.4)
-        self.assertEqual((len(self.inbox("core")), len(self.inbox("sky"))), (2, 1))
-        self.assertIn("was asked twice and hasn't answered", self.inbox("sky")[0])
+        self.assertEqual((len(self.inbox("core")), len(self.inbox("lead"))), (2, 1))
+        self.assertIn("was asked twice and hasn't answered", self.inbox("lead")[0])
         self.assertEqual(t["updated"], start)  # asking isn't an update
         # A note from the owner starts the count again; with nudges off, nobody is asked.
         peerlinkd.task_note(top, {"by": "s-core", "text": "Waiting on CI."})
@@ -178,19 +178,19 @@ class RecordsTest(unittest.TestCase):
         self.assertEqual(self.inbox("core"), [])
 
     def test_an_ask_older_than_the_messages_kept_in_memory_can_still_be_closed_by_its_senders_folder(self):
-        # sky asked on Discord, then restarted (a new session id) and 500+ messages went by: the ask is only in the log.
-        old = self.send("sky", to="core", text="Move the folder back?", expects_reply=True, options=["Moved it", "Later"])["id"]
+        # lead asked on Discord, then restarted (a new session id) and 500+ messages went by: the ask is only in the log.
+        old = self.send("lead", to="core", text="Move the folder back?", expects_reply=True, options=["Moved it", "Later"])["id"]
         peerlinkd.messages[:] = [m for m in peerlinkd.messages if m["id"] != old]
-        peerlinkd.sessions["s-sky2"] = {"id": "s-sky2", "name": "sky", "cwd": "/x/sky", "last_seen": peerlinkd.time.time()}
+        peerlinkd.sessions["s-lead2"] = {"id": "s-lead2", "name": "lead", "cwd": "/x/lead", "last_seen": peerlinkd.time.time()}
         try:
             self.assertEqual(peerlinkd.close_threads("s-other", [old]), (200, {"closed": [], "not_yours": [old]}))
-            self.assertEqual(peerlinkd.close_threads("s-sky2", [old]), (200, {"closed": [old]}))
+            self.assertEqual(peerlinkd.close_threads("s-lead2", [old]), (200, {"closed": [old]}))
             self.assertTrue(peerlinkd.logged({old})[old]["handled"])
         finally:
-            peerlinkd.sessions.pop("s-sky2", None)
+            peerlinkd.sessions.pop("s-lead2", None)
 
     def test_a_message_its_agent_is_holding_isnt_handed_out_again(self):
-        self.send("sky", to="core", text="FYI: the freeze is over.")
+        self.send("lead", to="core", text="FYI: the freeze is over.")
         first = peerlinkd.take_inbox("s-core", track=True)
         self.addCleanup(lambda: peerlinkd.handed.pop("s-core", None))
         mid = first[0]["id"]
@@ -214,8 +214,8 @@ class RecordsTest(unittest.TestCase):
     def test_a_message_handed_out_but_not_acked_survives_a_daemon_crash(self):
         peerlinkd.append_log({"id": "m-old", "ts": peerlinkd.time.time(), "to": "s-core", "text": "from an older daemon",
                               "status": "delivered", "v": 2})  # handed out before tracking existed: left alone
-        lost = self.send("sky", to="core", text="Deploy is blocked on you.")["id"]
-        kept = self.send("sky", to="core", text="FYI, all green.")["id"]
+        lost = self.send("lead", to="core", text="Deploy is blocked on you.")["id"]
+        kept = self.send("lead", to="core", text="FYI, all green.")["id"]
         self.assertEqual({m["id"] for m in peerlinkd.take_inbox("s-core", track=True)}, {lost, kept})
         peerlinkd.ack("s-core", [kept])  # the plugin got this one into the session; the daemon died before the other's ack
         self.restart()
@@ -227,14 +227,14 @@ class RecordsTest(unittest.TestCase):
         self.restart()  # acked now: a second restart hands nothing out
         self.assertEqual(peerlinkd.inboxes.get("s-core", []), [])
         # A plugin that doesn't ack never gets it twice either.
-        old = self.send("sky", to="core", text="no acks here")["id"]
+        old = self.send("lead", to="core", text="no acks here")["id"]
         self.assertEqual([m["id"] for m in peerlinkd.take_inbox("s-core")], [old])
         self.restart()
         self.assertEqual(peerlinkd.inboxes.get("s-core", []), [])
 
 
 class LogIndexTest(unittest.TestCase):
-    """SKY-550 (5): reading old messages from the log reads on from where the last read stopped, follows rotation, and
+    """Reading old messages from the log reads on from where the last read stopped, follows rotation, and
     close_threads reads it without holding the lock."""
 
     def setUp(self):
@@ -300,7 +300,7 @@ class LogIndexTest(unittest.TestCase):
 
 
 class RemotesTest(unittest.TestCase):
-    """SKY-550 (6): other machines are asked at once and cached, and a send that fails is tried again."""
+    """Other machines are asked at once and cached, and a send that fails is tried again."""
 
     def setUp(self):
         self.was = list(peerlinkd.config.get("remotes", []))
@@ -361,7 +361,7 @@ class RemotesTest(unittest.TestCase):
 
 
 class PeerCountTest(unittest.TestCase):
-    """A heartbeat counts the agents that share a space with it, without building every peer's record (SKY-546)."""
+    """A heartbeat counts the agents that share a space with it, without building every peer's record."""
 
     def setUp(self):
         peerlinkd.load_config()

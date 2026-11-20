@@ -1,4 +1,4 @@
-"""SKY-564: what only you may do in peerlink stays yours. An agent holding the key can't get a browser sign-in, so it
+"""What only you may do in peerlink stays yours. An agent holding the key can't get a browser sign-in, so it
 can't pass the browser-only checks; restart, stop and a new key are asked on screen. Each test runs the real daemon
 (rig.py) the way it runs at ~/.peerlink: no sign-in link comes back to a key holder, and "the screen" answers as told.
 Run: python3 -m unittest discover -s plugin/daemon"""
