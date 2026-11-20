@@ -183,13 +183,14 @@ def browser_sign_in(client_id, tenant, on_tokens, on_error, timeout=600):
             except TeamsError as err:
                 out, failed = None, str(err)
                 page = SIGNED_IN_PAGE.format(head="Teams sign-in didn't finish", body=html.escape(failed))
+            # Kept before the page says so, so the card has it by the time you look.
+            on_tokens(out) if out else on_error(failed)
             raw = page.encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
             self.wfile.write(raw)
-            on_tokens(out) if out else on_error(failed)
 
     try:
         server = http.server.HTTPServer(("127.0.0.1", 0), Back)
