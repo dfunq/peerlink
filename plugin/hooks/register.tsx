@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.9.54'
+const DAEMON_VERSION = '0.9.55'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -449,8 +449,20 @@ function parseFrames(text: string): Frame[] {
   return frames
 }
 
+// Agents talk to each other a lot: their messages show as one line until ctrl+o. Yours, and what goes to you, show whole.
+const PEEK = 100
+const WHOLE = 600
+const fromPerson = (name: string) => / on \S|\(web UI\)$/.test(name)
+const isPerson = (m: PeerMessage) => m.from === 'user' || m.from.startsWith('discord:')
+
+// A message as one transcript line: an agent's is cut to its first words.
+function logLine(m: PeerMessage) {
+  const [head, ...rest] = frame(m).split('\n')
+  return `${head}: ${isPerson(m) ? rest.join('\n') : clip(rest.join('\n'), PEEK)}`
+}
+
 // One row per message: who it's from and the text, the way a chat shows it.
-function MessageRow(ui: any, arrow: '↘' | '↗', who: string, tags: string[], body: string, key: string) {
+function MessageRow(ui: any, arrow: '↘' | '↗', who: string, tags: string[], body: string, key: string, room = WHOLE) {
   const { Box, Text } = ui
   return (
     <Box key={key} flexDirection="column">
@@ -460,7 +472,7 @@ function MessageRow(ui: any, arrow: '↘' | '↗', who: string, tags: string[], 
         {tags.length ? <Text dimColor>{` · ${tags.join(' · ')}`}</Text> : null}
       </Box>
       <Box paddingLeft={2}>
-        <Text wrap="wrap">{clip(body, 600)}</Text>
+        <Text wrap="wrap">{clip(body, room)}</Text>
       </Box>
     </Box>
   )
@@ -581,14 +593,14 @@ async function deliverOnce($: EngineInterface) {
     turnGiven.push(...batch.map(m => m.id))
     midTurn.push(...batch.filter(m => m.expects_reply && !m.task && !chased.has(m.id)))
     // The model reads the row above, which the person never sees: show each message as a transcript line too.
-    for (const m of batch) $.ui.log(frame(m).replace('\n', ': '))
+    for (const m of batch) $.ui.log(logLine(m))
     $.ui.toast(`Message from ${batch.map(m => m.from_name).join(', ')}`)
     return
   }
   if (limit) {
     for (const m of batch.filter(m => !shownWaiting.has(m.id))) {
       shownWaiting.add(m.id)
-      $.ui.log(`${frame(m).replace('\n', ': ')}  (held: the usage limit is reached)`)
+      $.ui.log(`${logLine(m)}  (held: the usage limit is reached)`)
     }
     showStatus($)
     return
@@ -597,7 +609,7 @@ async function deliverOnce($: EngineInterface) {
     // Not starting a turn is no reason to hide it: each message shows once, and is read with the next prompt.
     for (const m of batch.filter(m => !shownWaiting.has(m.id))) {
       shownWaiting.add(m.id)
-      $.ui.log(`${frame(m).replace('\n', ': ')}  (wake is off: read with your next prompt)`)
+      $.ui.log(`${logLine(m)}  (wake is off: read with your next prompt)`)
       $.ui.toast(`Message from ${m.from_name}, waiting for your next prompt`)
     }
     showStatus($)
@@ -607,7 +619,7 @@ async function deliverOnce($: EngineInterface) {
   if (!batch.some(m => m.wake !== false)) {
     for (const m of batch.filter(m => !shownWaiting.has(m.id))) {
       shownWaiting.add(m.id)
-      $.ui.log(`${frame(m).replace('\n', ': ')}  (no reply needed: read with the next turn)`)
+      $.ui.log(`${logLine(m)}  (no reply needed: read with the next turn)`)
     }
     return
   }
@@ -644,7 +656,7 @@ async function deliverOnce($: EngineInterface) {
       return
     }
     acked($, batch)
-    for (const m of batch) $.ui.log(`${frame(m).replace('\n', ': ')}  (couldn't start a turn: read with your next prompt)`)
+    for (const m of batch) $.ui.log(`${logLine(m)}  (couldn't start a turn: read with your next prompt)`)
     $.ui.toast(`Message from ${batch.map(m => m.from_name).join(', ')}, waiting for your next prompt`)
     return
   }
@@ -846,7 +858,7 @@ async function poll($: EngineInterface) {
   const inbox = (res.data.inbox as PeerMessage[]).filter(m => !held.has(m.id) && !placed.has(m.id))
   for (const m of inbox.filter(m => m.kind === 'announcement')) {
     notices.push(m)
-    $.ui.log(`${frame(m).replace('\n', ': ')}  (read at the next turn)`)
+    $.ui.log(`${logLine(m)}  (read at the next turn)`)
   }
   pending.push(...inbox.filter(m => m.kind !== 'announcement'))
   await resubmitLost($)
@@ -2073,7 +2085,7 @@ export const register: Register = (on, options) => {
     const ui = $.ui.resolve(e) as any
     return (
       <ui.Box flexDirection="column" marginTop={1}>
-        {frames.map(f => MessageRow(ui, '↘', f.from, inboundTags(f), f.body, f.id))}
+        {frames.map(f => MessageRow(ui, '↘', f.from, inboundTags(f), f.body, f.id, fromPerson(f.from) ? WHOLE : PEEK))}
       </ui.Box>
     )
   })
@@ -2103,7 +2115,7 @@ export const register: Register = (on, options) => {
     const ui = $.ui.resolve(e) as any
     return (
       <ui.Box flexDirection="column" marginTop={1}>
-        {MessageRow(ui, '↗', sent ? sent[1] : input.to, tags, input.text, 'out')}
+        {MessageRow(ui, '↗', sent ? sent[1] : input.to, tags, input.text, 'out', input.to === 'user' ? WHOLE : PEEK)}
         {failed ? <ui.Text color="error">{`  ${output || 'not sent'}`}</ui.Text> : null}
       </ui.Box>
     )
