@@ -24,7 +24,9 @@ import json
 import os
 import re
 import secrets
+import socket
 import socketserver
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -165,8 +167,14 @@ def audit(home, log, **entry):
 
 class Server(ThreadingHTTPServer):
     request_queue_size = 64  # the default 5 resets a burst of connections, such as several clients waiting at once
+    # On Windows SO_REUSEADDR lets a second socket bind a port that's already listening, so a second daemon would
+    # start beside the first instead of failing to bind. Ask for the port exclusively there instead.
+    if sys.platform == "win32":
+        allow_reuse_address = False
 
     def server_bind(self):
+        if sys.platform == "win32":
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         # HTTPServer's own asks DNS for this machine's name, which on a slow network holds up the port for a minute.
         socketserver.TCPServer.server_bind(self)
         self.server_name, self.server_port = self.server_address[:2]

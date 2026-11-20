@@ -353,7 +353,7 @@ async function branchOf($: EngineInterface, cwd: string) {
   const sha = name ? '' : await git($, cwd, ['rev-parse', '--short', 'HEAD'])
   const head = name || (sha ? `detached @ ${sha}` : 'detached')
   // A linked worktree keeps its git dir apart from the main checkout's.
-  const worktree = dirs[0] !== dirs[1] ? dirs[2]?.split('/').filter(Boolean).at(-1) : ''
+  const worktree = dirs[0] !== dirs[1] ? dirs[2]?.split(/[\\/]/).filter(Boolean).at(-1) : ''
   return worktree ? `${head} (worktree ${worktree})` : head
 }
 
@@ -408,7 +408,7 @@ async function announce($: EngineInterface, succeeds?: string) {
   const res = await call($, 'POST', '/api/sessions', {
     succeeds,
     id: sessionId,
-    name: cwd.split('/').filter(Boolean).at(-1) ?? 'agent',
+    name: cwd.split(/[\\/]/).filter(Boolean).at(-1) ?? 'agent',
     had_name: myName || undefined,
     cwd,
     repo: repo?.remote ?? repo?.root ?? '',
@@ -973,7 +973,7 @@ async function lastSessionTitle($: EngineInterface, cwd: string) {
 // A first summary with no model call: what the last agent here did, the project, and its recent commits.
 async function seedSummary($: EngineInterface, cwd: string) {
   const root = (await $.session.repo())?.root ?? cwd
-  const name = root.split('/').filter(Boolean).at(-1) ?? 'project'
+  const name = root.split(/[\\/]/).filter(Boolean).at(-1) ?? 'project'
   const [description, title, commits] = await Promise.all([
     projectDescription($, root),
     lastSessionTitle($, cwd),
@@ -1917,7 +1917,7 @@ export const register: Register = (on, options) => {
       // Ones that stopped this past week stay in view, so one that expired or was cancelled doesn't just vanish.
       const ended = all.filter(c => !live.includes(c) && Date.now() / 1000 - (c.updated ?? 0) < 7 * 86400)
       const row = (c: any) => `- ${c.id} ${c.status} · ${c.when_text} · ${c.agent ? `${c.agent} ` : ''}${c.folder}`
-      const lines = live.map(c => `${row(c)}${c.next_run ? ` · next ${new Date(c.next_run * 1000).toLocaleString()}` : ''} · ${clip(c.prompt, 100)}${c.prompt_file && !c.prompt.includes(c.prompt_file.split('/').pop()) ? ` (playbook ${c.prompt_file})` : ''}`)
+      const lines = live.map(c => `${row(c)}${c.next_run ? ` · next ${new Date(c.next_run * 1000).toLocaleString()}` : ''} · ${clip(c.prompt, 100)}${c.prompt_file && !c.prompt.includes(c.prompt_file.split(/[\\/]/).pop()) ? ` (playbook ${c.prompt_file})` : ''}`)
       if (ended.length) lines.push('Ended this past week:', ...ended.map(c => `${row(c)} ${new Date(c.updated * 1000).toLocaleString()}${c.status === 'expired' ? ' (never approved)' : ''} · ${clip(c.prompt, 100)}`))
       return text(lines.length ? (live.length ? '' : 'No schedules are active.\n') + lines.join('\n') : 'No schedules are active.')
     }
