@@ -33,7 +33,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.56"
+VERSION = "0.9.57"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -2721,13 +2721,20 @@ def on_discord(d):
     claim = d.get("approval") if external(d["channel_id"]) else None
     # Named nobody and answers nobody: each agent ticked to receive here gets its own copy. One with an approval
     # claim is stamped for one receiver, so it stays with the first.
-    entries = [entry] if named or replied or claim or kind == "task" else receivers(route)
-    for entry in entries:
-        deliver_from_chat(d, entry, text, kind, claim, replied, asker)
+    # Of those, one not ticked to send here only listens: its copy can't be answered there (quiet).
+    addressed = named or replied or claim or kind == "task"
+    for entry in [entry] if addressed else receivers(route):
+        quiet = not addressed and not entry.get("sends") and not external(d["channel_id"]) and not d.get("dm")
+        deliver_from_chat(d, entry, text, kind, claim, replied, asker, quiet)
 
 
-def deliver_from_chat(d, entry, text, kind, claim, replied, asker):
-    """One chat message queued for one receiver, as its own message: on_discord's last step."""
+QUIET_NOTE = ("\n\n(You receive in this channel but don't send there, so this is for you to know: your answer wouldn't "
+              "post. {name} answers here when it's named first, \"{name}: ...\", or a post of its is replied to.)")
+
+
+def deliver_from_chat(d, entry, text, kind, claim, replied, asker, quiet=False):
+    """One chat message queued for one receiver, as its own message: on_discord's last step. A quiet one is for an
+    agent that only listens there: it expects no reply, shows no reactions, and a reply to it is refused."""
     cwd = entry["cwd"]
     stamped = None
     with lock:
@@ -2749,8 +2756,9 @@ def deliver_from_chat(d, entry, text, kind, claim, replied, asker):
             "id": f"m{next_msg[0]}", "ts": time.time(),
             "from": f"discord:{d['channel_id']}", "from_name": f"{d['author']} on {chatlink.name(d['channel_id'])}", "from_host": "discord",
             "from_cwd": "", "to_cwd": cwd, "from_space": "discord", "to_space": "",
-            "text": text[:20000], "expects_reply": True, "reply_to": replied["id"] if replied else None, "hops": 0, "status": "queued", "v": 2,
-            "discord": {"channel_id": d["channel_id"], "message_id": d["message_id"]},
+            "text": text[:20000] + (QUIET_NOTE.format(name=entry_label(entry)) if quiet else ""), "expects_reply": not quiet,
+            "reply_to": replied["id"] if replied else None, "hops": 0, "status": "queued", "v": 2,
+            "discord": {"channel_id": d["channel_id"], "message_id": d["message_id"], **({"quiet": True} if quiet else {})},
         }
         next_msg[0] += 1
         if stamped:
@@ -2767,9 +2775,11 @@ def deliver_from_chat(d, entry, text, kind, claim, replied, asker):
         if task:
             task["owner"], task["space"] = msg["to_name"], msg["to_space"]
             save_tasks()
-    log("discord in", msg["id"], d["author"], "->", msg["to_name"])
+    log("discord in", msg["id"], d["author"], "->", msg["to_name"], "(listens)" if quiet else "")
     if stamped:
         approval_fyi(stamped, agent)
+    if quiet:
+        return
     set_reaction(msg, "👀")
     if not agent:
         chat_post(d["channel_id"], f"{entry_label(entry)} isn't running right now. Your message waits up to an hour for it.", d["message_id"])
@@ -2790,7 +2800,7 @@ def set_reaction(msg, emoji):
     """One message's reaction. Several messages can share one post (a chat message every receiver got its copy of):
     the post shows each one's, and a reaction comes off only when none of them still has it."""
     d = msg.get("discord")
-    if not d or reactions.get(msg["id"]) == emoji:
+    if not d or d.get("quiet") or reactions.get(msg["id"]) == emoji:
         return
     old = reactions.get(msg["id"])
     reactions[msg["id"]] = emoji
@@ -2996,6 +3006,9 @@ def send_discord(sender_rec, to, text, parent, hops, options=None, files=None, e
         return None
     if parent and parent.get("discord") and parent.get("to_cwd") == sender_rec.get("cwd"):
         d = parent["discord"]
+        if d.get("quiet"):
+            return 403, {"error": f"you receive in {discord_channel_label(d['channel_id'])} but don't send there, so nothing was posted: "
+                                  "another agent there answers. Tick Send for you there in the web UI, under Channels, to answer too"}
         out = post_to_discord(sender_rec, d["channel_id"], text, d["message_id"], parent["id"], hops, options, files, expects_reply)
         if out[0] == 200:
             set_reaction(parent, "✅")
