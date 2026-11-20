@@ -166,6 +166,8 @@ details.plat .pbody h2{font-size:14px;margin:16px 0 6px}.pill.warn{color:var(--w
 @media (min-width:721px){body.drawer main{padding-right:404px;max-width:1504px}body.drawer.wide main{max-width:none}}
 @media (max-width:720px){#detail{width:100%;border-left:0}}
 .branch{display:flex;align-items:flex-start;justify-content:safe center}
+/* A tree wider than the page grows its column to fit, so the chart scrolls to both ends instead of cutting off the left. */
+.chart>.ocol{width:max-content;min-width:100%}
 .branch>.ocol{position:relative;padding:14px 6px 0}
 .branch>.ocol::before{content:"";position:absolute;top:0;left:0;right:0;border-top:2px solid var(--acc)}
 .branch>.ocol:first-child::before{left:50%}.branch>.ocol:last-child::before{right:50%}.branch>.ocol:only-child::before{display:none}
@@ -175,6 +177,7 @@ details.plat .pbody h2{font-size:14px;margin:16px 0 6px}.pill.warn{color:var(--w
  .orow{flex-direction:column;align-items:stretch;gap:8px}.ocol{align-items:stretch}.node{width:auto}
  .ocol>.down{display:none}.ocol>.unit{margin:8px 0 0 14px;width:auto;border-left:2px solid var(--acc);border-style:none none none solid;border-radius:0;padding:4px 0 4px 12px}
  .branch{flex-direction:column;align-items:stretch;margin-left:14px;border-left:2px solid var(--acc);padding-left:12px}
+ .chart>.ocol{width:auto;min-width:0}
  .branch>.ocol{padding:8px 0 0}.branch>.ocol::before,.branch>.ocol::after{display:none}.sbox{max-width:none;text-align:left}
 }
 .mut{color:var(--mut)}
