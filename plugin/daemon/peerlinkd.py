@@ -33,7 +33,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.61"
+VERSION = "0.9.62"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -4831,7 +4831,7 @@ def request_spawn(body):
     if auto:
         decide_spawn(sp["id"], True, "auto-approve")
         if channel and chat_ready(channel):
-            post_async([(channel, f"**{sp['requester']['name']}** started an agent in `{tilde_path(folder)}` without asking (auto-approve is on): {purpose[:600]}", None)])
+            post_async([(channel, f"**{sp['requester']['name']}** started {sp['name'] or folder_name(folder)}", None)])
         return 200, {"id": sp["id"], "status": sp["status"], "note": f" Auto-approved: {sp['note']}"}
     if channel and chat_ready(channel):
         try:
@@ -5145,7 +5145,7 @@ def create_schedule(body, by=None):
         channel = approval_channel(by) if by else ""
     log("schedule", c["id"], c["status"], c["agent"] or tilde_path(folder), when_text(c))
     if by and start and c["status"] == "active" and channel and chat_ready(channel):
-        post_async([(channel, f"**{c['requester']['name']}** scheduled `{tilde_path(folder)}` ({when_text(c)}) without asking (auto-approve is on): {start_note(c)}.\n{schedule_shown(c)}", None)])
+        post_async([(channel, f"**{c['requester']['name']}** scheduled {c['agent'] or folder_name(folder)}, {when_text(c)}", None)])
     if c["status"] == "pending" and channel and chat_ready(channel):
         try:
             sent = chat_post(channel,
