@@ -123,6 +123,13 @@ class AdminTest(unittest.TestCase):
         self.assertEqual(code, 403)
         self.assertEqual(rig.call("GET", "/api/discord")[0], 200)
 
+    def test_starting_clean_and_deleting_agents_or_spaces_are_yours_from_the_browser_only(self):
+        rig = self.rig("no")
+        for path, body in (("/api/clean", {"parts": ["history"]}), ("/api/agents/a1/delete", {}), ("/api/spaces/team/delete", {})):
+            code, out = rig.call("POST", path, body)
+            self.assertEqual(code, 403, path)
+            self.assertIn("web UI", out["error"])
+
     def test_restart_stop_and_a_new_key_are_asked_on_screen_and_a_no_leaves_them(self):
         rig = self.rig("no")
         pid = rig.call("GET", "/api/health")[1]["pid"]

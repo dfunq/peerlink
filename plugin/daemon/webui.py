@@ -69,6 +69,8 @@ div.plat{margin:0 0 12px;max-width:860px;background:var(--card);border:1px solid
 details.plat>summary{display:flex;align-items:center;gap:12px;padding:12px 14px;list-style:none;font-size:14px;color:var(--fg)}details.plat>summary::-webkit-details-marker{display:none}
 .plat .plogo{flex:none;width:34px;height:34px;border-radius:9px;display:grid;place-items:center}.plat .plogo svg{width:20px;height:20px}
 .plat .ptitle{display:flex;flex-direction:column;min-width:0;flex:1}.plat .psub{font-size:12px;color:var(--mut)}
+.cleanparts{display:flex;flex-wrap:wrap;gap:4px 14px;margin-top:8px;font-size:13px}.cleanparts label{display:flex;align-items:center;gap:5px}
+#offagents{margin-top:16px}#offagents .mrow{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:6px 2px;border:0;border-bottom:1px solid var(--line);border-radius:0;background:none}.sbox [data-delspace]{margin-top:8px}
 details.plat .pstate{display:flex;align-items:center;gap:6px;font-size:13px;flex-wrap:wrap;justify-content:flex-end}details.plat .pstate .dstate{margin:0}
 details.plat .chev{flex:none;width:8px;height:8px;border-right:2px solid var(--mut);border-bottom:2px solid var(--mut);transform:rotate(-45deg);transition:transform .15s;margin:0 4px}
 details.plat[open] .chev{transform:rotate(45deg)}details.plat .pbody{padding:0 14px 14px;border-top:1px solid var(--line)}details.plat .pbody .steps .step{background:var(--bg)}
@@ -243,7 +245,7 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <li>Work sent to a space goes to its lead: the agent you picked, or else the one that was alone in it. Pick leads, and which space sits inside which, on the Spaces page.</li>
 <li>An agent only sees and messages agents in its own space. A lead also sees the space its space sits inside. Two agents you link (an agent's details, "Linked with") see and message each other whatever their spaces.</li>
 <li>To move an agent, open it and set its space on the Details tab. It moves alone: other agents in its folder stay where they are.</li>
-<li>The bar is how full the agent's context window is: it turns yellow past half and red past 80%. A yellow dot means it's working, a green one that it's idle. Messages an hour show only when an agent is chatty, 20 or more.</li></ul></details><div class="orgwrap"><div id="peers"></div><div id="detail"></div></div></section>
+<li>The bar is how full the agent's context window is: it turns yellow past half and red past 80%. A yellow dot means it's working, a green one that it's idle. Messages an hour show only when an agent is chatty, 20 or more.</li></ul></details><div class="orgwrap"><div id="peers"></div><div id="detail"></div></div><div id="offagents"></div></section>
 
 <section id="inbox"><h1>Inbox</h1><p class="lead">Everything waiting on you, the longest waiting first. On Discord, <span class="mono">/inbox</span> shows the same list, and you answer by number, like <span class="mono">1 done</span>.</p>
 <div class="msgbar"><button class="ghost small" id="notifybtn" data-notify>Desktop alerts: off</button></div>
@@ -385,6 +387,8 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <div class="plat static"><div class="psum"><span class="plogo" style="background:#3d8fd6"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M20 21a8 8 0 0 0-16 0M12 13a5 5 0 1 0 0-10 5 5 0 0 0 0 10z"/></svg></span><span class="ptitle"><b>Browsers</b><span class="psub"><span id="browsers"></span></span></span><span class="pact"><button class="ghost" data-act="logout">Sign out here</button> <button class="ghost" data-act="logout-all">Sign out everywhere</button></span></div></div>
 <div class="plat static"><div class="psum"><span class="plogo" style="background:#c58a2b"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M15.5 7.5a4.5 4.5 0 1 1-6.36 6.36A4.5 4.5 0 0 1 15.5 7.5zM15.5 7.5 21 2M18 5l2 2"/></svg></span><span class="ptitle"><b>Key</b><span class="psub">Agents and sign-in links use the key in <span class="mono" id="keypath"></span>. Rotating it signs out every browser.</span></span><span class="pact"><button class="ghost" data-act="rotate">Rotate key</button></span></div></div>
 <div class="plat static"><div class="psum"><span class="plogo" style="background:var(--acc)"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 2v10M18.4 6.6a9 9 0 1 1-12.8 0"/></svg></span><span class="ptitle"><b>Daemon</b><span class="psub">Agents reconnect by themselves after a restart. Queued messages are kept.</span></span><span class="pact"><button class="ghost" data-act="restart">Restart daemon</button></span></div></div>
+<div class="plat static"><div class="psum"><span class="plogo" style="background:#c0563f"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg></span><span class="ptitle"><b>Start clean</b><span class="psub">Clear what you tick. Rules, settings, chat channels, outside clients and the key stay. Running agents stay, and the files are copied to a backup first.</span>
+<span class="cleanparts"><label><input type="checkbox" data-clean="spaces"> Spaces, leads and links</label> <label><input type="checkbox" data-clean="agents"> Offline agents</label> <label><input type="checkbox" data-clean="history"> Message history</label> <label><input type="checkbox" data-clean="tasks"> Tasks</label> <label><input type="checkbox" data-clean="schedules"> Schedules</label></span></span><span class="pact"><button class="ghost" data-act="clean">Start clean</button></span></div></div>
 <p class="mut small" id="ctlmsg"></p></section>
 </main></div>
 <script>
@@ -448,6 +452,7 @@ const tilde=p=>String(p||'').replace(/^\/Users\/[^/]+/,'~');
 let signedOut=false;
 async function api(p,o){const r=await fetch(p,o);if(r.status===401){signedOut=true;$('#signedout').style.display='block';throw new Error('signed out')}return r.json()}
 const post=(p,b)=>api(p,{method:'POST',headers:J,body:JSON.stringify(b||{})});
+let offList=[];  // agents not running now, from the last snapshot
 // Agents and Tasks lay out across the whole window; the reading pages keep a comfortable line length.
 // The Agents list reads like any other page; only its chart needs the room.
 function show(){const id=(location.hash||'#agents').slice(1);document.body.classList.toggle('wide',(id==='agents'&&aLayout!=='list')||id==='tasks');
@@ -625,7 +630,9 @@ async function refresh(force,snap){
     +(x.links||[]).map(n=>`<span class="badge guest" title="Linked with ${esc(n)}">↔${esc(n)}</span>`).join('');
   const leadBadge=x=>x.leads?`<span class="badge${x.leads==='only'?' only':''}" title="${x.leads==='only'?'Lead (only agent): it was the only agent in the space':'Lead'}">Lead</span>`:'';
   const badge=x=>alsoBadges(x)+leadBadge(x);
-  const clearOff=x=>x.leads&&x.offline?`<div><span class="small mut" data-clearlead="${esc(x.space)}" title="Clear this lead" style="cursor:pointer">clear</span></div>`:'';
+  // An offline lead stays pinned until you pick another, or remove it here (its agent is then under Offline agents).
+  const offBtn=x=>x.leads&&x.offline?`<button class="ghost small" data-clearlead="${esc(x.space)}" data-off="${esc(x.name)}" data-offcwd="${esc(x.cwd)}" title="Delete this offline agent, or else clear it as the space's lead">Remove</button>`:'';
+  const clearOff=x=>x.leads&&x.offline?`<div>${offBtn(x)}</div>`:'';
   const node=x=>`<${x.offline?'div':'button'} class="node${x.leads?' is-lead':''}${x.offline?' off':''}${x.id&&x.id===sel?' sel':''}"${x.offline?'':` data-sel="${esc(x.id)}"`}${x.leads?` title="Leads the ${esc(x.space)} space${x.offline?' (offline)':''}"`:''}>
     <div class="nm"><span title="${esc(x.name)}">${x.offline?'':`<span class="dot ${x.busy?'busy':''}"></span>`}${esc(x.name)}</span><span class="rt">${badge(x)}</span></div>${clearOff(x)}
     <div class="dir" title="${esc(tilde(x.cwd))}${x.branch?' · '+esc(x.branch):''}">${esc(short(x.cwd))}${x.branch?` · ⎇ ${esc(x.branch)}`:''}</div><div class="sum" title="${esc(x.summary||x.role||'')}">${esc(headline(x)||x.role)||'no summary yet'}</div>${x.offline?'':`<div class="state"><span>${state(x)}${x.sent_hour?' · '+rate(x):''}${x.open_tasks?` · <span style="color:var(--acc)">${x.open_tasks} task${x.open_tasks>1?'s':''}</span>`:''}</span>${ctx(x)}</div>`}</${x.offline?'div':'button'}>`;
@@ -653,7 +660,7 @@ async function refresh(force,snap){
     const ch=(kids[n]||[]).filter(c=>c!==n&&!seen.has(c)).sort();
     return `<div class="ocol"><div class="sbox${ledBy?' led':''}"><div class="name">${esc(lbl(n))}</div>
       ${ledBy?`<div class="small" style="color:var(--acc)">led by ${esc(ledBy)}</div>`:''}
-      <div class="small mut">${own.join(', ')||'no other agents'}</div>${pick(n)}</div>
+      <div class="small mut">${own.join(', ')||'no other agents'}</div>${pick(n)}${n!=='default'?`<button class="ghost small" data-delspace="${esc(n)}">Delete space</button>`:''}</div>
       ${ch.length?`<div class="down"></div><div class="branch">${ch.map(c=>sunit(c,seen)).join('')}</div>`:''}</div>`};
   $('#n-agents').textContent=p.peers.length||'';$('#n-spaces').textContent=names.length||'';$('#n-msgs').textContent=m.messages.length||'';
   // Spaces caught in a parent loop have no root; they are shown at the top level after the rest.
@@ -663,7 +670,7 @@ async function refresh(force,snap){
     return `<${x.offline?'div':'button'} class="lrow${x.leads?' is-lead':''}${x.offline?' off':''}${x.id&&x.id===sel?' sel':''}"${x.offline?'':` data-sel="${esc(x.id)}"`}>
       <span class="lid"><span class="ln"><span title="${esc(x.name)}">${x.offline?'':`<span class="dot ${x.busy?'busy':''}"></span>`}${esc(x.name)}</span>${leadBadge(x)}</span><span class="lwhere mono" title="${esc(tilde(x.cwd))}">${where}</span></span>
       <span class="lw${oldSummary(x)?' old':''}" title="${esc((x.summary||x.role||'')+(oldSummary(x)?` (set ${ago(x.summary_ts)} ago)`:''))}">${esc(headline(x)||x.role||(x.offline?'offline':''))}</span>
-      <span class="lr">${alsoBadges(x)}${x.busy&&!x.offline?`<span class="lbusy">${state(x)}</span>`:''}${x.sent_hour>=20?rate(x):''}${x.open_tasks?`<span class="pill acc">${x.open_tasks} task${x.open_tasks>1?'s':''}</span>`:''}${ctx(x)}</span></${x.offline?'div':'button'}>`};
+      <span class="lr">${offBtn(x)}${alsoBadges(x)}${x.busy&&!x.offline?`<span class="lbusy">${state(x)}</span>`:''}${x.sent_hour>=20?rate(x):''}${x.open_tasks?`<span class="pill acc">${x.open_tasks} task${x.open_tasks>1?'s':''}</span>`:''}${ctx(x)}</span></${x.offline?'div':'button'}>`};
   const lspace=(n,seen)=>{if(seen.has(n))return '';seen.add(n);
     const nested=inside[n]&&inside[n].parent!==n;
     const head=nested?(leads[n]||[]):tops(n);
@@ -683,6 +690,9 @@ async function refresh(force,snap){
     :hits?`<div class="lspace-h">${hits.length} match${hits.length===1?'':'es'}</div><div class="lflat">${hits.map(lrow).join('')||'<div class="empty">No agent matches.</div>'}</div>`
     :aLayout==='list'?`<div class="ltree">${all(lspace)}</div>`
     :all((n,seen)=>{const u=unit(n,seen);return u?`<div class="chart">${u}</div>`:''});
+  // Agents not running now: kept 60 days, unless you delete them here. A running one can't be: it registers again.
+  const off=offList=p.offline||[],offOpen=$('#offagents details')?.open;
+  $('#offagents').innerHTML=off.length?`<details class="how"${offOpen?' open':''}><summary>Offline agents (${off.length})</summary><div class="mlist">${off.map(a=>`<div class="mrow"><span><b>${esc(a.name)}</b> <span class="mut small">${esc(tilde(a.cwd))} · last seen ${a.seen?ago(a.seen)+' ago':'never'}</span></span> <button class="ghost small" data-delagent="${esc(a.id)}" data-name="${esc(a.name)}">Delete</button></div>`).join('')}</div></details>`:'';
   // Agents still on older plugin code: they keep working, but get fixes only after /reload-plugins. The daemon runs
   // the newest peerlink installed, so the fix is a reload, not an update. Each reloads itself when next idle; one
   // whose queued reload hasn't run in 5 minutes is stuck (a dialog open in its terminal, or no turn ever ending).
@@ -814,7 +824,11 @@ document.addEventListener('change',async e=>{const t=e.target;if(!t.dataset.sple
   if(r.error)tell(r.error);lastView='';refresh(true)});
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-makelead],[data-clearlead]');if(!b)return;e.stopPropagation();
   const space=b.dataset.makelead||b.dataset.clearlead;
-  if(b.dataset.clearlead&&!await ask(`Clear the lead of ${space}? Work sent to the space won't reach anyone until you pick a new lead.`))return;
+  // An offline lead: delete its agent, which takes the lead with it; one with no record left just stops leading.
+  const gone=b.dataset.off&&(offList.find(a=>a.cwd===b.dataset.offcwd&&a.name===b.dataset.off)||offList.find(a=>a.cwd===b.dataset.offcwd));
+  if(gone){if(!await ask(`Delete ${gone.name}? It's offline: it stops leading ${space}, and its settings and the spaces you set for it go.`))return;
+    const r=await post(`/api/agents/${encodeURIComponent(gone.id)}/delete`);if(r.error)tell(r.error);refresh(true);return}
+  if(b.dataset.clearlead&&!await ask(b.dataset.off?`Remove ${b.dataset.off}, offline, as the lead of ${space}? The space has no lead until you pick one.`:`Clear the lead of ${space}? Work sent to the space won't reach anyone until you pick a new lead.`,{ok:b.dataset.off?'Remove':'Clear'}))return;
   const r=await post(`/api/spaces/${encodeURIComponent(space)}/lead`,{cwd:b.dataset.cwd||'',id:b.dataset.makelead?b.dataset.id||'':''});if(r.error)tell(r.error);refresh(true)});
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-clearctx]');if(!b)return;
   const x=livePeers.find(p=>p.id===b.dataset.clearctx);if(!await ask(`Clear ${x?x.name:'this agent'}'s context? It starts a fresh conversation after the turn it's in.`))return;
@@ -1005,12 +1019,23 @@ document.addEventListener('submit',async e=>{if(e.target.id!=='agentform')return
   editing=false;lastPanel='';await refresh(true);
   const m2=$('#agentmsg');if(m2){m2.className='small '+(errs.length?'err':'ok');m2.textContent=errs.length?errs.join(' '):'Saved'}});
 document.addEventListener('click',async e=>{const t=e.target.closest('button');if(!t)return;
+  if(t.dataset.delagent){if(!await ask(`Delete ${t.dataset.name}? Its settings and the spaces you set for it go; messages queued for it wait for its folder's next agent.`))return;
+    const r=await post(`/api/agents/${encodeURIComponent(t.dataset.delagent)}/delete`);if(r.error)tell(r.error);refresh(true);return}
+  if(t.dataset.delspace){const n=t.dataset.delspace;if(!await ask(`Delete the ${n} space? Its agents go back to their .peerlink space or unassigned, and spaces inside it move to the top.`))return;
+    const r=await post(`/api/spaces/${encodeURIComponent(n)}/delete`);if(r.error)tell(r.error);
+    else if(r.still_in_files.length){const f=r.still_in_files;tell(`Deleted. The .peerlink in ${f.join(', ')} still name${f.length===1?'s':''} ${n}, so the agents there stay in it until you change ${f.length===1?'that file':'those files'}.`)};refresh(true);return}
   if(t.dataset.sel!==undefined){sel=sel===t.dataset.sel?'':t.dataset.sel;editing=false;refresh(true);return}
   if(t.dataset.close!==undefined){sel='';editing=false;refresh(true);return}
   const act=t.dataset.act;if(!act)return;
   if(act==='logout'){await post('/api/web/logout');location.reload()}
   if(act==='logout-all'&&await ask('Sign out every browser, including this one?')){await post('/api/web/logout',{all:true});location.reload()}
   if(act==='rotate'&&await ask('Rotate the key? Every browser is signed out; agents pick up the new key by themselves.')){await post('/api/key/rotate');location.reload()}
+  if(act==='clean'){const parts=[...document.querySelectorAll('[data-clean]:checked')].map(c=>c.dataset.clean);
+    if(!parts.length){$('#ctlmsg').textContent='Tick what to clear first.';return}
+    if(!await ask(`Clear ${parts.join(', ')}? Rules and running agents stay; the files are backed up first.`,{ok:'Clear'}))return;
+    const r=await post('/api/clean',{parts});
+    $('#ctlmsg').textContent=r.error?'Not cleared: '+r.error:'Cleared '+Object.entries(r.cleared).map(([k,v])=>`${k} (${v})`).join(', ')+'. Backup: '+r.backup;
+    document.querySelectorAll('[data-clean]').forEach(c=>c.checked=false);refresh(true);return}
   if(act==='restart'){await post('/api/restart');$('#ctlmsg').textContent='Restarting…';setTimeout(()=>location.reload(),2500)}});
 // -- Discord: the setup walkthrough and the channel-to-agent mapping --------
 let dState=null,dGuilds=null,dDraft=null,dBusy=false;

@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.9.52'
+const DAEMON_VERSION = '0.9.53'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -1697,7 +1697,7 @@ export const register: Register = (on, options) => {
     await $.tool.register({
       name: 'set_role',
       description:
-        "As a space lead, set the role of an agent in your space or a space inside it: what it is there for and the rules it works by, shown to it and its peers. It's that agent's, kept across /clear, and replaces its folder's .peerlink role: lines; an empty role goes back to those. The agent is told.",
+        "Set your own role (agent: your own name), such as when your user asks you to, or, as a space lead, the role of an agent in your space or a space inside it: what it is there for and the rules it works by, shown to it and its peers. It's that agent's, kept across /clear, and replaces its folder's .peerlink role: lines; an empty role goes back to those. Another agent whose role you set is told.",
       inputSchema: {
         type: 'object',
         properties: {
