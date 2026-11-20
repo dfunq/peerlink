@@ -139,12 +139,25 @@ class ChatTest(unittest.TestCase):
             return [m["text"] for m in peerlinkd.inboxes.get(sid, [])]
 
         say("test")
-        self.assertEqual((got("s-hq"), got("s-notes"), got("s-quiet")), (["test"], ["test"], []))
+        self.assertEqual((got("s-hq"), got("s-quiet")), (["test"], []))
+        self.assertTrue(got("s-notes")[0].startswith("test\n\n(You receive in this channel but don't send there"))
         copies = [m for m in peerlinkd.messages if m.get("discord", {}).get("message_id") == "p1"]
-        self.assertEqual(len({m["id"] for m in copies}), 2)  # each its own message, to answer on its own
+        self.assertEqual(len({m["id"] for m in copies}), 2)  # each its own message
+        # notes receives but doesn't send: it reads along, and only hq, which sends, answers there.
+        hq, notes = (next(m for m in copies if m["to_cwd"] == c) for c in ("/x/hq", "/x/Notes"))
+        self.assertEqual((hq["expects_reply"], notes["expects_reply"]), (True, False))
+        self.assertFalse(any(j[1] == "p1" and j[3] for j in peerlinkd.reaction_jobs if notes["id"] in peerlinkd.reactions))
+        posts = len(self.fake.calls)
+        refused = peerlinkd.send_discord(peerlinkd.sessions["s-notes"], "user", "me too", notes, 0)
+        self.assertEqual(refused[0], 403)
+        self.assertEqual(len(self.fake.calls), posts)  # nothing posted
+        self.assertEqual(peerlinkd.send_discord(peerlinkd.sessions["s-hq"], "user", "on it", hq, 0)[0], 200)
         say("@notes only you")
         say("Task: rotate the key")
-        self.assertEqual(got("s-notes"), ["test", "only you"])
+        self.assertEqual(got("s-notes")[1], "only you")  # named, it answers there
+        named = next(m for m in peerlinkd.messages if m.get("discord", {}).get("message_id") == "p2")
+        self.assertTrue(named["expects_reply"])
+        self.assertEqual(peerlinkd.send_discord(peerlinkd.sessions["s-notes"], "user", "here", named, 0)[0], 200)
         self.assertEqual(got("s-hq"), ["test", "Task: rotate the key"])  # a task has one owner: the first receiver
 
     def test_a_reaction_on_a_post_several_messages_share_comes_off_only_when_none_has_it(self):
