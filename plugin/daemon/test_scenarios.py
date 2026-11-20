@@ -22,11 +22,11 @@ class ScenarioTest(unittest.TestCase):
 
     def test_a_message_handed_out_but_not_acked_survives_kill_9(self):
         rig = self.rig()
-        sky, core, _ = self.team(rig)
+        chief, core, _ = self.team(rig)
         core.poll()  # what it's told on joining, acked
-        sky.send(to="core", text="Already in your session.")
+        chief.send(to="core", text="Already in your session.")
         self.assertEqual([m["text"] for m in core.poll()], ["Already in your session."])  # acked
-        sky.send(to="core", text="Deploy is blocked on you.")
+        chief.send(to="core", text="Deploy is blocked on you.")
         handed = core.poll(ack=False)  # handed over; the daemon dies before the plugin's ack
         self.assertEqual([m["text"] for m in handed], ["Deploy is blocked on you."])
         rig.crash()
@@ -103,10 +103,10 @@ class ScenarioTest(unittest.TestCase):
 
     def team(self, rig):
         """A lead at the top, a lead of a space inside it, and that space's worker: the chain work is relayed along."""
-        sky = rig.agent("sky", space="top")
+        chief = rig.agent("chief", space="top")
         core = rig.agent("core", space="core", parent="top")
         loop = rig.agent("loop", space="core", parent="top")
-        return sky, core, loop
+        return chief, core, loop
 
     def started_agent(self, rig, name, sid, space, parent):
         """An agent a spawn started: its space comes from the request, in a folder whose .peerlink says `space`/`parent`."""
@@ -121,22 +121,22 @@ class ScenarioTest(unittest.TestCase):
         """i63: a spawn names the space, and the folder's .peerlink still says which space that one sits inside."""
         sid = str(uuid.uuid4())
         rig = self.rig(config={"sessions": {sid: {"started_in": "core"}}})
-        sky = rig.agent("sky", space="top")
+        chief = rig.agent("chief", space="top")
         core = self.started_agent(rig, "core", sid, "core", "top")
-        sky.send(to="core", text="By name.")
+        chief.send(to="core", text="By name.")
         core.expect("By name.")
-        sky.send(to="space:core", text="By space.")
+        chief.send(to="space:core", text="By space.")
         core.expect("By space.")
-        core.send(to="sky", text="Back up the tree.")
-        sky.expect("Back up the tree.")
+        core.send(to="chief", text="Back up the tree.")
+        chief.expect("Back up the tree.")
 
     def test_a_parent_line_only_counts_for_the_space_its_file_names(self):
         """An agent started in another space doesn't inherit the parent of the space its folder's .peerlink names."""
         sid = str(uuid.uuid4())
         rig = self.rig(config={"sessions": {sid: {"started_in": "elsewhere"}}})
-        sky = rig.agent("sky", space="top")
+        chief = rig.agent("chief", space="top")
         self.started_agent(rig, "core", sid, "core", "top")
-        code, out = sky.send(False, to="core", text="hi")
+        code, out = chief.send(False, to="core", text="hi")
         self.assertEqual(code, 409)
         self.assertIn("can't reach", out["error"])
 
@@ -162,42 +162,42 @@ class ScenarioTest(unittest.TestCase):
 
     def test_work_goes_down_a_tree_of_tasks_and_word_comes_back_without_a_relay(self):
         rig = self.rig()
-        sky, core, loop = self.team(rig)
+        chief, core, loop = self.team(rig)
         # The top lead reaches the nested space only through its lead, and is told who works under it.
-        self.assertEqual(sorted(sky.peers()), ["core"])
-        self.assertEqual(sky.peers()["core"]["inside"], ["loop"])
-        code, out = sky.send(False, to="loop", text="hi")
+        self.assertEqual(sorted(chief.peers()), ["core"])
+        self.assertEqual(chief.peers()["core"]["inside"], ["loop"])
+        code, out = chief.send(False, to="loop", text="hi")
         self.assertEqual(code, 409)
         self.assertIn("loop", out["error"])
 
-        top = sky.send(to="core", kind="task", text="Ship the template engine")["task"]
+        top = chief.send(to="core", kind="task", text="Ship the template engine")["task"]
         core.expect("Ship the template engine")
         sub = core.send(to="loop", kind="task", text=f"Backend PR for {top}")["task"]
         loop.expect("Backend PR")
 
         # One note from the top reaches the worker two levels down; the lead between them sends nothing.
-        code, out = sky.call("POST", f"/api/tasks/{top}/note", {"text": "Use a merge commit."})
+        code, out = chief.call("POST", f"/api/tasks/{top}/note", {"text": "Use a merge commit."})
         self.assertEqual((code, sorted(out["told"])), (200, ["core", "loop"]))
         self.assertIn(f"through your task {sub}", loop.expect("Use a merge commit.")["text"])
 
         # The worker's blocker is on the record the top lead reads, though the two can't message each other.
         loop.call("POST", f"/api/tasks/{sub}/note", {"text": "Need the dev key.", "blocked": True})
         core.expect("Need the dev key.")
-        code, view = sky.call("GET", f"/api/tasks/{top}?by={sky.sid}")
+        code, view = chief.call("GET", f"/api/tasks/{top}?by={chief.sid}")
         self.assertEqual([(t["id"], t["blocked"]) for t in view["below"]], [(sub, "Need the dev key.")])
 
         # The user's answer to the top lead's question goes to everyone under the task as well.
-        asked = sky.send(to="user", expects_reply=True, text=f"Raise the dev key's limit for {top}?")
+        asked = chief.send(to="user", expects_reply=True, text=f"Raise the dev key's limit for {top}?")
         self.assertEqual([i["id"] for i in rig.user("GET", "/api/inbox")["items"]], [asked["id"]])
         rig.user("POST", "/api/inbox", {"kind": "question", "id": asked["id"], "action": "reply", "text": "Yes, raise it."})
-        for agent in (sky, core, loop):
+        for agent in (chief, core, loop):
             agent.expect("Yes, raise it.")
         self.assertEqual(rig.user("GET", "/api/inbox")["items"], [])
 
         # Closing the subtask tells whoever asked for it, and the record shows it closed.
         loop.call("POST", f"/api/tasks/{sub}", {"status": "done", "note": "Merged as abc123."})
         core.expect("Merged as abc123.")
-        _, view = sky.call("GET", f"/api/tasks/{top}?by={sky.sid}")
+        _, view = chief.call("GET", f"/api/tasks/{top}?by={chief.sid}")
         self.assertEqual((view["below"][0]["status"], view["below"][0]["last"]["kind"]), ("done", "closed"))
 
     def test_an_agent_that_clears_its_context_keeps_its_name_its_tasks_and_its_replies(self):
