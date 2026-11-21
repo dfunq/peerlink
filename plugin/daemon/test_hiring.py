@@ -239,6 +239,30 @@ class HerdrLaunchTest(unittest.TestCase):
         self.assertEqual(argv[argv.index("--cwd") + 1], "/x/api")
         self.assertEqual(argv[-1], "/bin/claude")
 
+    def test_a_hire_opens_in_its_leads_herdr_app_space(self):
+        d.sessions["s-lead9"] = {"id": "s-lead9", "name": "lead9", "cwd": "/x/lead9", "pid": 77, "last_seen": time.time()}
+        self.addCleanup(d.sessions.pop, "s-lead9", None)
+        sp = {"id": "s9", "dir": "/x/api", "name": "pg-client", "space": "pixelgrid", "requester": {"id": "s-lead9", "cwd": "/x/lead9"}}
+        terms = {"t1": {"cwd": "/x/lead9", "labels": {"herdr.space": "sp-other"}, "foreground": {"pid": 5}},
+                 "t2": {"cwd": "/x/lead9", "labels": {"herdr.space": "sp-lead"}, "foreground": {"pid": 77}}}
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            if argv[1] == "ls":
+                out = {"terminals": [{"address": a, "cwd": t["cwd"], "state": "live"} for a, t in terms.items()]}
+            elif argv[1] == "get":
+                out = {"state": "live", **terms.get(argv[2], {})}
+            else:
+                out = {"address": "t42"}
+            return unittest.mock.Mock(returncode=0, stdout=json.dumps(out), stderr="")
+        with unittest.mock.patch.object(d, "find_claude", lambda: "/bin/claude"), unittest.mock.patch.object(d, "find_hc", lambda: "/bin/hc"), \
+                unittest.mock.patch.object(d.subprocess, "run", run):
+            self.assertEqual(d.launch(sp)[1], "")
+        argv = next(a for a in calls if a[1] == "run")
+        self.assertIn("herdr.space=sp-lead", argv)
+        self.assertEqual(argv[-1], "/bin/claude")
+
     def test_when_hc_fails_it_falls_back_to_tmux(self):
         sp = {"id": "s9", "dir": "/x/api", "name": "", "space": ""}
         seen = []

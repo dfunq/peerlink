@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.9.67'
+const DAEMON_VERSION = '0.9.68'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -935,7 +935,7 @@ async function rosterContext($: EngineInterface) {
 
 async function postSummary($: EngineInterface, next: string, kind: 'seed' | 'model' | 'manual', headline = '') {
   summary = next.slice(0, 300)
-  await call($, 'POST', `/api/sessions/${sessionId}/heartbeat`, { summary, headline: headline.slice(0, 80), summary_kind: kind })
+  await call($, 'POST', `/api/sessions/${sessionId}/heartbeat`, { summary, headline: headline.slice(0, 80), summary_kind: kind, inbox: false })
 }
 
 function clip(text: string, n: number) {
