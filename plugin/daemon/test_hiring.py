@@ -39,7 +39,8 @@ class HiringTest(unittest.TestCase):
         def fake_launch(sp):
             launched.append(sp["id"])
             return "in a test terminal", ""
-        for target, fake in (("launch", fake_launch), ("hard_stop", lambda *a, **k: None)):
+        self.trusted, self.real_trust = [], d.trust_folder
+        for target, fake in (("launch", fake_launch), ("hard_stop", lambda *a, **k: None), ("trust_folder", self.trusted.append)):
             p = unittest.mock.patch.object(d, target, fake)
             p.start()
             self.addCleanup(p.stop)
@@ -130,6 +131,56 @@ class HiringTest(unittest.TestCase):
         status, out = d.retire("s-lead", {"agent": "w0"})
         self.assertEqual(status, 200, out)
         self.assertTrue(d.sessions[sid].get("terminate"))
+
+    def repo(self):
+        root = tempfile.mkdtemp(prefix="wt-")
+        repo = os.path.join(root, "app")
+        os.mkdir(repo)
+        for args in (["init", "-q", "-b", "main"], ["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "start"]):
+            d.subprocess.run(["git", "-C", repo, *args], check=True, capture_output=True)
+        return repo
+
+    def test_a_worker_starts_in_a_new_worktree_made_when_it_starts_and_kept_when_it_retires(self):
+        repo = self.repo()
+        sp = self.hire(dir="", worktree={"repo": repo, "branch": "fix/login-copy", "base": "main"})
+        path = repo + "-wt-fix-login-copy"
+        self.assertEqual(d.spawns[sp]["dir"], os.path.realpath(path) if os.path.realpath(repo) != repo else path)
+        wt = d.spawns[sp]["worktree"]
+        self.assertTrue(wt["created"] and os.path.isdir(wt["path"]))
+        self.assertEqual(d.git(wt["path"], "rev-parse", "--abbrev-ref", "HEAD"), (0, "fix/login-copy"))
+        self.assertEqual(self.trusted, [wt["path"]])
+        # A lead-made link with another agent ends when it retires; its worktree stays, and the lead is told how to remove it.
+        sid = self.register(sp, "w0")
+        d.config.setdefault("agent_links", []).append(["a-other", "a-w0"])
+        d.config.setdefault("link_info", {})["a-other|a-w0"] = {"by": ["lead"], "why": "", "task": "", "ts": 0}
+        self.assertEqual(d.retire(sid, {})[0], 200)
+        self.assertNotIn(["a-other", "a-w0"], d.config["agent_links"])
+        self.assertTrue(os.path.isdir(wt["path"]))
+        self.assertIn(f"worktree remove", self.told("lead")[-1])
+        # An existing branch is checked out rather than made again; a folder in the way, or no repo, is refused up front.
+        d.git(repo, "branch", "fix/other")
+        other = self.hire(1, dir="", worktree={"repo": repo, "branch": "fix/other"})
+        self.assertEqual(d.git(d.spawns[other]["dir"], "rev-parse", "--abbrev-ref", "HEAD"), (0, "fix/other"))
+        busy = tempfile.mkdtemp()
+        status, out = d.request_spawn({"by": "s-lead", "dir": busy, "purpose": "p", "first_prompt": "f", "worktree": {"repo": repo, "branch": "x"}})
+        self.assertEqual(status, 400)
+        self.assertIn("isn't a worktree on x", out["error"])
+        self.assertEqual(d.request_spawn({"by": "s-lead", "purpose": "p", "first_prompt": "f", "worktree": {"repo": busy, "branch": "x"}})[0], 400)
+
+    def test_a_folder_is_marked_trusted_only_when_nothing_above_it_is(self):
+        home = tempfile.mkdtemp()
+        conf = os.path.join(home, ".claude.json")
+        with open(conf, "w") as f:
+            json.dump({"projects": {os.path.join(home, "Repos"): {"hasTrustDialogAccepted": True}}, "other": 1}, f)
+        with unittest.mock.patch.dict(os.environ, {"HOME": home}):
+            self.real_trust(os.path.join(home, "Repos", "app-wt-x"))
+            with open(conf) as f:
+                self.assertEqual(len(json.load(f)["projects"]), 1)  # under a trusted folder already
+            self.real_trust(os.path.join(home, "work", "app-wt-y"))
+            with open(conf) as f:
+                data = json.load(f)
+        self.assertTrue(data["projects"][os.path.join(home, "work", "app-wt-y")]["hasTrustDialogAccepted"])
+        self.assertEqual(data["other"], 1)
 
     def test_the_night_guard_holds_its_hours_and_refuses_hires_in_them(self):
         at = lambda h: time.mktime((2026, 11, 21, h, 30, 0, 0, 0, -1))
