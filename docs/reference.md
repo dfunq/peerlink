@@ -68,6 +68,8 @@ An agent's space belongs to its folder, so every agent opened there is in it, ac
 
 Space names are lowercased. Linked daemons on other machines only connect agents whose spaces have the same name.
 
+A git worktree takes the space of its main checkout's `.peerlink`, wherever the worktree sits. So `~/Repos/app-wt-fix` is in app's space, not in that of a `.peerlink` above `~/Repos`. The role lines in that file stay with the main checkout's agent.
+
 ### Spaces inside spaces
 
 A space can sit inside another one. Set it on the **Spaces** page, where each space's box has **Inside** and **Lead** pickers, or run `/peerlink-spaces parent <name>` in one of its agents. A `parent:` line in a `.peerlink` does the same for a space you haven't placed there:
