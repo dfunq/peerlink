@@ -35,6 +35,18 @@ class ScenarioTest(unittest.TestCase):
         rig.crash()  # acked this time: nothing comes back
         self.assertEqual(core.poll(), [])
 
+    def test_setting_a_summary_never_takes_messages_a_new_agent_has_waiting(self):
+        # A hired worker sets its first summary a second after starting: that heartbeat once took its first prompt
+        # and dropped it.
+        rig = self.rig()
+        chief, core, _ = self.team(rig)
+        core.poll()
+        chief.send(to="core", text="Your first prompt.")
+        for body in ({"summary": "starting"}, {"summary": "starting", "inbox": False, "ack": []}):
+            code, out = rig.call("POST", f"/api/sessions/{core.sid}/heartbeat", body)
+            self.assertEqual((code, out.get("inbox", [])), (200, []))
+        self.assertEqual([m["text"] for m in core.poll()], ["Your first prompt."])
+
     def test_an_answer_from_another_machine_threads_onto_the_question(self):
         """Alice on host a asks bob on host b; bob answers with reply_to alone, and the answer comes back
         to alice as the answer to her question, which no longer reads as waiting."""
@@ -492,6 +504,18 @@ class ScenarioTest(unittest.TestCase):
         self.assertEqual(register(fresh.sid, "loop", loop.cwd, None), "loop")  # a reloaded plugin has no name to say
         self.assertEqual(register(loop.sid, "pixel", pixel.cwd, "pixel-2"), "pixel-2")
         self.assertEqual(lead.peers()["loop"]["cwd"], loop.cwd)
+
+    def test_a_plugin_that_reloads_as_it_restarts_the_daemon_keeps_its_agents_name(self):
+        # A hired worker named pg-client in app-wt-x: its plugin reloaded onto a new version and restarted the daemon
+        # in the same moment, so neither remembered the name, and it came back as its folder's.
+        rig = self.rig()
+        folder = rig.folder("app-wt-x")
+        worker = Agent(rig, "pg-client", folder)
+        worker.register()
+        self.assertEqual(worker.name, "pg-client")
+        rig.restart()
+        code, out = rig.call("POST", "/api/sessions", {"id": worker.sid, "name": "app-wt-x", "had_name": None, "cwd": folder, "plugin": "rig"})
+        self.assertEqual((code, out["name"]), (200, "pg-client"))
 
     def test_one_folder_spelled_two_ways_stays_one_agent(self):
         rig = self.rig()

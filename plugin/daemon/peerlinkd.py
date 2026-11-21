@@ -33,7 +33,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.67"
+VERSION = "0.9.68"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -5230,6 +5230,26 @@ def hc_pid(address):
     return int((t.get("foreground") or {}).get("pid") or t.get("pid") or 0)
 
 
+def hc_app_space(hc, cwd, pid=0):
+    """The herdr app space (its herdr.space label) of the terminal an agent runs in, found by its folder and, when
+    known, its process; '' when it isn't in one or hc can't say."""
+    try:
+        r = subprocess.run([hc, "ls", "--json"], timeout=10, capture_output=True, text=True)
+        terms = json.loads(r.stdout).get("terminals") or [] if r.returncode == 0 else []
+    except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
+        return ""
+    found = ""
+    for t in terms:
+        if t.get("cwd") != cwd or t.get("state") != "live":
+            continue
+        info = hc_terminal(t.get("address", ""))
+        space = (info.get("labels") or {}).get("herdr.space") or ""
+        if space and pid and (info.get("foreground") or {}).get("pid") == pid:
+            return space
+        found = found or space
+    return found
+
+
 def launch_hc(hc, claude, sp):
     """Start the agent in a herdr terminal: (how, "") or ("", why not). No parent, so it outlives the terminal the
     daemon was started from; removed once it exits, so a retired agent's terminal doesn't linger."""
@@ -5237,7 +5257,15 @@ def launch_hc(hc, claude, sp):
         return f"still starting in the herdr app (hc attach {sp['hc']})", ""
     name = re.sub(r"[^a-z0-9_-]", "-", (sp.get("name") or os.path.basename(sp["dir"])).lower())[:24].strip("-") + "-" + sp["id"]
     argv = [hc, "run", "--bg", "--json", "--no-parent", "--outlive-parent", "--rm", "--cwd", sp["dir"], "--name", name[:32],
-            "--label", f"peerlink.spawn={sp['id']}", "--label", f"peerlink.space={sp.get('space') or ''}", claude]
+            "--label", f"peerlink.spawn={sp['id']}", "--label", f"peerlink.space={sp.get('space') or ''}"]
+    # The herdr app shows a terminal only once it's in one of its spaces: a hire goes in its lead's, as a new tab.
+    asker = sp.get("requester") or {}
+    with lock:
+        pid = int((sessions.get(asker.get("id") or "") or {}).get("pid") or 0)
+    space = hc_app_space(hc, asker.get("cwd") or "", pid) if asker.get("cwd") else ""
+    if space:
+        argv += ["--label", f"herdr.space={space}"]
+    argv.append(claude)
     r = subprocess.run(argv, timeout=20, capture_output=True, text=True)
     if r.returncode != 0:
         return "", (r.stderr or r.stdout).strip()[:300] or f"hc exited with {r.returncode}"
@@ -6734,7 +6762,10 @@ class Handler(BaseHTTPRequestHandler):
                     # A folder keeps the name it was given: a new session there (a restart, a resume) is still "notes".
                     # One registering again after a daemon restart keeps the name it had, not whichever is free first;
                     # one that just moved folder doesn't: the name it had belongs to the agent it was, in the old folder.
-                    given = (not moved and b.get("had_name")) or (config.get("folder_names") or {}).get(b.get("cwd") or "")
+                    # A plugin that reloaded as it restarted the daemon has forgotten its name too: the agent this
+                    # session belongs to still has it.
+                    kept = (agents.get(agent_of.get(sid) or "") or {}).get("name")
+                    given = (not moved and (b.get("had_name") or kept)) or (config.get("folder_names") or {}).get(b.get("cwd") or "")
                     # One the daemon started for a schedule comes up as the agent the schedule is for.
                     claims = name_claims.get(b.get("cwd") or "")
                     if claims and not b.get("succeeds"):
@@ -6835,9 +6866,12 @@ class Handler(BaseHTTPRequestHandler):
                 agent_seen(rec)
                 cfg = client_config(sid)
             ack(sid, b.get("ack"), b.get("holding"))
-            inbox = [] if cfg["muted"] else take_inbox(sid, track="ack" in b)
+            # Only a heartbeat that reads messages takes them: one that just sets the summary (no ack, or inbox: false)
+            # would drop them, as it did a new worker's first prompt.
+            reads = b.get("inbox") is not False and ("ack" in b or "summary" not in b)
+            inbox = [] if cfg["muted"] or not reads else take_inbox(sid, track="ack" in b)
             wait = b.get("wait")
-            if not inbox and not cfg["muted"] and isinstance(wait, (int, float)) and not isinstance(wait, bool) and wait > 0:
+            if reads and not inbox and not cfg["muted"] and isinstance(wait, (int, float)) and not isinstance(wait, bool) and wait > 0:
                 inbox = hold_for_inbox(sid, wait, "ack" in b)
             others = peer_count(sid) + len(config.get("remotes", []))
             with lock:
