@@ -167,6 +167,26 @@ class HiringTest(unittest.TestCase):
         self.assertIn("isn't a worktree on x", out["error"])
         self.assertEqual(d.request_spawn({"by": "s-lead", "purpose": "p", "first_prompt": "f", "worktree": {"repo": busy, "branch": "x"}})[0], 400)
 
+    def test_dir_naming_the_repo_puts_the_worktree_beside_it(self):
+        repo = self.repo()
+        sp = self.hire(dir=repo, worktree={"repo": repo, "branch": "SKY-1-relay"})
+        self.assertEqual(os.path.basename(d.spawns[sp]["dir"]), "app-wt-SKY-1-relay")
+        # The repo can come from dir alone.
+        other = self.hire(1, dir=repo, worktree={"branch": "SKY-2-copy"})
+        self.assertEqual(d.git(d.spawns[other]["dir"], "rev-parse", "--abbrev-ref", "HEAD"), (0, "SKY-2-copy"))
+
+    def test_a_session_reloaded_onto_newer_tools_is_told_what_they_take_once(self):
+        rec = d.sessions["s-lead"]
+        rec["plugin"] = "0.9.65"
+        with d.lock:
+            d.tool_changes_notice(rec, "0.9.65", "0.9.67")
+            d.tool_changes_notice(rec, "0.9.66", "0.9.67")
+            d.tool_changes_notice(rec, "", "0.9.67")
+        told = [m for m in d.inboxes.get("s-lead", []) if m["from"] == "peerlink"]
+        self.assertEqual(len(told), 1)
+        self.assertEqual(told[0]["kind"], "announcement")  # read at its next turn, never starts one
+        self.assertIn("worktree", told[0]["text"])
+
     def test_a_folder_is_marked_trusted_only_when_nothing_above_it_is(self):
         home = tempfile.mkdtemp()
         conf = os.path.join(home, ".claude.json")

@@ -33,7 +33,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.66"
+VERSION = "0.9.67"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -5001,18 +5001,48 @@ def git(repo, *args, timeout=60):
         return 1, str(err)
 
 
+# What changed in the tools' parameters, by the version that changed them. A session that reloads onto a newer plugin
+# can keep showing the older schemas until it restarts, so it is told what it may pass anyway: the plugin forwards
+# whatever the call carries.
+TOOL_CHANGES = [
+    ("0.9.66", "request_spawn takes worker (true to hire a worker for one piece of work) and worktree ({repo, branch, "
+               "base}: a new git worktree made when it starts; leave dir out, or give the repo, for <repo>-wt-<branch>)."),
+]
+
+
+def tool_changes_notice(rec, old, new):
+    """Tell a session whose plugin just went from `old` to `new` what its tools now take, read at its next turn
+    without starting one. Called with the lock held."""
+    news = [text for v, text in TOOL_CHANGES if version_tuple(old) < version_tuple(v) <= version_tuple(new)]
+    if not news or not version_tuple(old):
+        return
+    msg = {"id": f"m{next_msg[0]}", "ts": time.time(), "from": "peerlink", "from_name": "peerlink", "from_host": HOSTNAME,
+           "from_cwd": "", "from_space": "", "to": rec["id"], "to_name": display_name(rec), "to_cwd": rec.get("cwd", ""),
+           "to_space": space_of(rec)[0], "expects_reply": False, "reply_to": None, "hops": 0, "status": "queued", "v": 2,
+           "kind": "announcement", "recipients": [display_name(rec)],
+           "text": f"peerlink went from {old} to {new} in this session. If your tool list still shows the older "
+                   "parameters, pass the new ones anyway; they work: " + " ".join(news)}
+    next_msg[0] += 1
+    inboxes.setdefault(rec["id"], []).append(msg)
+    record(msg)
+
+
 def plan_worktree(spec, folder):
     """A spawn's worktree from request_spawn's worktree: {repo, branch, base}: (worktree, "") or (None, why not).
-    Its folder is `dir` when given, else beside the repo as <repo>-wt-<branch>. Nothing is created until it starts."""
+    Its folder is `dir` when given, else beside the repo as <repo>-wt-<branch>. `dir` naming the repo itself (or a
+    worktree with no repo given) means that repo, with the worktree in the default folder beside it.
+    Nothing is created until it starts."""
     if not isinstance(spec, dict):
         return None, "worktree is {repo, branch, base}"
-    repo = os.path.abspath(os.path.expanduser(str(spec.get("repo") or "")))
+    repo = os.path.abspath(os.path.expanduser(str(spec.get("repo") or folder or "")))
     branch, base = str(spec.get("branch") or "").strip(), str(spec.get("base") or "HEAD").strip()
     code, top = git(repo, "rev-parse", "--show-toplevel")
     if code != 0:
         return None, f"{repo} isn't a git repository"
     if not branch or git(repo, "check-ref-format", "--branch", branch)[0] != 0:
         return None, f"'{branch}' isn't a branch name git takes"
+    if folder and os.path.realpath(folder) in (os.path.realpath(repo), os.path.realpath(top)):
+        folder = ""
     path = folder or f"{top.rstrip(os.sep)}-wt-{re.sub(r'[^A-Za-z0-9._-]', '-', branch)}"
     if os.path.exists(path) and git(path, "rev-parse", "--abbrev-ref", "HEAD") != (0, branch):
         return None, f"{path} already exists and isn't a worktree on {branch}"
@@ -6714,6 +6744,8 @@ class Handler(BaseHTTPRequestHandler):
                     # The same summary its folder had before (a daemon restart, a resume) keeps its age.
                     known = dir_summaries.get(b.get("cwd") or rec.get("cwd") or "") or {}
                     rec["summary_ts"] = known["ts"] if known.get("summary") == b["summary"] and known.get("ts") else time.time()
+                if b.get("plugin") and rec.get("plugin") and b["plugin"] != rec["plugin"]:
+                    tool_changes_notice(rec, rec["plugin"], b["plugin"])
                 for k in ("cwd", "repo", "branch", "summary", "model", "plugin", "pid"):
                     if b.get(k) is not None:
                         rec[k] = b[k]
