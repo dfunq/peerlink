@@ -185,6 +185,21 @@ class HerdrLaunchTest(unittest.TestCase):
         self.assertTrue(how.startswith("in tmux"), how)
         self.assertEqual(seen[0], "hc")
 
+    def test_with_herdr_turned_off_hc_is_never_tried(self):
+        sp = {"id": "s9", "dir": "/x/api", "name": "", "space": ""}
+        seen = []
+
+        def run(argv, **kw):
+            seen.append(os.path.basename(argv[0]))
+            return unittest.mock.Mock(returncode=1 if "has-session" in argv else 0, stdout="", stderr="")
+        with unittest.mock.patch.dict(d.config, {"use_herdr": False}), unittest.mock.patch.object(d, "find_claude", lambda: "/bin/claude"), \
+                unittest.mock.patch.object(d, "find_hc", lambda: "/bin/hc"), \
+                unittest.mock.patch.object(d.shutil, "which", lambda n: "/bin/tmux" if n == "tmux" else None), \
+                unittest.mock.patch.object(d.subprocess, "run", run):
+            how, err = d.launch(sp)
+        self.assertTrue(how.startswith("in tmux"), how)
+        self.assertNotIn("hc", seen)
+
 
 if __name__ == "__main__":
     unittest.main()

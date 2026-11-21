@@ -186,7 +186,8 @@ DEFAULT_CONFIG = {
     "auto_approve_all": False,  # every agent's requests to start an agent, or a schedule that may, go ahead without asking you
     "auto_approve_folders": [],  # the folders whose agents' requests do; set only from the web UI
     "max_live_spawns": 0,  # at most this many workers (agents started with worker: true) run at once, the rest queue; 0 is no cap; set only from the web UI
-    "night_guard": "",  # hours no worker is started, like "22-8"; empty is off; set only from the web UI
+    "night_guard": "",
+    "use_herdr": True,  # start agents in herdr's terminals when herdr (hc) is installed; off, or without herdr, tmux or Terminal as before  # hours no worker is started, like "22-8"; empty is off; set only from the web UI
     "task_nudge_h": 24,  # an open task with no update for this many hours is raised with its owner, then with whoever asked; 0 is off
     "ask_defaults": True,  # a question to you may name a default the agent goes with when you haven't answered in time
     "ask_default_min_m": 10,  # the shortest wait, in minutes, an agent may give you before its default applies
@@ -5130,7 +5131,8 @@ def launch(sp):
     claude = find_claude()
     if not claude:
         return "", "Claude Code (claude) isn't on this machine's PATH"
-    hc = find_hc()
+    # herdr is optional: used only when it's installed and not turned off; nothing else in peerlink needs it.
+    hc = find_hc() if config.get("use_herdr", True) else ""
     if hc:
         try:
             how, err = launch_hc(hc, claude, sp)
