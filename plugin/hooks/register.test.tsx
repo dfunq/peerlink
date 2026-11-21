@@ -1149,6 +1149,14 @@ test("a CLAUDE.md's stock first line is not taken as the project's description",
   expect(daemon.summaries().join('\n')).not.toContain('provides guidance')
 })
 
+test('on Windows an agent is named after its folder, not its whole path', async ($, on) => {
+  const { where } = engine(on)
+  where.root = 'C:\\Users\\me\\Projects\\api\\'
+  const daemon = fakeDaemon(on)
+  await $.session.start(START)
+  expect(daemon.posted.find(p => p.path === '/api/sessions')!.body.name).toBe('api')
+})
+
 test('an agent is known by its project root, not the folder its shell moved to', async ($, on) => {
   engine(on)
   const daemon = fakeDaemon(on)
