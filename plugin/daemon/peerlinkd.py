@@ -18,6 +18,7 @@ import re
 import hmac
 import json
 import secrets
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -5029,6 +5030,7 @@ def git(repo, *args, timeout=60):
 # can keep showing the older schemas until it restarts, so it is told what it may pass anyway: the plugin forwards
 # whatever the call carries.
 TOOL_CHANGES = [
+    ("0.9.72", "request_spawn takes model (like opus or sonnet) and effort (low, medium, high, xhigh or max) for the agent it starts."),
     ("0.9.66", "request_spawn takes worker (true to hire a worker for one piece of work) and worktree ({repo, branch, "
                "base}: a new git worktree made when it starts; leave dir out, or give the repo, for <repo>-wt-<branch>)."),
 ]
@@ -5133,6 +5135,23 @@ def make_worktree(sp):
     return ""
 
 
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+
+def launch_opts(sp):
+    return {k: sp[k] for k in ("model", "effort") if sp.get(k)}
+
+
+def launch_args(sp):
+    """The flags a spawn asked for, after any of your own alias's: Claude Code takes the last one given."""
+    return [a for k in ("model", "effort") if sp.get(k) for a in (f"--{k}", sp[k])]
+
+
+def launch_note(sp):
+    args = launch_args(sp)
+    return f" It starts with {' '.join(args)}." if args else ""
+
+
 def request_spawn(body):
     by = sessions.get(body.get("by") or "")
     if by is None:
@@ -5145,6 +5164,11 @@ def request_spawn(body):
         return 409, {"error": f"the night guard is on ({config.get('night_guard')}): no workers start in those hours unless your user changes it in the web UI"}
     folder = os.path.abspath(os.path.expanduser(str(body.get("dir") or ""))) if body.get("dir") else ""
     purpose, prompt = str(body.get("purpose") or "").strip(), str(body.get("first_prompt") or "").strip()
+    model, effort = str(body.get("model") or "").strip(), str(body.get("effort") or "").strip().lower()
+    if model and not re.fullmatch(r"[A-Za-z0-9._\[\]-]{1,60}", model):
+        return 400, {"error": f"model '{model}' isn't a model name, like opus, sonnet or claude-opus-5-5"}
+    if effort and effort not in EFFORTS:
+        return 400, {"error": f"effort is one of {', '.join(EFFORTS)}"}
     worktree = None
     if body.get("worktree"):
         worktree, why = plan_worktree(body["worktree"], folder)
@@ -5170,6 +5194,10 @@ def request_spawn(body):
               "status": "pending", "created": time.time(), "updated": time.time(), "note": ""}
         if worker:
             sp["worker"] = True
+        if model:
+            sp["model"] = model
+        if effort:
+            sp["effort"] = effort
         if worktree:
             sp["worktree"] = worktree
         spawns[sp["id"]] = sp
@@ -5181,7 +5209,7 @@ def request_spawn(body):
         decide_spawn(sp["id"], True, "auto-approve")
         if channel and chat_ready(channel):
             post_async([(channel, f"**{sp['requester']['name']}** {'queued' if sp['status'] == 'queued' else 'started'} {sp['name'] or folder_name(folder)}", None)])
-        return 200, {"id": sp["id"], "status": sp["status"], "note": f" Auto-approved: {sp['note']}"}
+        return 200, {"id": sp["id"], "status": sp["status"], "note": f" Auto-approved: {sp['note']}{launch_note(sp)}", **launch_opts(sp)}
     if channel and chat_ready(channel):
         try:
             sent = chat_post(channel,
@@ -5192,8 +5220,8 @@ def request_spawn(body):
                 save_spawns()
         except ChatError as err:
             log("discord", "spawn post failed:", err)
-    note = f" An agent is already running there ({display_name(running)})." if running else ""
-    return 200, {"id": sp["id"], "status": "pending", "note": note}
+    note = (f" An agent is already running there ({display_name(running)})." if running else "") + launch_note(sp)
+    return 200, {"id": sp["id"], "status": "pending", "note": note, **launch_opts(sp)}
 
 
 def tilde_path(p):
@@ -5221,21 +5249,24 @@ def user_shell():
     return sh if os.path.basename(sh) in ("zsh", "bash") and os.access(sh, os.X_OK) else ""
 
 
-def claude_argv(claude):
+def claude_argv(claude, extra=()):
     """How to start Claude Code: through your login shell when `claude` is an alias or function there (your own flags,
     such as a model or permission mode), else the program itself. PEERLINK_CLAUDE names one outright."""
+    extra = list(extra)
     if os.environ.get("PEERLINK_CLAUDE"):
-        return [claude]
+        return [claude, *extra]
     sh = user_shell()
     if not sh:
-        return [claude]
+        return [claude, *extra]
     ask = "whence -w claude" if sh.endswith("zsh") else "type -t claude"
     try:
         r = subprocess.run([sh, "-lic", ask], timeout=15, capture_output=True, text=True, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
-        return [claude]
+        return [claude, *extra]
     kind = (r.stdout or "").strip().splitlines()[-1:] or [""]
-    return [sh, "-lic", "claude"] if re.search(r"\b(alias|function)\b", kind[0]) else [claude]
+    if re.search(r"\b(alias|function)\b", kind[0]):
+        return [sh, "-lic", " ".join(["claude", *map(shlex.quote, extra)])]
+    return [claude, *extra]
 
 
 def best_python():
@@ -5337,7 +5368,7 @@ def launch_hc(hc, claude, sp):
         # A tab id the app doesn't know yet becomes a new tab with that id, so it can be named after the agent.
         tab = "tb" + secrets.token_hex(16)
         argv += ["--label", f"herdr.space={space}", "--label", f"herdr.tab={tab}"]
-    argv += claude_argv(claude)
+    argv += claude_argv(claude, launch_args(sp))
     r = subprocess.run(argv, timeout=20, capture_output=True, text=True)
     if r.returncode != 0:
         return "", (r.stderr or r.stdout).strip()[:300] or f"hc exited with {r.returncode}"
@@ -5378,13 +5409,14 @@ def launch(sp):
                 if "trust this folder" in pane:
                     return "", f"Claude Code there is waiting for you to trust the folder: run tmux attach -t {name} and choose \"Yes, I trust this folder\""
                 return f"still starting in tmux (tmux attach -t {name})", ""
-            subprocess.run([tmux, "new-session", "-d", "-s", name, "-c", sp["dir"], *claude_argv(claude)], check=True, timeout=10, capture_output=True)
+            subprocess.run([tmux, "new-session", "-d", "-s", name, "-c", sp["dir"], *claude_argv(claude, launch_args(sp))], check=True, timeout=10, capture_output=True)
             sp["tmux"] = name
             return f"in tmux (tmux attach -t {name})", ""
         if sys.platform == "darwin":
             quote = lambda v: '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
             # Terminal runs your shell, so an alias of yours named claude applies by itself.
-            run = '"claude"' if claude_argv(claude) != [claude] else f"quoted form of {quote(claude)}"
+            shell = claude_argv(claude, launch_args(sp))
+            run = quote(shell[-1]) if shell[0] != claude else " & \" \" & ".join(f"quoted form of {quote(a)}" for a in shell)
             script = f'tell application "Terminal" to do script "cd " & quoted form of {quote(sp["dir"])} & " && " & {run}'
             subprocess.run(["osascript", "-e", script], check=True, timeout=15, capture_output=True)
             return "in a new Terminal window", ""

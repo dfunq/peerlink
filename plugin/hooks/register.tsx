@@ -1644,6 +1644,8 @@ export const register: Register = (on, options) => {
           name: { type: 'string', description: 'Its name, like "webshop-server"; needed when the folder already has an agent, which keeps the folder\'s name' },
           role: { type: 'string', description: 'What it is there for, shown to peers; defaults to the purpose when the folder already has an agent, so it doesn\'t take that one\'s role' },
           space: { type: 'string', description: 'The space it joins; yours if left out' },
+          model: { type: 'string', description: 'The model it runs, like opus or sonnet (--model); your user\'s default if left out' },
+          effort: { type: 'string', enum: ['low', 'medium', 'high', 'xhigh', 'max'], description: 'Its reasoning effort (--effort); your user\'s default if left out' },
           worker: {
             type: 'boolean',
             description: "true to hire a worker for one piece of work: it counts against your user's cap on workers running at once (queued past it), can't start agents or schedules itself, and calls retire when done. Leave it out to start or restart a standing agent",
@@ -1965,7 +1967,7 @@ export const register: Register = (on, options) => {
 
   on('tool.call', { tool: 'mcp__peerlink__request_spawn' }, async ($, e) => {
     const input = e as any
-    const res = await call($, 'POST', '/api/spawns', { by: sessionId, dir: input.dir, purpose: input.purpose, first_prompt: input.first_prompt, space: input.space, name: input.name, role: input.role, worker: !!input.worker, worktree: input.worktree })
+    const res = await call($, 'POST', '/api/spawns', { by: sessionId, dir: input.dir, purpose: input.purpose, first_prompt: input.first_prompt, space: input.space, name: input.name, role: input.role, worker: !!input.worker, worktree: input.worktree, model: input.model, effort: input.effort })
     if (!res.ok) return text(`Not asked: ${res.data.error ?? res.status}`)
     if (res.data.status === 'queued') return text(`${res.data.id} is queued without asking: your user's cap on workers running at once is reached. It starts when one retires, and you'll be told.`)
     if (res.data.status !== 'pending') return text(`${res.data.id} ${res.data.status === 'started' ? 'started' : `didn't start (${res.data.status})`} without asking: your user lets you start agents.${res.data.note ?? ''}`)

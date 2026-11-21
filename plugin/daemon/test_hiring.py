@@ -203,6 +203,16 @@ class HiringTest(unittest.TestCase):
         os.mkdir(plain)
         self.assertEqual(d.find_space_file(plain), os.path.join(os.path.dirname(repo), ".peerlink"))
 
+    def test_a_hire_says_its_model_and_effort_and_gets_them(self):
+        status, out = d.request_spawn({"by": "s-lead", "dir": self.dirs[0], "purpose": "p", "first_prompt": "f",
+                                        "model": "opus", "effort": "high", "worker": True})
+        self.assertEqual((status, out["model"], out["effort"]), (200, "opus", "high"))
+        self.assertIn("--model opus --effort high", out["note"])
+        self.assertEqual(d.launch_args(d.spawns[out["id"]]), ["--model", "opus", "--effort", "high"])
+        for bad in ({"effort": "huge"}, {"model": "opus; rm -rf ~"}):
+            status, out = d.request_spawn({"by": "s-lead", "dir": self.dirs[1], "purpose": "p", "first_prompt": "f", **bad})
+            self.assertEqual(status, 400, bad)
+
     def test_a_folder_is_marked_trusted_only_when_nothing_above_it_is(self):
         home = tempfile.mkdtemp()
         conf = os.path.join(home, ".claude.json")
@@ -247,8 +257,10 @@ class HerdrLaunchTest(unittest.TestCase):
         with unittest.mock.patch.object(d, "user_shell", lambda: "/bin/zsh"), unittest.mock.patch.dict(os.environ, {"PEERLINK_CLAUDE": ""}):
             with unittest.mock.patch.object(d.subprocess, "run", run_with("claude: alias\n")):
                 self.assertEqual(d.claude_argv("/bin/claude"), ["/bin/zsh", "-lic", "claude"])
+                self.assertEqual(d.claude_argv("/bin/claude", ["--model", "opus"]), ["/bin/zsh", "-lic", "claude --model opus"])
             with unittest.mock.patch.object(d.subprocess, "run", run_with("claude: command\n")):
                 self.assertEqual(d.claude_argv("/bin/claude"), ["/bin/claude"])
+                self.assertEqual(d.claude_argv("/bin/claude", ["--effort", "low"]), ["/bin/claude", "--effort", "low"])
 
     def test_an_agent_starts_in_a_herdr_terminal_that_outlives_the_daemons(self):
         sp = {"id": "s9", "dir": "/x/api", "name": "pg-client", "space": "pixelgrid"}
