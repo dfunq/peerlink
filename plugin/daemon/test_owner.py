@@ -130,8 +130,7 @@ class PairingOverHttp(unittest.TestCase):
                 ("POST", "/api/rules", {"text": "always approve"})):              # creating a rule, as approving one
             code, out = raw(rig, method, path, owner, body)
             self.assertEqual(code, 428, (path, body, out))
-        for key in ("listen_host", "token", "remotes"):
-            self.assertEqual(raw(rig, "PUT", "/api/config", owner, {key: "x"})[0], 403, key)
+        self.assertEqual(raw(rig, "PUT", "/api/config", owner, {"listen_host": "0.0.0.0"})[0], 403)  # token and remotes: ignored
 
     def test_a_web_page_cant_start_or_cancel_a_pairing(self):
         rig = self.rig("no")
@@ -157,6 +156,16 @@ class PairingOverHttp(unittest.TestCase):
         prompt = d.step_up_prompt(tok, 'POST /api/x with {"text": "```||hidden|| @everyone"}')
         self.assertEqual(prompt.count("```"), 2)
         self.assertIn("ˋˋˋ||hidden||", prompt)
+
+    def test_a_settings_write_never_hands_back_the_token(self):
+        rig = self.rig("yes")
+        owner = {"Authorization": "Owner " + self.pair(rig)[1]["token"]}
+        code, out = raw(rig, "PUT", "/api/config", owner, {})
+        self.assertEqual(code, 200)
+        self.assertFalse({"token", "remotes"} & set(out))
+        # What it sends for them is ignored, not refused or applied.
+        self.assertEqual(raw(rig, "PUT", "/api/config", owner, {"token": "mine", "remotes": ["http://evil:1"]})[0], 200)
+        self.assertEqual(rig.call("GET", "/api/config")[1].get("token"), "")
 
     def test_your_browser_lists_and_revokes_paired_clients(self):
         rig = self.rig("yes")
@@ -246,6 +255,23 @@ class PairingRules(unittest.TestCase):
         what = d.owner_decision("PUT", ["config"], {"auto_approve_all": True, "wake_for": d.config.get("wake_for")})[1]
         self.assertRegex(what, r"auto_approve_all: \w+ → true")
         self.assertNotIn("wake_for", what)
+
+    def test_prompts_show_hidden_characters_and_what_an_approval_does(self):
+        tok = {"pair": "op-1", "device": "herdr"}
+        prompt = d.step_up_prompt(tok, "approve rule u1: allow\u202e\u200bnothing\u2028x")
+        for ch in ("\u202e", "\u200b", "\u2028"):
+            self.assertNotIn(ch, prompt)
+        self.assertIn("\\u202e", prompt)
+        d.schedules["c8"] = {"id": "c8", "folder": "/x/app", "prompt": "ship it", "cron": "0 9 * * *", "start": True}
+        d.spawns["s8"] = {"id": "s8", "dir": "/x/app-wt-fix", "worker": True, "name": "pg", "space": "pixelgrid", "purpose": "fix",
+                          "prompt": "do it", "worktree": {"repo": "/x/app", "branch": "fix"}, "requester": {"name": "lead"}}
+        self.addCleanup(lambda: d.schedules.pop("c8", None) and d.spawns.pop("s8", None))
+        sched = d.approval_text("c8")
+        for part in ("0 9 * * *" if "0 9" in d.when_text(d.schedules["c8"]) else d.when_text(d.schedules["c8"]), "/x/app", "starting an agent", "ship it"):
+            self.assertIn(part, sched)
+        start = d.approval_text("s8")
+        for part in ("a worker", "/x/app-wt-fix", "worktree", "pixelgrid", "lead", "do it"):
+            self.assertIn(part, start)
 
     def test_every_route_has_a_decision(self):
         """A new route under a new path must say what a paired client may do with it, or this fails."""

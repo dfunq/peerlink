@@ -6607,6 +6607,14 @@ def show(value):
     return json.dumps(value, sort_keys=True, ensure_ascii=False)
 
 
+def plain(text):
+    """Text for an approval prompt, read as it acts: control and format characters (bidi overrides, zero-width
+    ones, line and paragraph separators) shown as \\uXXXX instead of reordering or hiding what's around them.
+    Newlines stay."""
+    return "".join(ch if ch == "\n" or unicodedata.category(ch) not in ("Cc", "Cf", "Zl", "Zp", "Cs", "Co", "Cn")
+                   else f"\\u{ord(ch):04x}" for ch in str(text))
+
+
 def exact_call(method, rest, body):
     """A call as the step-up prompt shows it: whole, never cut, so nothing can hide in it."""
     return f"{method} /api/{'/'.join(rest)}" + (f" with {show(body)}" if body else "")
@@ -6621,16 +6629,39 @@ OWNER_REDACTED_SETTINGS = ("token", "remotes")
 def config_change(body):
     """A paired client's settings write: (decision, what). Unknown keys and the settings that open the daemon to other
     machines are refused; a write that changes nothing is allowed; otherwise each change is listed, old → new."""
-    body = {k: v for k, v in body.items() if k not in CONFIG_READ_ONLY}
+    body = {k: v for k, v in body.items() if k not in CONFIG_READ_ONLY and k not in OWNER_REDACTED_SETTINGS}
     unknown = [k for k in body if k not in DEFAULT_CONFIG]
     if unknown:
         return "refuse", f"unknown settings: {', '.join(map(str, unknown))}"
     changed = {k: config_value(k, v)[0] for k, v in body.items() if config_value(k, v)[0] != config.get(k)}
     if any(k in OWNER_REFUSED_SETTINGS for k in changed):
-        return "refuse", "listen_host, token and remotes are set only from the web UI"
+        return "refuse", "listen_host is set only from the web UI"
     if not changed:
         return "allow", ""
     return "step", "change settings:\n" + "\n".join(f"• {k}: {show(config.get(k))} → {show(v)}" for k, v in sorted(changed.items()))
+
+
+def approval_text(rid):
+    """What approving an Inbox request does, in full, for the step-up prompt: you judge the press by it."""
+    with lock:
+        if rid in rules:
+            r = rules[rid]
+            return f"rule {rid}, which every agent it covers then follows:\n{r.get('text', '')}"
+        if rid in schedules:
+            c = schedules[rid]
+            return (f"schedule {rid}: {when_text(c)}, in {tilde_path(c.get('folder', ''))}"
+                    f"{' for ' + c['agent'] if c.get('agent') else ''}, "
+                    f"{'starting an agent there when none runs' if c.get('start', True) else 'never starting an agent'}"
+                    f"{', with the playbook ' + tilde_path(c['prompt_file']) if c.get('prompt_file') else ''}.\nIts prompt:\n{c.get('prompt', '')}")
+        if rid in spawns:
+            sp = spawns[rid]
+            wt = sp.get("worktree") or {}
+            return (f"start {rid}: {'a worker' if sp.get('worker') else 'a standing agent'}"
+                    f"{' named ' + sp['name'] if sp.get('name') else ''} in {tilde_path(sp.get('dir', ''))}"
+                    f"{' (a new worktree of ' + tilde_path(wt.get('repo', '')) + ' on ' + wt.get('branch', '') + ')' if wt else ''}, "
+                    f"space {sp.get('space') or 'default'}, asked by {(sp.get('requester') or {}).get('name', 'an agent')}.\n"
+                    f"Why: {sp.get('purpose', '')}\nIts first prompt:\n{sp.get('prompt', '')}")
+    return f"{rid}, which isn't a pending request peerlink knows"
 
 
 def owner_decision(method, rest, body):
@@ -6647,9 +6678,7 @@ def owner_decision(method, rest, body):
         # it asks again. Denying only takes away, and tasks, questions and feedback start nothing.
         rid = str(body.get("id", ""))
         if body.get("kind") == "approval" and body.get("action") != "deny":
-            item = rules.get(rid) or schedules.get(rid) or spawns.get(rid) or {}
-            label = "rule" if rid in rules else "schedule" if rid in schedules else "start"
-            return "step", f"{body.get('action', 'decide')} {label} {rid}: {show(item.get('text') or item.get('prompt') or item.get('purpose') or '')}"
+            return "step", f"{body.get('action', 'decide')} " + approval_text(rid)
         return "allow", ""
     if kind == "owner" and rest == ["owner", "revoke"]:
         return "allow", ""
@@ -6667,7 +6696,7 @@ STEP_UP_PROMPT_MAX = 1900  # one Discord message, buttons and all
 def step_up_prompt(tok, what):
     """The Discord prompt for a step-up: the call in a code block, so nothing in it is formatted, hidden as a spoiler
     or pings anyone; backticks in it can't close the block."""
-    return (f"🔐 **{owner_via(tok)} asks to:**\n```\n{what.replace('`', 'ˋ')}\n```\n"
+    return (f"🔐 **{plain(owner_via(tok))} asks to:**\n```\n{plain(what).replace('`', 'ˋ')}\n```\n"
             "Approve only if you just did this there.")
 
 
@@ -6688,7 +6717,7 @@ def step_up_check(tok, sid, what, bind):
                                "created": time.time(), "status": "pending", "by": ""}
     # The prompt shows the whole call. Touch ID's dialog has room for a short one only, so a longer one is asked on
     # Discord alone, where it's shown in full.
-    reason = f"{tok['device']} asks to {what}"
+    reason = plain(f"{tok['device']} asks to {what}")
     owner_ask(sid, step_up_prompt(tok, what), reason if len(reason) <= 150 and "\n" not in reason else None)
     return False, {"error": "this needs your approval again", "step_up": sid, "what": what, "expires_in_s": STEP_UP_TTL_S}
 
@@ -7258,7 +7287,9 @@ class Handler(BaseHTTPRequestHandler):
                 shown = {k: v for k, v in config.items() if not (self.owner and k in OWNER_REDACTED_SETTINGS)}
                 return self.reply(200, {**shown, "default_guidance": default_guidance()})
             if method in ("PUT", "POST"):
-                checked = {k: config_value(k, v) for k, v in self.body().items() if k in DEFAULT_CONFIG and k not in CONFIG_READ_ONLY}
+                # A paired client never sees token or remotes, so what it sends back for them is ignored.
+                checked = {k: config_value(k, v) for k, v in self.body().items() if k in DEFAULT_CONFIG and k not in CONFIG_READ_ONLY
+                           and not (self.owner and k in OWNER_REDACTED_SETTINGS)}
                 # Only you, in the browser: no agent lets itself start agents without asking.
                 if (not browser or self.key_ok()) and any(k in BROWSER_ONLY_SETTINGS and checked[k][0] != config.get(k) for k in checked):
                     return self.reply(403, {"error": "auto-approve, the worker cap and the night guard are set only from the web UI"})
@@ -7269,7 +7300,7 @@ class Handler(BaseHTTPRequestHandler):
                     config.update({k: v for k, (v, _) in checked.items()})
                     save_config()
                 forget_spaces()
-                return self.reply(200, config)
+                return self.reply(200, {k: v for k, v in config.items() if not (self.owner and k in OWNER_REDACTED_SETTINGS)})
 
         if rest == ["peers"] and method == "GET":
             peers = local_peers()
