@@ -33,7 +33,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.64"
+VERSION = "0.9.65"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -185,6 +185,8 @@ DEFAULT_CONFIG = {
     "summary_model": "haiku",
     "auto_approve_all": False,  # every agent's requests to start an agent, or a schedule that may, go ahead without asking you
     "auto_approve_folders": [],  # the folders whose agents' requests do; set only from the web UI
+    "max_live_spawns": 0,  # at most this many workers (agents started with worker: true) run at once, the rest queue; 0 is no cap; set only from the web UI
+    "night_guard": "",  # hours no worker is started, like "22-8"; empty is off; set only from the web UI
     "task_nudge_h": 24,  # an open task with no update for this many hours is raised with its owner, then with whoever asked; 0 is off
     "ask_defaults": True,  # a question to you may name a default the agent goes with when you haven't answered in time
     "ask_default_min_m": 10,  # the shortest wait, in minutes, an agent may give you before its default applies
@@ -521,6 +523,10 @@ def log(*parts):
 CONFIG_MIN_1 = {"poll_interval_ms", "peer_ttl_s", "max_hops", "rate_limit_per_min", "max_message_chars"}
 
 
+# What no agent changes for itself: who starts agents without asking, and how many workers run when.
+BROWSER_ONLY_SETTINGS = ("auto_approve_all", "auto_approve_folders", "max_live_spawns", "night_guard")
+
+
 def config_value(name, value):
     """(value, None) with the value as the setting's own type, or (None, why it can't be)."""
     want = DEFAULT_CONFIG[name]
@@ -535,6 +541,9 @@ def config_value(name, value):
             return None, f"{name} is a number"
         floor = 1 if name in CONFIG_MIN_1 else 0
         return (value, None) if value >= floor else (None, f"{name} is at least {floor}")
+    if name == "night_guard":
+        ok = isinstance(value, str) and (not value.strip() or re.fullmatch(r"\s*([01]?\d|2[0-3])\s*-\s*([01]?\d|2[0-3])\s*", value))
+        return (value.strip(), None) if ok else (None, "night_guard is two hours, like 22-8, or empty")
     if isinstance(want, str):
         return (value, None) if isinstance(value, str) else (None, f"{name} is text")
     return (value, None) if isinstance(value, type(want)) else (None, f"{name} is a {type(want).__name__}")
@@ -589,6 +598,8 @@ def client_config(sid):
         "space_parent": space_parent(space) if rec else "",
         "lead": lead,
         "children": children,
+        # Started as a worker: whoever hired it, for its guidance.
+        "hired_by": ((worker_spawn(rec) or {}).get("requester") or {}).get("name", "") if rec else "",
         "discord": routes_for(rec.get("cwd", ""), display_name(rec)) if rec and chat_configured() else [],
         "poll_interval_ms": config["poll_interval_ms"],
         "auto_wake_idle": config["auto_wake_idle"] if s["auto_wake"] is None else s["auto_wake"],
@@ -3993,6 +4004,11 @@ def agent_for(rec, old=None):
     before = a.get("sid") if a.get("sid") != rec["id"] else None
     a.update(name=display_name(rec), reg=rec.get("name") or "", cwd=rec.get("cwd", ""), sid=rec["id"], seen=now)
     rec["agent"] = agent_of[rec["id"]] = aid
+    # The spawn that started it knows its agent for good: agent_of forgets old sessions.
+    for sp in spawns.values():
+        if sp.get("agent_id") == rec["id"] and not sp.get("agent"):
+            sp["agent"] = aid
+            save_spawns()
     rec.pop("_space", None)  # worked out before it knew which agent it is; an agent's own space now counts
     return a, before
 
@@ -4129,7 +4145,7 @@ def spawn_of(rec, fresh):
     cands = [sp for sp in spawns.values() if sp["status"] == "started" and not sp.get("agent_id") and sp["dir"] == rec.get("cwd")
              and time.time() - sp["updated"] < 86400]
     for sp in sorted(cands, key=lambda x: x["updated"]):
-        pane = tmux_pane_pid(sp["tmux"]) if sp.get("tmux") else 0
+        pane = tmux_pane_pid(sp["tmux"]) if sp.get("tmux") else hc_pid(sp["hc"]) if sp.get("hc") else 0
         if (descends_from(rec.get("pid"), pane) if pane else fresh):
             return sp
     return None
@@ -4939,10 +4955,52 @@ def spawn_told(sp, text):
         task_message({"id": sp["id"]}, req["cwd"], text, prefer=asker if asker and is_live(asker) else None)
 
 
+def spawn_agent(sp):
+    """The agent id of the agent a spawn started, '' before it registered."""
+    return sp.get("agent") or agent_of.get(sp.get("agent_id") or "", "")
+
+
+def worker_spawn(rec):
+    """The spawn that started this agent as a worker, or None: kept by agent, so it holds across /clear."""
+    aid = (rec or {}).get("agent") or ""
+    for sp in spawns.values():
+        if sp.get("worker") and (sp.get("agent_id") == (rec or {}).get("id") or (aid and spawn_agent(sp) == aid)):
+            return sp
+    return None
+
+
+def worker_live(sp, now):
+    """Whether a started worker takes a slot: its agent runs, or it started lately and hasn't registered yet."""
+    aid = spawn_agent(sp)
+    if aid:
+        return agent_session(aid) is not None or bool(sp.get("agent_id") and sessions.get(sp["agent_id"]) and is_live(sessions[sp["agent_id"]]))
+    return now - sp["updated"] < 600
+
+
+def live_workers(now=None):
+    now = now or time.time()
+    return [sp for sp in spawns.values() if sp.get("worker") and sp["status"] == "started" and worker_live(sp, now)]
+
+
+def night_guard_on(now=None):
+    """Whether the night guard's hours (night_guard, like "22-8") hold now, on this machine's clock."""
+    m = re.fullmatch(r"\s*(\d{1,2})\s*-\s*(\d{1,2})\s*", str(config.get("night_guard") or ""))
+    if not m:
+        return False
+    start, end, hour = int(m.group(1)) % 24, int(m.group(2)) % 24, time.localtime(now or time.time()).tm_hour
+    return start <= hour < end if start < end else hour >= start or hour < end
+
+
 def request_spawn(body):
     by = sessions.get(body.get("by") or "")
     if by is None:
         return 403, {"error": "unknown agent; register again"}
+    with lock:
+        if worker_spawn(by):
+            return 403, {"error": "a worker doesn't start agents: ask your lead, who hired you, if the work needs another"}
+    worker = bool(body.get("worker"))
+    if worker and night_guard_on():
+        return 409, {"error": f"the night guard is on ({config.get('night_guard')}): no workers start in those hours unless your user changes it in the web UI"}
     folder = os.path.abspath(os.path.expanduser(str(body.get("dir") or "")))
     purpose, prompt = str(body.get("purpose") or "").strip(), str(body.get("first_prompt") or "").strip()
     if not os.path.isdir(folder):
@@ -4962,6 +5020,8 @@ def request_spawn(body):
               "space": clean_space(body.get("space") or "") or space_of(by)[0],
               "requester": {"id": by["id"], "name": display_name(by), "cwd": by.get("cwd", "")},
               "status": "pending", "created": time.time(), "updated": time.time(), "note": ""}
+        if worker:
+            sp["worker"] = True
         spawns[sp["id"]] = sp
         save_spawns()
         channel = approval_channel(by)
@@ -4970,7 +5030,7 @@ def request_spawn(body):
     if auto:
         decide_spawn(sp["id"], True, "auto-approve")
         if channel and chat_ready(channel):
-            post_async([(channel, f"**{sp['requester']['name']}** started {sp['name'] or folder_name(folder)}", None)])
+            post_async([(channel, f"**{sp['requester']['name']}** {'queued' if sp['status'] == 'queued' else 'started'} {sp['name'] or folder_name(folder)}", None)])
         return 200, {"id": sp["id"], "status": sp["status"], "note": f" Auto-approved: {sp['note']}"}
     if channel and chat_ready(channel):
         try:
@@ -5019,11 +5079,66 @@ def best_python():
     return best
 
 
+def find_hc():
+    """herdr's hc, which runs programs in terminals the herdr app shows; '' when it isn't installed."""
+    return shutil.which("hc") or next((p for p in (os.path.expanduser("~/.local/bin/hc"), "/opt/homebrew/bin/hc", "/usr/local/bin/hc") if os.access(p, os.X_OK)), "")
+
+
+def hc_terminal(address):
+    """What hc says about one of its terminals, {} when it's gone or hc can't say."""
+    hc = find_hc()
+    if not hc or not address:
+        return {}
+    try:
+        r = subprocess.run([hc, "get", address, "--json"], timeout=10, capture_output=True, text=True)
+        return json.loads(r.stdout) if r.returncode == 0 else {}
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return {}
+
+
+def hc_pid(address):
+    """The process an hc terminal runs, 0 when it's gone."""
+    t = hc_terminal(address)
+    if t.get("state") != "live":
+        return 0
+    return int((t.get("foreground") or {}).get("pid") or t.get("pid") or 0)
+
+
+def launch_hc(hc, claude, sp):
+    """Start the agent in a herdr terminal: (how, "") or ("", why not). No parent, so it outlives the terminal the
+    daemon was started from; removed once it exits, so a retired agent's terminal doesn't linger."""
+    if sp.get("hc") and hc_pid(sp["hc"]):
+        return f"still starting in the herdr app (hc attach {sp['hc']})", ""
+    name = re.sub(r"[^a-z0-9_-]", "-", (sp.get("name") or os.path.basename(sp["dir"])).lower())[:24].strip("-") + "-" + sp["id"]
+    argv = [hc, "run", "--bg", "--json", "--no-parent", "--outlive-parent", "--rm", "--cwd", sp["dir"], "--name", name[:32],
+            "--label", f"peerlink.spawn={sp['id']}", "--label", f"peerlink.space={sp.get('space') or ''}", claude]
+    r = subprocess.run(argv, timeout=20, capture_output=True, text=True)
+    if r.returncode != 0:
+        return "", (r.stderr or r.stdout).strip()[:300] or f"hc exited with {r.returncode}"
+    try:
+        out = json.loads(r.stdout)
+        address = out.get("address") or (out.get("terminal") or {}).get("address") or ""
+    except ValueError:
+        address = ""
+    sp["hc"] = address or name[:32]
+    return f"in the herdr app (hc attach {sp['hc']})", ""
+
+
 def launch(sp):
-    """Start Claude Code in the folder: (how, "") when it started, ("", why not) when it didn't."""
+    """Start Claude Code in the folder: (how, "") when it started, ("", why not) when it didn't. In a herdr terminal
+    when hc is installed, else tmux, else (on a Mac) a Terminal window."""
     claude = find_claude()
     if not claude:
         return "", "Claude Code (claude) isn't on this machine's PATH"
+    hc = find_hc()
+    if hc:
+        try:
+            how, err = launch_hc(hc, claude, sp)
+            if how:
+                return how, ""
+            log("spawn", sp["id"], "hc couldn't start it, trying tmux:", err)
+        except (OSError, subprocess.SubprocessError) as err:
+            log("spawn", sp["id"], "hc couldn't start it, trying tmux:", err)
     tmux = shutil.which("tmux") or next((p for p in ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux") if os.access(p, os.X_OK)), "")
     try:
         if tmux:
@@ -5047,6 +5162,58 @@ def launch(sp):
     return "", "starting an agent needs tmux on this machine"
 
 
+def start_spawn(sp, via):
+    """Start an approved spawn, or queue a worker while the cap is reached; a queued one starts when a slot frees."""
+    cap = int(config.get("max_live_spawns") or 0)
+    with lock:
+        busy = len(live_workers()) if sp.get("worker") and cap else 0
+        if cap and busy >= cap:
+            sid = sp["id"]
+            if sp["status"] != "queued":
+                sp["status"], sp["updated"] = "queued", time.time()
+                spawn_told(sp, f"{sid} is queued: {busy} of {cap} workers are running, the most your user allows at once. "
+                               f"It starts in {sp['dir']} when one retires, and you'll be told.")
+                save_spawns()
+            return
+    sid = sp["id"]
+    how, err = launch(sp)
+    with lock:
+        if err:
+            sp["status"], sp["note"] = "failed", err
+            spawn_told(sp, f"Your user approved {sid}, but the agent in {sp['dir']} didn't start: {err}")
+        else:
+            sp["status"], sp["note"] = "started", how
+            # The first prompt waits for the new agent's folder, as a message from whoever asked, so replies go back.
+            req = sessions.get(sp["requester"]["id"]) or successor(sp["requester"]["cwd"])
+            msg = {"id": f"m{next_msg[0]}", "ts": time.time(), "from": req["id"] if req else "peerlink",
+                   "from_name": display_name(req) if req else sp["requester"]["name"], "from_host": HOSTNAME,
+                   "from_cwd": sp["requester"]["cwd"], "to_cwd": sp["dir"], "from_space": sp["space"], "to_space": sp["space"],
+                   "text": sp["prompt"], "expects_reply": True, "reply_to": None, "hops": 0, "status": "queued", "v": 2}
+            next_msg[0] += 1
+            # Held for the agent this starts, never one already running there: that may be the one that asked.
+            msg["to"], msg["to_name"] = f"spawn:{sid}", f"the agent starting for {sid}"
+            inboxes.setdefault(msg["to"], []).append(msg)
+            record(msg)
+            approved = (f"{sid} was approved automatically (your user lets this folder's agents start agents without asking)"
+                        if via == "auto-approve" else f"{sid} left the queue" if via == "queue" else f"Your user approved {sid}")
+            spawn_told(sp, f"{approved}: an agent is starting in {sp['dir']} {how}, and your first prompt is waiting for it ({msg['id']}).")
+        save_spawns()
+
+
+def start_queued():
+    """Start queued workers, oldest first, while the cap has room."""
+    cap = int(config.get("max_live_spawns") or 0)
+    while True:
+        with lock:
+            queued = sorted((x for x in spawns.values() if x["status"] == "queued"), key=lambda x: x["updated"])
+            if not queued or (cap and len(live_workers()) >= cap):
+                return
+            sp = queued[0]
+            sp["status"] = "approved"
+        start_spawn(sp, "queue")
+        log("spawn", sp["id"], sp["status"], "from the queue", sp["note"])
+
+
 def decide_spawn(sid, approve, via):
     """Your answer to a spawn request. Only the web UI (your browser) and your own Discord presses call this."""
     with lock:
@@ -5058,28 +5225,7 @@ def decide_spawn(sid, approve, via):
         sp["status"], sp["updated"] = ("approved" if approve else "denied"), time.time()
         save_spawns()
     if approve:
-        how, err = launch(sp)
-        with lock:
-            if err:
-                sp["status"], sp["note"] = "failed", err
-                spawn_told(sp, f"Your user approved {sid}, but the agent in {sp['dir']} didn't start: {err}")
-            else:
-                sp["status"], sp["note"] = "started", how
-                # The first prompt waits for the new agent's folder, as a message from whoever asked, so replies go back.
-                req = sessions.get(sp["requester"]["id"]) or successor(sp["requester"]["cwd"])
-                msg = {"id": f"m{next_msg[0]}", "ts": time.time(), "from": req["id"] if req else "peerlink",
-                       "from_name": display_name(req) if req else sp["requester"]["name"], "from_host": HOSTNAME,
-                       "from_cwd": sp["requester"]["cwd"], "to_cwd": sp["dir"], "from_space": sp["space"], "to_space": sp["space"],
-                       "text": sp["prompt"], "expects_reply": True, "reply_to": None, "hops": 0, "status": "queued", "v": 2}
-                next_msg[0] += 1
-                # Held for the agent this starts, never one already running there: that may be the one that asked.
-                msg["to"], msg["to_name"] = f"spawn:{sid}", f"the agent starting for {sid}"
-                inboxes.setdefault(msg["to"], []).append(msg)
-                record(msg)
-                approved = (f"{sid} was approved automatically (your user lets this folder's agents start agents without asking)"
-                            if via == "auto-approve" else f"Your user approved {sid}")
-                spawn_told(sp, f"{approved}: an agent is starting in {sp['dir']} {how}, and your first prompt is waiting for it ({msg['id']}).")
-            save_spawns()
+        start_spawn(sp, via)
     else:
         with lock:
             spawn_told(sp, f"Your user denied {sid}, the agent you asked for in {sp['dir']}.")
@@ -5260,6 +5406,10 @@ def create_schedule(body, by=None):
     """A schedule from an agent (`by`) or from you (None). An agent's that may start one waits for your approval.
     It goes to an agent: that one wherever it runs, else a new one started in the folder it was last in."""
     now = time.time()
+    if by:
+        with lock:
+            if worker_spawn(by):
+                return 403, {"error": "a worker doesn't schedule: ask your lead, who hired you"}
     prompt = str(body.get("prompt") or "").strip()
     start = body.get("start") is not False
     try:
@@ -5588,6 +5738,52 @@ def terminate(sid, by):
     return 200, {"ok": True}
 
 
+def owned_tasks(rec, open_only=True):
+    """The tasks this agent owns: by its session now, or by its agent across /clear. Called with the lock held."""
+    aid = rec.get("agent") or ""
+    return [t for t in tasks.values() if open_only == (t["status"] in TASK_OPEN)
+            and (owns_task(rec, t) if open_only else (t.get("owner_id") == rec["id"] or (aid and (t.get("owner_agent") or agent_of.get(t.get("owner_id") or "")) == aid)))]
+
+
+def retire(sid, body):
+    """A worker ends its own session once its turn is done, or the lead that hired it ends it (a stuck one). Only an
+    agent peerlink started with worker: true can be retired; a worker still owning an open task can't retire itself."""
+    with lock:
+        by = sessions.get(sid)
+        if by is None:
+            return 404, {"error": "unknown agent; register again"}
+    name = str(body.get("agent") or "").strip()
+    target = by
+    if name and name.lower() not in (display_name(by).lower(), by["id"]):
+        target, err = resolve(name)
+        if not target:
+            return 404, {"error": err or f"no running agent is called {name}"}
+    with lock:
+        sp = worker_spawn(target)
+        if sp is None:
+            return 403, {"error": ("only an agent peerlink started as a worker retires; you weren't, so you stay running"
+                                   if target is by else f"{display_name(target)} wasn't started as a worker, so it isn't retired: your user ends it in the web UI")}
+        hirer = sp["requester"]
+        hired_it = by["id"] == hirer.get("id") or (by.get("agent") and agent_of.get(hirer.get("id") or "") == by.get("agent"))
+        if target is not by and not hired_it:
+            return 403, {"error": f"only {display_name(target)} itself, or {hirer.get('name') or 'the lead'} that hired it, retires it"}
+        still = owned_tasks(target)
+        if target is by and still:
+            return 409, {"error": "you still own " + ", ".join(f"{t['id']} ({t['title'][:60]})" for t in still)
+                                  + ": mark each done or failed with update_task first, then retire"}
+        done = [f"{t['id']} {t['status']}" for t in owned_tasks(target, open_only=False) if t.get("updated", 0) >= sp["created"]]
+        sp["status"], sp["updated"] = "retired", time.time()
+        save_spawns()
+        who = display_name(target)
+        line = (f"{who} retired" + (f", {', '.join(done)}" if done else "") if target is by
+                else f"You retired {who}" + (f"; it still owns {', '.join(t['id'] for t in still)}: reassign or cancel them" if still else ""))
+        if target is by and hirer.get("cwd"):
+            asker = sessions.get(hirer.get("id") or "")
+            task_message(None, hirer["cwd"], line + ".", prefer=asker if asker and is_live(asker) else successor(hirer["cwd"]))
+    terminate(target["id"], f"{who} itself (retired)" if target is by else f"{display_name(by)}, the lead that hired it")
+    return 200, {"retired": who, "told": hirer.get("name") if target is by else "", "note": line}
+
+
 def ack(sid, ids, holding=None):
     """The plugin says these messages reached its session: stop handing them out. Ones it says it's `holding` (an
     announcement for its next turn, a message that needs no turn of its own) it still has: they aren't handed out
@@ -5885,6 +6081,7 @@ def reap():
             save_rules()
         apply_defaults(now)
         nudge_stale_tasks(now)
+        queued = any(x["status"] == "queued" for x in spawns.values())
         lapsed = usage_limit and now >= (usage_limit.get("resets_at") or usage_limit["since"] + LIMIT_FALLBACK_S)
         # While the limit holds, a due schedule waits: it runs once the limit lifts.
         due = [] if usage_limit else [c for c in schedules.values() if c["status"] == "active" and c.get("next_run") and c["next_run"] <= now]
@@ -5901,6 +6098,8 @@ def reap():
         lift_limit("its reset time came" if usage_limit.get("resets_at") else "agents try again after five hours")
     for c in filter(None, starts):
         start_for_schedule(c)
+    if queued:
+        start_queued()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -6333,8 +6532,8 @@ class Handler(BaseHTTPRequestHandler):
             if method in ("PUT", "POST"):
                 checked = {k: config_value(k, v) for k, v in self.body().items() if k in DEFAULT_CONFIG}
                 # Only you, in the browser: no agent lets itself start agents without asking.
-                if (not browser or self.key_ok()) and any(k.startswith("auto_approve") and checked[k][0] != config.get(k) for k in checked):
-                    return self.reply(403, {"error": "auto-approve is set only from the web UI"})
+                if (not browser or self.key_ok()) and any(k in BROWSER_ONLY_SETTINGS and checked[k][0] != config.get(k) for k in checked):
+                    return self.reply(403, {"error": "auto-approve, the worker cap and the night guard are set only from the web UI"})
                 bad = [why for _, why in checked.values() if why]
                 if bad:
                     return self.reply(400, {"error": "; ".join(bad)})
@@ -6554,6 +6753,9 @@ class Handler(BaseHTTPRequestHandler):
         if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "role" and method == "POST":
             b = self.body()
             return self.reply(*set_member_role(rest[1], b.get("agent"), b.get("role")))
+
+        if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "retire" and method == "POST":
+            return self.reply(*retire(rest[1], self.body()))
 
         if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "link" and method == "POST":
             return self.reply(*broker_link(rest[1], self.body()))

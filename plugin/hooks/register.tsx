@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.9.64'
+const DAEMON_VERSION = '0.9.65'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -35,6 +35,7 @@ type ClientConfig = {
   parent?: string
   // How this agent leads its space: you picked it, or it was alone there.
   leads?: '' | 'set' | 'only'
+  hired_by?: string
   space_parent?: string
   // Spaces your user added this agent's folder to, on top of its own.
   also?: string[]
@@ -1245,6 +1246,10 @@ function hierarchyGuidance() {
     lines.push(
       `Your user also made you a member of ${cfg.also.map(s => `"${s}"`).join(', ')}: you see and message the agents there, and they see you. Your own space is still "${cfg.space}".`,
     )
+  if (cfg.hired_by)
+    lines.push(
+      `${cfg.hired_by} hired you as a worker for one piece of work. You don't start agents or schedules. When the work is done: put the evidence where your lead asked, mark every task you own done or failed with update_task, send ${cfg.hired_by} one line with the outcome, then call retire (load it with ToolSearch, "select:mcp__peerlink__retire") and end the turn.`,
+    )
   if (cfg.parent || cfg.leads)
     lines.push(
       `When one of your agents needs to work directly with an agent in another space, ask that space's lead for the agent's name, then link the two with the link tool (load it with ToolSearch, "select:mcp__peerlink__link"); the other lead agrees from its side.`,
@@ -1633,10 +1638,24 @@ export const register: Register = (on, options) => {
           name: { type: 'string', description: 'Its name, like "webshop-server"; needed when the folder already has an agent, which keeps the folder\'s name' },
           role: { type: 'string', description: 'What it is there for, shown to peers; defaults to the purpose when the folder already has an agent, so it doesn\'t take that one\'s role' },
           space: { type: 'string', description: 'The space it joins; yours if left out' },
+          worker: {
+            type: 'boolean',
+            description: "true to hire a worker for one piece of work: it counts against your user's cap on workers running at once (queued past it), can't start agents or schedules itself, and calls retire when done. Leave it out to start or restart a standing agent",
+          },
         },
         required: ['dir', 'purpose', 'first_prompt'],
       },
       isDeferred: false,
+    })
+    await $.tool.register({
+      name: 'retire',
+      description:
+        "For a worker (an agent started with worker: true): end your own session once this turn is done, after the work is finished, reported to your lead, and every task you own is marked done or failed. As the lead that hired a worker, name it as agent to end a stuck one.",
+      inputSchema: {
+        type: 'object',
+        properties: { agent: { type: 'string', description: 'Leave out to retire yourself; as a lead, the worker you hired' } },
+      },
+      isDeferred: true,
     })
     await $.tool.register({
       name: 'schedule',
@@ -1940,10 +1959,18 @@ export const register: Register = (on, options) => {
 
   on('tool.call', { tool: 'mcp__peerlink__request_spawn' }, async ($, e) => {
     const input = e as any
-    const res = await call($, 'POST', '/api/spawns', { by: sessionId, dir: input.dir, purpose: input.purpose, first_prompt: input.first_prompt, space: input.space, name: input.name, role: input.role })
+    const res = await call($, 'POST', '/api/spawns', { by: sessionId, dir: input.dir, purpose: input.purpose, first_prompt: input.first_prompt, space: input.space, name: input.name, role: input.role, worker: !!input.worker })
     if (!res.ok) return text(`Not asked: ${res.data.error ?? res.status}`)
+    if (res.data.status === 'queued') return text(`${res.data.id} is queued without asking: your user's cap on workers running at once is reached. It starts when one retires, and you'll be told.`)
     if (res.data.status !== 'pending') return text(`${res.data.id} ${res.data.status === 'started' ? 'started' : `didn't start (${res.data.status})`} without asking: your user lets you start agents.${res.data.note ?? ''}`)
     return text(`Asked your user to approve ${res.data.id}.${res.data.note ?? ''} You'll get a message when they decide; carry on meanwhile.`)
+  }).catch(daemonDown)
+
+  on('tool.call', { tool: 'mcp__peerlink__retire' }, async ($, e) => {
+    const input = e as any
+    const res = await call($, 'POST', `/api/sessions/${sessionId}/retire`, { agent: input.agent ?? '' })
+    if (!res.ok) return text(`Not retired: ${res.data.error ?? res.status}`)
+    return text(input.agent ? `${res.data.note}.` : `You retire when this turn ends${res.data.told ? `; ${res.data.told} is told` : ''}. End the turn now with one line.`)
   }).catch(daemonDown)
 
   on('tool.call', { tool: 'mcp__peerlink__schedule' }, async ($, e) => {
