@@ -33,7 +33,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.68"
+VERSION = "0.9.69"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -5186,6 +5186,34 @@ def find_claude():
     return ""
 
 
+def user_shell():
+    sh = os.environ.get("SHELL") or ""
+    if not sh and os.name != "nt":
+        try:
+            import pwd
+            sh = pwd.getpwuid(os.getuid()).pw_shell
+        except (ImportError, KeyError):
+            sh = ""
+    return sh if os.path.basename(sh) in ("zsh", "bash") and os.access(sh, os.X_OK) else ""
+
+
+def claude_argv(claude):
+    """How to start Claude Code: through your login shell when `claude` is an alias or function there (your own flags,
+    such as a model or permission mode), else the program itself. PEERLINK_CLAUDE names one outright."""
+    if os.environ.get("PEERLINK_CLAUDE"):
+        return [claude]
+    sh = user_shell()
+    if not sh:
+        return [claude]
+    ask = "whence -w claude" if sh.endswith("zsh") else "type -t claude"
+    try:
+        r = subprocess.run([sh, "-lic", ask], timeout=15, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return [claude]
+    kind = (r.stdout or "").strip().splitlines()[-1:] or [""]
+    return [sh, "-lic", "claude"] if re.search(r"\b(alias|function)\b", kind[0]) else [claude]
+
+
 def best_python():
     """The newest Python 3 on this machine, to run the daemon: macOS's own python3 (3.9) no longer gets security fixes,
     and PATH often lists it ahead of Homebrew's. PEERLINK_PYTHON picks one outright."""
@@ -5250,6 +5278,23 @@ def hc_app_space(hc, cwd, pid=0):
     return found
 
 
+def name_herdr_tab(tab, name):
+    """Name a hire's tab in the herdr app, once the app has taken the terminal in. Best effort: without the app
+    running the tab just keeps its number."""
+    app = shutil.which("herdr-app") or next((p for p in (os.path.expanduser("~/.local/bin/herdr-app"), "/opt/homebrew/bin/herdr-app",
+                                                          "/usr/local/bin/herdr-app") if os.access(p, os.X_OK)), "")
+    if not app:
+        return
+    for _ in range(15):
+        time.sleep(1)
+        try:
+            r = subprocess.run([app, "do", "tab.rename", "--id", tab, "--name", name], timeout=10, capture_output=True, text=True)
+            if r.returncode == 0:
+                return
+        except (OSError, subprocess.SubprocessError):
+            return
+
+
 def launch_hc(hc, claude, sp):
     """Start the agent in a herdr terminal: (how, "") or ("", why not). No parent, so it outlives the terminal the
     daemon was started from; removed once it exits, so a retired agent's terminal doesn't linger."""
@@ -5263,9 +5308,12 @@ def launch_hc(hc, claude, sp):
     with lock:
         pid = int((sessions.get(asker.get("id") or "") or {}).get("pid") or 0)
     space = hc_app_space(hc, asker.get("cwd") or "", pid) if asker.get("cwd") else ""
+    tab = ""
     if space:
-        argv += ["--label", f"herdr.space={space}"]
-    argv.append(claude)
+        # A tab id the app doesn't know yet becomes a new tab with that id, so it can be named after the agent.
+        tab = "tb" + secrets.token_hex(16)
+        argv += ["--label", f"herdr.space={space}", "--label", f"herdr.tab={tab}"]
+    argv += claude_argv(claude)
     r = subprocess.run(argv, timeout=20, capture_output=True, text=True)
     if r.returncode != 0:
         return "", (r.stderr or r.stdout).strip()[:300] or f"hc exited with {r.returncode}"
@@ -5275,6 +5323,8 @@ def launch_hc(hc, claude, sp):
     except ValueError:
         address = ""
     sp["hc"] = address or name[:32]
+    if tab:
+        threading.Thread(target=name_herdr_tab, args=(tab, sp.get("name") or os.path.basename(sp["dir"])), daemon=True).start()
     return f"in the herdr app (hc attach {sp['hc']})", ""
 
 
@@ -5304,12 +5354,14 @@ def launch(sp):
                 if "trust this folder" in pane:
                     return "", f"Claude Code there is waiting for you to trust the folder: run tmux attach -t {name} and choose \"Yes, I trust this folder\""
                 return f"still starting in tmux (tmux attach -t {name})", ""
-            subprocess.run([tmux, "new-session", "-d", "-s", name, "-c", sp["dir"], claude], check=True, timeout=10, capture_output=True)
+            subprocess.run([tmux, "new-session", "-d", "-s", name, "-c", sp["dir"], *claude_argv(claude)], check=True, timeout=10, capture_output=True)
             sp["tmux"] = name
             return f"in tmux (tmux attach -t {name})", ""
         if sys.platform == "darwin":
             quote = lambda v: '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
-            script = f'tell application "Terminal" to do script "cd " & quoted form of {quote(sp["dir"])} & " && " & quoted form of {quote(claude)}'
+            # Terminal runs your shell, so an alias of yours named claude applies by itself.
+            run = '"claude"' if claude_argv(claude) != [claude] else f"quoted form of {quote(claude)}"
+            script = f'tell application "Terminal" to do script "cd " & quoted form of {quote(sp["dir"])} & " && " & {run}'
             subprocess.run(["osascript", "-e", script], check=True, timeout=15, capture_output=True)
             return "in a new Terminal window", ""
     except (OSError, subprocess.SubprocessError) as err:

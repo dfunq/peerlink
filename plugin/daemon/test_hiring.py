@@ -218,6 +218,22 @@ class HiringTest(unittest.TestCase):
 
 
 class HerdrLaunchTest(unittest.TestCase):
+    def setUp(self):
+        # No login shell to ask about an alias, unless a test says otherwise; no herdr app to name tabs.
+        for target, fake in (("user_shell", lambda: ""), ("name_herdr_tab", lambda *a: None)):
+            p = unittest.mock.patch.object(d, target, fake)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_claude_starts_through_your_shell_when_you_have_an_alias_for_it(self):
+        def run_with(out):
+            return lambda argv, **kw: unittest.mock.Mock(returncode=0, stdout=out, stderr="")
+        with unittest.mock.patch.object(d, "user_shell", lambda: "/bin/zsh"), unittest.mock.patch.dict(os.environ, {"PEERLINK_CLAUDE": ""}):
+            with unittest.mock.patch.object(d.subprocess, "run", run_with("claude: alias\n")):
+                self.assertEqual(d.claude_argv("/bin/claude"), ["/bin/zsh", "-lic", "claude"])
+            with unittest.mock.patch.object(d.subprocess, "run", run_with("claude: command\n")):
+                self.assertEqual(d.claude_argv("/bin/claude"), ["/bin/claude"])
+
     def test_an_agent_starts_in_a_herdr_terminal_that_outlives_the_daemons(self):
         sp = {"id": "s9", "dir": "/x/api", "name": "pg-client", "space": "pixelgrid"}
         calls = []
@@ -261,6 +277,7 @@ class HerdrLaunchTest(unittest.TestCase):
             self.assertEqual(d.launch(sp)[1], "")
         argv = next(a for a in calls if a[1] == "run")
         self.assertIn("herdr.space=sp-lead", argv)
+        self.assertTrue(any(a.startswith("herdr.tab=tb") for a in argv))  # its own tab, named after it
         self.assertEqual(argv[-1], "/bin/claude")
 
     def test_when_hc_fails_it_falls_back_to_tmux(self):
