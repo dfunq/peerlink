@@ -2431,7 +2431,7 @@ def chat_via(channel_id, author):
 
 
 def folder_name(cwd):
-    return (config.get("folder_names") or {}).get(cwd) or os.path.basename(cwd.rstrip("/")) or cwd
+    return (config.get("folder_names") or {}).get(cwd) or os.path.basename(cwd.rstrip("/\\")) or cwd
 
 
 def discord_channel_label(channel_id):

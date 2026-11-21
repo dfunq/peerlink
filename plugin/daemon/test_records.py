@@ -650,3 +650,12 @@ class CleanTest(unittest.TestCase):
         self.assertNotIn("team", d.config["space_leads"])  # it led from a folder where nothing runs now
         self.assertIn("sub", d.config["space_leads"])
         self.assertEqual(d.offline_agents(), [])
+
+
+class FolderNameTest(unittest.TestCase):
+    def test_a_folder_is_named_by_its_last_part_with_either_separator(self):
+        peerlinkd.load_config()
+        import ntpath
+        with unittest.mock.patch.object(peerlinkd.os, "path", ntpath):
+            self.assertEqual([peerlinkd.folder_name(c) for c in ("C:\\Users\\me\\api\\", "C:\\Users\\me\\api", "C:/x/infra/")], ["api", "api", "infra"])
+        self.assertEqual(peerlinkd.folder_name("/Users/me/web/"), "web")
