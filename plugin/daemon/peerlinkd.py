@@ -33,7 +33,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.69"
+VERSION = "0.9.70"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -631,8 +631,26 @@ def find_space_file(cwd):
         path = os.path.join(d, SPACE_FILE)
         if os.path.isfile(path) and read_space_file(path):
             return path
+        # A git worktree (often beside its repo, as <repo>-wt-<branch>) sits where its repo does: the .peerlink of
+        # its main checkout, not whatever folder it happens to be in.
+        main = worktree_main(d)
+        if main:
+            return find_space_file(main)
         d = os.path.dirname(d)
     return None
+
+
+def worktree_main(d):
+    """The main checkout of the git worktree rooted at d, or '' when d isn't one: its .git is a file naming
+    <main>/.git/worktrees/<name>."""
+    try:
+        with open(os.path.join(d, ".git")) as f:
+            line = f.readline().strip()
+    except OSError:  # no .git, or a .git folder: a main checkout or none
+        return ""
+    gitdir = line[len("gitdir:"):].strip() if line.startswith("gitdir:") else ""
+    main, sep, _ = os.path.abspath(os.path.join(d, gitdir)).rpartition(os.sep + os.path.join(".git", "worktrees") + os.sep)
+    return main if sep and main != d else ""
 
 
 ROLE_MAX = 1500

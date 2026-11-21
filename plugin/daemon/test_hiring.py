@@ -187,6 +187,22 @@ class HiringTest(unittest.TestCase):
         self.assertEqual(told[0]["kind"], "announcement")  # read at its next turn, never starts one
         self.assertIn("worktree", told[0]["text"])
 
+    def test_a_worktree_beside_its_repo_sits_in_its_repos_space(self):
+        repo = self.repo()
+        for folder, text in ((os.path.dirname(repo), "space: skyforge\n"), (repo, "space: pixelgrid\nparent: skyforge\nrole: the lead\n")):
+            with open(os.path.join(folder, ".peerlink"), "w") as f:
+                f.write(text)
+        wt = repo + "-wt-fix"
+        d.git(repo, "worktree", "add", "-q", "-b", "fix", wt)
+        self.assertEqual(os.path.realpath(d.find_space_file(wt)), os.path.realpath(os.path.join(repo, ".peerlink")))
+        rec = {"id": "s-x", "cwd": wt}
+        self.assertEqual(d.space_of(rec)[:2], ("pixelgrid", "file"))
+        self.assertEqual(d.folder_role(rec), "")  # the lead's role stays the lead's
+        # A plain folder beside the repo still finds the one above it.
+        plain = repo + "-notes"
+        os.mkdir(plain)
+        self.assertEqual(d.find_space_file(plain), os.path.join(os.path.dirname(repo), ".peerlink"))
+
     def test_a_folder_is_marked_trusted_only_when_nothing_above_it_is(self):
         home = tempfile.mkdtemp()
         conf = os.path.join(home, ".claude.json")
