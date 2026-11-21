@@ -33,7 +33,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.63"
+VERSION = "0.9.64"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -1054,6 +1054,9 @@ def set_links(sid, names):
         old = links_of(rec)
         keep = [p for p in config.get("agent_links") or [] if len(p) == 2 and me not in p]
         config["agent_links"] = keep + [sorted([me, a]) for a in sorted(want)]
+        # What a lead-made link was for goes with it when you remove it here.
+        pairs = {pair_key(*p) for p in config["agent_links"] if len(p) == 2}
+        config["link_info"] = {k: v for k, v in (config.get("link_info") or {}).items() if k in pairs}
         save_config()
         added, dropped = sorted(want - old), sorted(old - want)
         name = display_name(rec)
@@ -1070,6 +1073,141 @@ def set_links(sid, names):
         if added or dropped:
             log("links", name, "->", ", ".join(agent_label(a) for a in sorted(want)) or "(none)")
         return 200, {"id": sid, "links": sorted(agent_label(a) for a in want)}
+
+
+
+# Links two leads broker between agents in their spaces: asked by one, agreed by the other. Asks wait a day, in memory;
+# a link made is kept with the others in agent_links, and what it's for in link_info.
+LINK_ASK_TTL_S = 86400
+link_asks = {}
+
+
+def pair_key(a, b):
+    return "|".join(sorted([a, b]))
+
+
+def governs(lead, rec):
+    """Whether lead leads rec's space or a space it sits inside."""
+    mine = space_of(lead)[0] if leads(lead) else ""
+    space, seen = space_of(rec)[0], set()
+    while mine and space and space not in seen:
+        if space == mine:
+            return True
+        seen.add(space)
+        space = space_parent(space)
+    return False
+
+
+def lead_over(rec):
+    """The running lead nearest above an agent: its own space's, else that of a space it sits inside."""
+    space, seen = space_of(rec)[0], set()
+    while space and space not in seen:
+        seen.add(space)
+        lead = lead_rec(space)
+        if lead and is_live(lead):
+            return lead
+        space = space_parent(space)
+    return None
+
+
+def make_link(a, b, by_names, why, task):
+    """Link two agents for the leads who agreed on it, and tell both. Returns the chat posts. Called with the lock held."""
+    key = pair_key(a["agent"], b["agent"])
+    config["agent_links"] = [p for p in config.get("agent_links") or [] if not (len(p) == 2 and pair_key(*p) == key)] + [sorted([a["agent"], b["agent"]])]
+    config.setdefault("link_info", {})[key] = {"by": by_names, "why": why[:500], "task": task, "ts": time.time()}
+    link_asks.pop(key, None)
+    save_config()
+    who = " and ".join(by_names)
+    until = f" until task {task} closes" if task else ""
+    for me, other in ((a, b), (b, a)):
+        task_message(None, me.get("cwd", ""), f"{who} linked you with {display_name(other)} (space {space_of(other)[0]}){' for task ' + task if task else ''}: "
+                     f"you see and message each other directly{until}.{' Why: ' + why if why else ''}", prefer=me)
+    log("links", display_name(a), "<->", display_name(b), "by", who, task or "")
+    channel = approval_channel(a) or approval_channel(b)
+    return [(channel, f"**{who}** linked {display_name(a)} ↔ {display_name(b)}{' for ' + task if task else ''}", None)] if channel else []
+
+
+def drop_link(key, why):
+    """Remove a link leads made and tell both agents. Called with the lock held."""
+    config["agent_links"] = [p for p in config.get("agent_links") or [] if not (len(p) == 2 and pair_key(*p) == key)]
+    (config.get("link_info") or {}).pop(key, None)
+    save_config()
+    names = [agent_label(aid) for aid in key.split("|")]
+    for aid, other in zip(key.split("|"), reversed(names)):
+        live = agent_session(aid)
+        if live:
+            task_message(None, live.get("cwd", ""), f"Your link with {other} has ended: {why}.", prefer=live)
+    log("links", " <-> ".join(names), "ended:", why)
+
+
+def broker_link(sid, body):
+    """A space lead links one of its agents with an agent in another space. The other agent's lead agrees by asking
+    for the same link from its side; a lead over both links them at once. Either lead can remove a link leads made;
+    one you made in the web UI is yours to change."""
+    mine, theirs = str(body.get("mine") or "").strip(), str(body.get("theirs") or "").strip()
+    why, task, remove = str(body.get("why") or "").strip(), str(body.get("task") or "").strip(), bool(body.get("remove"))
+    with lock:
+        by = sessions.get(sid)
+        if by is None:
+            return 404, {"error": "unknown agent; register again"}
+        if not leads(by):
+            return 403, {"error": "only a space lead links its agents with agents in another space"}
+    a, err = resolve(mine)
+    if not a:
+        return 404, {"error": err or f"no running agent is called {mine}"}
+    b, err = resolve(theirs)
+    if not b:
+        return 404, {"error": err or f"no running agent is called {theirs}: ask its lead for the name"}
+    posts, name = [], display_name(by)
+    with lock:
+        if not a.get("agent") or not b.get("agent") or a["agent"] == b["agent"]:
+            return 400, {"error": "name two different agents"}
+        if not governs(by, a):
+            return 403, {"error": f"{display_name(a)} isn't in your space or a space inside it: name one of yours as mine"}
+        key = pair_key(a["agent"], b["agent"])
+        info = config.get("link_info") or {}
+        if remove:
+            if key in info:
+                drop_link(key, f"{name} removed it")
+                return 200, {"status": "removed"}
+            if link_asks.pop(key, None):
+                return 200, {"status": "ask withdrawn"}
+            return 404, {"error": "no link leads made between them" + (": your user made that one, in the web UI" if b["agent"] in links_of(a) else "")}
+        if b["agent"] in links_of(a):
+            return 409, {"error": f"{display_name(a)} and {display_name(b)} are linked already"}
+        if task and (tasks.get(task) or {}).get("status") not in TASK_OPEN:
+            return 400, {"error": f"{task} isn't an open task"}
+        if governs(by, b):
+            posts = make_link(a, b, [name], why, task)
+            out = {"status": "linked"}
+        else:
+            now = time.time()
+            for k in [k for k, x in link_asks.items() if now - x["ts"] > LINK_ASK_TTL_S]:
+                link_asks.pop(k)
+            ask = link_asks.get(key)
+            if ask and ask["lead"] != by.get("agent") and ask["mine"] == b["agent"]:
+                posts = make_link(b, a, [ask["lead_name"], name], "; ".join(x for x in (ask["why"], why) if x), ask["task"] or task)
+                out = {"status": "linked"}
+            else:
+                other = lead_over(b)
+                if other is None or other["id"] == by["id"]:
+                    return 409, {"error": f"{display_name(b)}'s space has no running lead to agree to it"}
+                link_asks[key] = {"lead": by.get("agent"), "lead_name": name, "mine": a["agent"], "why": why, "task": task, "ts": now}
+                msg = task_message(None, other.get("cwd", ""),
+                                   f"{name}, lead of the \"{space_of(by)[0]}\" space, asks to link its {display_name(a)} with your {display_name(b)}"
+                                   f"{' for task ' + task if task else ''}, so the two can work together directly{': ' + why if why else ''}.\n"
+                                   f"To agree, call link with mine \"{display_name(b)}\" and theirs \"{display_name(a)}\". "
+                                   f"To decline, tell {name}.", sender=by, prefer=other)
+                msg["expects_reply"] = True
+                out = {"status": "asked", "lead": display_name(other)}
+    post_async(posts)
+    return 200, out
+
+
+def end_task_links(tid):
+    """Links leads made for a task end when it closes. Called with the lock held."""
+    for key in [k for k, x in (config.get("link_info") or {}).items() if x.get("task") == tid]:
+        drop_link(key, f"task {tid} closed")
 
 
 def reach(rec):
@@ -4357,6 +4495,7 @@ def task_closed(t, web=False):
     d = req.get("discord")
     posts = []
     with lock:
+        end_task_links(t["id"])
         # From the agent that owns it, and to the agent that asked: not whichever goes by either folder's name.
         owner = task_owner(t)
         asker = continuation(req.get("id") or "", req.get("name") or "", req.get("cwd") or "")
@@ -6415,6 +6554,9 @@ class Handler(BaseHTTPRequestHandler):
         if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "role" and method == "POST":
             b = self.body()
             return self.reply(*set_member_role(rest[1], b.get("agent"), b.get("role")))
+
+        if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "link" and method == "POST":
+            return self.reply(*broker_link(rest[1], self.body()))
 
         if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "rename" and method == "POST":
             return self.reply(*rename_self(rest[1], self.body().get("name")))

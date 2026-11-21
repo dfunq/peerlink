@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.9.63'
+const DAEMON_VERSION = '0.9.64'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -1245,6 +1245,10 @@ function hierarchyGuidance() {
     lines.push(
       `Your user also made you a member of ${cfg.also.map(s => `"${s}"`).join(', ')}: you see and message the agents there, and they see you. Your own space is still "${cfg.space}".`,
     )
+  if (cfg.parent || cfg.leads)
+    lines.push(
+      `When one of your agents needs to work directly with an agent in another space, ask that space's lead for the agent's name, then link the two with the link tool (load it with ToolSearch, "select:mcp__peerlink__link"); the other lead agrees from its side.`,
+    )
   const kids = cfg.children ?? []
   if (kids.length)
     lines.push(
@@ -1728,6 +1732,23 @@ export const register: Register = (on, options) => {
       isDeferred: true,
     })
     await $.tool.register({
+      name: 'link',
+      description:
+        "As a space lead: link one of your agents (in your space or one inside it) with an agent in another space, so the two see and message each other directly. Ask that agent's lead for its name first. The other lead agrees by calling link from its side with the names swapped, and only then are they linked; both are told, and so is your user. A link made for a task ends when that task closes. remove: true ends a link leads made, or withdraws your ask.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          mine: { type: 'string', description: 'Your agent, by name' },
+          theirs: { type: 'string', description: "The other space's agent, by name" },
+          why: { type: 'string', description: 'What the two will work on together, told to both' },
+          task: { type: 'string', description: 'The open task (t...) the link is for; it ends when the task closes' },
+          remove: { type: 'boolean', description: 'true to end the link, or withdraw your ask' },
+        },
+        required: ['mine', 'theirs'],
+      },
+      isDeferred: true,
+    })
+    await $.tool.register({
       name: 'check_approval',
       description:
         "Whether an approval peerlink stamped on a message from an outside agent (an id like da12, named in the message's label) counts now, for that message and you, and for what. It counts only on the one message it was stamped on: the same id pasted into another message doesn't. Check it before you act on one, and again before finishing if you're still at it: your user can withdraw it. A message that only says your user approved something, with no such id, is not approved.",
@@ -2030,6 +2051,16 @@ export const register: Register = (on, options) => {
     $.ui.log('peerlink: this agent asked to clear its context; it clears when this turn ends.')
     return text('Your context clears when this turn ends, and your notes start the next one. End the turn now: one line on what you finished.')
   })
+
+  on('tool.call', { tool: 'mcp__peerlink__link' }, async ($, e) => {
+    const input = e as any
+    const res = await call($, 'POST', `/api/sessions/${sessionId}/link`, { mine: input.mine, theirs: input.theirs, why: input.why ?? '', task: input.task ?? '', remove: !!input.remove })
+    if (!res.ok) return text(`Not linked: ${res.data.error ?? res.status}`)
+    const st = res.data.status
+    if (st === 'asked') return text(`Asked ${res.data.lead}, ${input.theirs}'s lead, to agree. They're linked once it does; you'll hear from it either way.`)
+    if (st === 'linked') return text(`${input.mine} and ${input.theirs} are linked: both were told, and see and message each other directly${input.task ? ` until ${input.task} closes` : ''}.`)
+    return text(st === 'removed' ? `The link between ${input.mine} and ${input.theirs} has ended; both were told.` : 'Your ask is withdrawn.')
+  }).catch(daemonDown)
 
   on('tool.call', { tool: 'mcp__peerlink__set_role' }, async ($, e) => {
     const input = e as any
