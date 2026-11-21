@@ -6612,9 +6612,16 @@ def exact_call(method, rest, body):
     return f"{method} /api/{'/'.join(rest)}" + (f" with {show(body)}" if body else "")
 
 
+# What GET /api/config adds that isn't a setting: a read-modify-write sends it back, and it's ignored.
+CONFIG_READ_ONLY = ("default_guidance",)
+# Kept from a paired client's reads: the shared secret other machines use to reach this daemon.
+OWNER_REDACTED_SETTINGS = ("token", "remotes")
+
+
 def config_change(body):
     """A paired client's settings write: (decision, what). Unknown keys and the settings that open the daemon to other
     machines are refused; a write that changes nothing is allowed; otherwise each change is listed, old → new."""
+    body = {k: v for k, v in body.items() if k not in CONFIG_READ_ONLY}
     unknown = [k for k in body if k not in DEFAULT_CONFIG]
     if unknown:
         return "refuse", f"unknown settings: {', '.join(map(str, unknown))}"
@@ -6636,9 +6643,13 @@ def owner_decision(method, rest, body):
     if kind == "config" and rest == ["config"]:
         return config_change(body)
     if kind == "inbox" and rest == ["inbox"]:
+        # Approving starts an agent (a spawn), may start them on a timer (a schedule) or binds every agent (a rule):
+        # it asks again. Denying only takes away, and tasks, questions and feedback start nothing.
         rid = str(body.get("id", ""))
-        if body.get("kind") == "approval" and rid in rules:
-            return "step", f"{body.get('action', 'decide')} rule {rid}: {show(rules[rid].get('text', ''))}"
+        if body.get("kind") == "approval" and body.get("action") != "deny":
+            item = rules.get(rid) or schedules.get(rid) or spawns.get(rid) or {}
+            label = "rule" if rid in rules else "schedule" if rid in schedules else "start"
+            return "step", f"{body.get('action', 'decide')} {label} {rid}: {show(item.get('text') or item.get('prompt') or item.get('purpose') or '')}"
         return "allow", ""
     if kind == "owner" and rest == ["owner", "revoke"]:
         return "allow", ""
@@ -6648,6 +6659,16 @@ def owner_decision(method, rest, body):
             if rec and worker_spawn(rec):
                 return "allow", ""
     return "step", exact_call(method, rest, body)
+
+
+STEP_UP_PROMPT_MAX = 1900  # one Discord message, buttons and all
+
+
+def step_up_prompt(tok, what):
+    """The Discord prompt for a step-up: the call in a code block, so nothing in it is formatted, hidden as a spoiler
+    or pings anyone; backticks in it can't close the block."""
+    return (f"🔐 **{owner_via(tok)} asks to:**\n```\n{what.replace('`', 'ˋ')}\n```\n"
+            "Approve only if you just did this there.")
 
 
 def step_up_check(tok, sid, what, bind):
@@ -6668,8 +6689,7 @@ def step_up_check(tok, sid, what, bind):
     # The prompt shows the whole call. Touch ID's dialog has room for a short one only, so a longer one is asked on
     # Discord alone, where it's shown in full.
     reason = f"{tok['device']} asks to {what}"
-    owner_ask(sid, f"🔐 **{owner_via(tok)} asks to:**\n{what}\nApprove only if you just did this there.",
-              reason if len(reason) <= 150 and "\n" not in reason else None)
+    owner_ask(sid, step_up_prompt(tok, what), reason if len(reason) <= 150 and "\n" not in reason else None)
     return False, {"error": "this needs your approval again", "step_up": sid, "what": what, "expires_in_s": STEP_UP_TTL_S}
 
 
@@ -7098,6 +7118,9 @@ class Handler(BaseHTTPRequestHandler):
         decision, what = owner_decision(method, rest, self.body()) if rest is not None else ("refuse", "")
         if decision == "refuse":
             return 403, {"error": f"a paired client can't do this{': ' + what if what else ''}: use the web UI"}
+        if decision == "step" and len(step_up_prompt(self.owner, what)) > STEP_UP_PROMPT_MAX:
+            # You couldn't read it whole in one message, so you aren't asked: split it into smaller calls.
+            return 413, {"error": "this call is too long to show you whole in one approval prompt: split it into smaller ones"}
         if decision == "step":
             bind = sha256_hex(f"{method} {url.path}?{url.query}\n".encode() + (self._raw or b""))
             ok, out = step_up_check(self.owner, self.headers.get("X-Owner-Step-Up", ""), what, bind)
@@ -7232,9 +7255,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if rest == ["config"]:
             if method == "GET":
-                return self.reply(200, {**config, "default_guidance": default_guidance()})
+                shown = {k: v for k, v in config.items() if not (self.owner and k in OWNER_REDACTED_SETTINGS)}
+                return self.reply(200, {**shown, "default_guidance": default_guidance()})
             if method in ("PUT", "POST"):
-                checked = {k: config_value(k, v) for k, v in self.body().items() if k in DEFAULT_CONFIG}
+                checked = {k: config_value(k, v) for k, v in self.body().items() if k in DEFAULT_CONFIG and k not in CONFIG_READ_ONLY}
                 # Only you, in the browser: no agent lets itself start agents without asking.
                 if (not browser or self.key_ok()) and any(k in BROWSER_ONLY_SETTINGS and checked[k][0] != config.get(k) for k in checked):
                     return self.reply(403, {"error": "auto-approve, the worker cap and the night guard are set only from the web UI"})

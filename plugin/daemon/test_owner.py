@@ -141,6 +141,23 @@ class PairingOverHttp(unittest.TestCase):
             self.assertEqual(raw(rig, "POST", "/api/owner/pair/op-x/cancel", evil, {})[0], 403, origin)
         self.assertEqual(raw(rig, "POST", "/api/owner/pair", {}, {"device": "herdr"})[0], 200)  # no Origin: not a browser
 
+    def test_secrets_are_kept_from_reads_and_long_or_marked_up_calls_are_shown_safely(self):
+        rig = self.rig("yes")
+        owner = {"Authorization": "Owner " + self.pair(rig)[1]["token"]}
+        code, conf = raw(rig, "GET", "/api/config", owner)
+        self.assertEqual(code, 200)
+        self.assertNotIn("token", conf)
+        self.assertNotIn("remotes", conf)
+        # The mod's settings save: read, change one thing, write it all back.
+        conf["wake_for"] = "needed" if conf.get("wake_for") != "needed" else "always"
+        self.assertEqual(raw(rig, "PUT", "/api/config", owner, conf)[0], 428)
+        # Too long to read whole in one prompt: refused, not asked.
+        self.assertEqual(raw(rig, "POST", "/api/messages", owner, {"to": "x", "text": "a" * 5000})[0], 413)
+        tok = {"pair": "op-1", "device": "herdr"}
+        prompt = d.step_up_prompt(tok, 'POST /api/x with {"text": "```||hidden|| @everyone"}')
+        self.assertEqual(prompt.count("```"), 2)
+        self.assertIn("ˋˋˋ||hidden||", prompt)
+
     def test_your_browser_lists_and_revokes_paired_clients(self):
         rig = self.rig("yes")
         token = self.pair(rig)[1]["token"]
@@ -201,7 +218,13 @@ class PairingRules(unittest.TestCase):
             self.assertEqual(decide("GET", [part]), "refuse", part)
         # The allowlist: Inbox answers, unpairing, clearing or ending a worker.
         self.assertEqual(decide("POST", ["inbox"], {"kind": "question", "id": "m1", "action": "dismiss"}), "allow")
-        self.assertEqual(decide("POST", ["inbox"], {"kind": "approval", "id": "s9", "action": "approve"}), "allow")
+        # Approving anything starts agents or binds them: it asks again, whatever it is; denying doesn't.
+        d.schedules["c9"] = {"id": "c9", "prompt": "deploy", "start": True}
+        d.spawns["s9"] = {"id": "s9", "purpose": "help"}
+        self.addCleanup(lambda: d.schedules.pop("c9", None) and d.spawns.pop("s9", None))
+        for rid in ("c9", "s9", "u1", "x0"):
+            self.assertEqual(decide("POST", ["inbox"], {"kind": "approval", "id": rid, "action": "approve"}), "step", rid)
+            self.assertEqual(decide("POST", ["inbox"], {"kind": "approval", "id": rid, "action": "deny"}), "allow", rid)
         self.assertEqual(decide("POST", ["owner", "revoke"]), "allow")
         self.assertEqual(decide("POST", ["inbox"], {"kind": "approval", "id": "u1", "action": "approve"}), "step")
         d.sessions["s-w"], d.sessions["s-std"] = {"id": "s-w", "agent": "a-w"}, {"id": "s-std", "agent": "a-std"}
@@ -218,6 +241,8 @@ class PairingRules(unittest.TestCase):
         self.assertEqual(decide("PUT", ["config"], {"aaaa": 1}), "refuse")
         self.assertEqual(decide("PUT", ["config"], {"listen_host": "0.0.0.0"}), "refuse")
         self.assertEqual(decide("PUT", ["config"], {k: d.config.get(k) for k in ("listen_host", "token", "remotes")}), "allow")
+        # A read-modify-write sends back what GET added; it's ignored.
+        self.assertEqual(decide("PUT", ["config"], {"default_guidance": "x", "listen_host": d.config.get("listen_host")}), "allow")
         what = d.owner_decision("PUT", ["config"], {"auto_approve_all": True, "wake_for": d.config.get("wake_for")})[1]
         self.assertRegex(what, r"auto_approve_all: \w+ → true")
         self.assertNotIn("wake_for", what)
