@@ -6356,8 +6356,6 @@ OWNER_IDLE_S = 12 * 3600
 PAIR_TTL_S = 120
 PAIR_STARTS_PER_HOUR = 3
 STEP_UP_TTL_S = 120
-# Never with the owner token, step-up or not: the key, Start clean, sign-ins, and who may talk to your agents.
-OWNER_REFUSED = ("key", "clean", "web", "discord", "telegram", "slack", "teams", "agentchannel")
 # Settings that open the daemon to other machines: never with the token either.
 OWNER_REFUSED_SETTINGS = ("listen_host", "token", "remotes")
 owner_pairings = {}  # id -> {id, device, code, secret (its sha256), created, status, by}
@@ -6454,13 +6452,13 @@ def owner_ask(rid, text, reason):
             except ChatError as err:
                 log("owner", "prompt not posted:", err)
         threading.Thread(target=post, daemon=True).start()
-    if touch_id_usable():
+    if reason and touch_id_usable():
         def ask():
             yes = touch_id(reason)
             if yes:  # a cancel or timeout at the Mac leaves Discord to answer; only a press counts either way
                 owner_decide(rid, True, "Touch ID")
         threading.Thread(target=ask, daemon=True).start()
-    if not ch and not touch_id_usable():
+    if not ch and not (reason and touch_id_usable()):
         log("owner", rid, "can't be approved: no Touch ID helper and no Discord channel")
 
 
@@ -6590,32 +6588,66 @@ def owner_revoke(pair=None):
     return names
 
 
-def step_up_needed(method, rest, body):
-    """What a request does that needs a fresh press even with the owner token, or ''. These loosen the guards on who
-    may start or approve agents, or move who leads whom."""
-    if method == "GET" or not rest:
-        return ""
-    # Settings default to asking again, whichever they are: spaces, parents, guidance and the rest shape who
-    # hears whom as much as the guards do.
-    if rest == ["config"] and body:
-        return "change settings: " + ", ".join(sorted(str(k).replace("_", " ") for k in body))[:200]
-    # Matched on the setting, not the path, so no route that takes it slips by.
-    if rest[0] == "sessions" and "auto_approve" in body:
-        return "change an agent's auto-approve"
-    if rest == ["inbox"] and body.get("kind") == "approval" and str(body.get("id", "")) in rules:
-        return f"{body.get('action', 'decide')} rule {body.get('id')}"
-    if rest == ["rules"]:
-        return "add a rule"
-    if len(rest) == 2 and rest[0] == "rules":
-        return f"change rule {rest[1]}"
-    if len(rest) == 3 and rest[0] == "spaces" and rest[2] in ("lead", "delete", "parent"):
-        return {"lead": "set the lead of", "delete": "delete the space", "parent": "move the space"}[rest[2]] + f" {rest[1]}"
-    if rest in (["folders", "space"], ["members"], ["links"]):
-        return {"folders": "move an agent or folder to another space", "members": "change an agent's spaces",
-                "links": "link agents across spaces"}[rest[0]]
-    if len(rest) == 3 and rest[0] == "agents" and rest[2] == "delete":
-        return f"delete agent {rest[1]}"
-    return ""
+# What a paired client may do, by the first part of the path. Default-deny: a call that changes anything asks you
+# again (a fresh Touch ID or Discord press, for that exact call) unless it's one of the few allowed below, and the
+# refused parts are refused even to read. test_owner walks the router and fails on a part with no entry here, so a
+# new route needs a decision before it ships.
+OWNER_POLICY = {
+    **{k: "refuse" for k in ("key", "clean", "web", "discord", "telegram", "slack", "teams", "agentchannel", "restart", "shutdown")},
+    "inbox": "inbox",        # your answers: allowed, except approving a rule
+    "sessions": "sessions",  # clearing or ending a worker: allowed; anything else asks again
+    "owner": "owner",        # unpairing: allowed
+    "config": "config",      # settings: each change shown old → new; some refused
+    **{k: "step" for k in ("agents", "approvals", "conversation", "folders", "health", "issues", "limit", "links", "members",
+                           "messages", "peers", "rules", "schedules", "snapshot", "spaces", "spawns", "status", "stream", "tasks")},
+}
+
+
+def show(value):
+    return json.dumps(value, sort_keys=True, ensure_ascii=False)
+
+
+def exact_call(method, rest, body):
+    """A call as the step-up prompt shows it: whole, never cut, so nothing can hide in it."""
+    return f"{method} /api/{'/'.join(rest)}" + (f" with {show(body)}" if body else "")
+
+
+def config_change(body):
+    """A paired client's settings write: (decision, what). Unknown keys and the settings that open the daemon to other
+    machines are refused; a write that changes nothing is allowed; otherwise each change is listed, old → new."""
+    unknown = [k for k in body if k not in DEFAULT_CONFIG]
+    if unknown:
+        return "refuse", f"unknown settings: {', '.join(map(str, unknown))}"
+    changed = {k: config_value(k, v)[0] for k, v in body.items() if config_value(k, v)[0] != config.get(k)}
+    if any(k in OWNER_REFUSED_SETTINGS for k in changed):
+        return "refuse", "listen_host, token and remotes are set only from the web UI"
+    if not changed:
+        return "allow", ""
+    return "step", "change settings:\n" + "\n".join(f"• {k}: {show(config.get(k))} → {show(v)}" for k, v in sorted(changed.items()))
+
+
+def owner_decision(method, rest, body):
+    """For a call with the owner token: ('read' | 'allow' | 'step' | 'refuse', what the prompt or the refusal says)."""
+    kind = OWNER_POLICY.get(rest[0] if rest else "", "refuse")
+    if kind == "refuse":
+        return "refuse", ""
+    if method == "GET":
+        return "read", ""
+    if kind == "config" and rest == ["config"]:
+        return config_change(body)
+    if kind == "inbox" and rest == ["inbox"]:
+        rid = str(body.get("id", ""))
+        if body.get("kind") == "approval" and rid in rules:
+            return "step", f"{body.get('action', 'decide')} rule {rid}: {show(rules[rid].get('text', ''))}"
+        return "allow", ""
+    if kind == "owner" and rest == ["owner", "revoke"]:
+        return "allow", ""
+    if kind == "sessions" and len(rest) == 3 and rest[2] in ("clear", "terminate") and set(body) <= {"by"}:
+        with lock:
+            rec = sessions.get(rest[1])
+            if rec and worker_spawn(rec):
+                return "allow", ""
+    return "step", exact_call(method, rest, body)
 
 
 def step_up_check(tok, sid, what, bind):
@@ -6633,8 +6665,11 @@ def step_up_check(tok, sid, what, bind):
         sid = "ou-" + secrets.token_hex(8)
         owner_step_ups[sid] = {"id": sid, "pair": tok["pair"], "device": tok["device"], "what": what, "bind": bind,
                                "created": time.time(), "status": "pending", "by": ""}
-    owner_ask(sid, f"🔐 **{owner_via(tok)} asks to {what}.**\nApprove only if you just did this there.",
-              f"{tok['device']} asks to {what}")
+    # The prompt shows the whole call. Touch ID's dialog has room for a short one only, so a longer one is asked on
+    # Discord alone, where it's shown in full.
+    reason = f"{tok['device']} asks to {what}"
+    owner_ask(sid, f"🔐 **{owner_via(tok)} asks to:**\n{what}\nApprove only if you just did this there.",
+              reason if len(reason) <= 150 and "\n" not in reason else None)
     return False, {"error": "this needs your approval again", "step_up": sid, "what": what, "expires_in_s": STEP_UP_TTL_S}
 
 
@@ -7059,19 +7094,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def owner_gate(self, method, url, rest):
         """For a request with the owner token: (code, body) when it's refused or needs a fresh press, else None.
-        Every one is logged with the client and its pairing."""
-        if rest is None or rest[:1] and rest[0] in OWNER_REFUSED or rest[:1] in (["restart"], ["shutdown"]) \
-                or rest == ["config"] and method != "GET" and any(k in OWNER_REFUSED_SETTINGS for k in self.body()):
-            return 403, {"error": "a paired client can't do this: use the web UI"}
-        what = step_up_needed(method, rest, self.body())
-        if what:
+        Every change is logged with the client and its pairing."""
+        decision, what = owner_decision(method, rest, self.body()) if rest is not None else ("refuse", "")
+        if decision == "refuse":
+            return 403, {"error": f"a paired client can't do this{': ' + what if what else ''}: use the web UI"}
+        if decision == "step":
             bind = sha256_hex(f"{method} {url.path}?{url.query}\n".encode() + (self._raw or b""))
             ok, out = step_up_check(self.owner, self.headers.get("X-Owner-Step-Up", ""), what, bind)
             if not ok:
-                log("owner", owner_via(self.owner), method, url.path, "needs a fresh approval:", what)
+                log("owner", owner_via(self.owner), method, url.path, "needs a fresh approval")
                 return 428, out
         if method != "GET":
-            log("owner", owner_via(self.owner), method, url.path, f"({what}, approved again)" if what else "")
+            log("owner", owner_via(self.owner), method, url.path, "(approved again)" if decision == "step" else "")
         return None
 
     def owner_pair_api(self, method, rest):
@@ -7120,8 +7154,8 @@ class Handler(BaseHTTPRequestHandler):
         # Pairing a client as you: anyone local may start one and its starter polls it with its secret; you approve.
         if rest and rest[:2] == ["owner", "pair"] and self.is_local() and not self.via_remote:
             # A web page could post here from your browser: one that says it comes from a site is refused.
-            origin = self.headers.get("Origin") or ""
-            if re.match(r"https?://", origin, re.I) and not self.same_origin():
+            # Any Origin at all, null (a sandboxed frame) or an extension's too, unless it is the daemon's own.
+            if self.headers.get("Origin") is not None and not self.same_origin():
                 return self.reply(403, {"error": "cross-origin request refused"})
             return self.reply(*self.owner_pair_api(method, rest[2:]))
         # A paired client's token counts as your browser, from this machine only; see owner_gate for what it can't do.

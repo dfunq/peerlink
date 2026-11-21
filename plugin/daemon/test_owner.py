@@ -66,7 +66,7 @@ class PairingOverHttp(unittest.TestCase):
         self.assertNotIn("token", again)
         self.assertEqual(raw(rig, "GET", "/api/status", owner)[0], 200)
         lead = rig.agent("lead")
-        self.assertEqual(raw(rig, "POST", f"/api/sessions/{lead.sid}/config", owner, {"muted": True})[0], 200)
+        self.assertNotIn(raw(rig, "POST", "/api/inbox", owner, {"kind": "question", "id": "m0", "action": "dismiss"})[0], (401, 403, 428))
         # Nothing about it is on disk.
         for name in os.listdir(rig.home):
             path = os.path.join(rig.home, name)
@@ -115,8 +115,9 @@ class PairingOverHttp(unittest.TestCase):
         time.sleep(0.3)
         code, conf = raw(rig, "PUT", "/api/config", {**owner, "X-Owner-Step-Up": sid}, body)
         self.assertEqual((code, conf.get("max_live_spawns")), (200, 7))
-        # Spent.
-        self.assertEqual(raw(rig, "PUT", "/api/config", {**owner, "X-Owner-Step-Up": sid}, body)[0], 428)
+        # Spent: it covers nothing else, and the same write again changes nothing, so it needs nothing.
+        self.assertEqual(raw(rig, "PUT", "/api/config", {**owner, "X-Owner-Step-Up": sid}, {"max_live_spawns": 8})[0], 428)
+        self.assertEqual(raw(rig, "PUT", "/api/config", owner, body)[0], 200)
 
     def test_review_blockers_each_ask_again(self):
         rig = self.rig("yes")  # without a step-up id, every one of these stops at 428 and asks
@@ -134,9 +135,11 @@ class PairingOverHttp(unittest.TestCase):
 
     def test_a_web_page_cant_start_or_cancel_a_pairing(self):
         rig = self.rig("no")
-        evil = {"Origin": "https://evil.example"}
-        self.assertEqual(raw(rig, "POST", "/api/owner/pair", evil, {"device": "herdr"})[0], 403)
-        self.assertEqual(raw(rig, "POST", "/api/owner/pair/op-x/cancel", evil, {})[0], 403)
+        for origin in ("https://evil.example", "null", "chrome-extension://abc"):
+            evil = {"Origin": origin}
+            self.assertEqual(raw(rig, "POST", "/api/owner/pair", evil, {"device": "herdr"})[0], 403, origin)
+            self.assertEqual(raw(rig, "POST", "/api/owner/pair/op-x/cancel", evil, {})[0], 403, origin)
+        self.assertEqual(raw(rig, "POST", "/api/owner/pair", {}, {"device": "herdr"})[0], 200)  # no Origin: not a browser
 
     def test_your_browser_lists_and_revokes_paired_clients(self):
         rig = self.rig("yes")
@@ -188,23 +191,58 @@ class PairingRules(unittest.TestCase):
             t["last_used"] -= d.OWNER_IDLE_S + 1
         self.assertIsNone(d.owner_token_check("Owner " + token))
 
-    def test_what_asks_again(self):
-        d.rules["u1"] = {"id": "u1"}
+    def test_default_deny(self):
+        d.rules["u1"] = {"id": "u1", "text": "always approve"}
         self.addCleanup(d.rules.pop, "u1", None)
-        need = d.step_up_needed
-        self.assertTrue(need("PUT", ["config"], {"auto_approve_all": True}))
-        self.assertTrue(need("PUT", ["config"], {"wake_for": "needed"}))  # every setting asks again
-        self.assertTrue(need("POST", ["sessions", "s1", "config"], {"auto_approve": True}))
-        self.assertFalse(need("POST", ["sessions", "s1", "config"], {"muted": True}))
-        self.assertTrue(need("POST", ["rules"], {"text": "x"}))
-        self.assertTrue(need("POST", ["sessions", "s1"], {"auto_approve": True}))
-        self.assertTrue(need("POST", ["inbox"], {"kind": "approval", "id": "u1", "action": "approve"}))
-        self.assertFalse(need("POST", ["inbox"], {"kind": "approval", "id": "s9", "action": "approve"}))
-        for rest in (["spaces", "acme", "lead"], ["spaces", "acme", "delete"], ["spaces", "acme", "parent"], ["folders", "space"],
-                     ["members"], ["links"], ["agents", "a1", "delete"], ["rules", "u1"]):
-            self.assertTrue(need("POST", rest, {}), rest)
-        for rest in (["sessions", "s1", "clear"], ["sessions", "s1", "terminate"]):
-            self.assertFalse(need("POST", rest, {}), rest)
+        decide = lambda method, rest, body=None: d.owner_decision(method, rest, body or {})[0]
+        # Reads go through; refused parts are refused even to read.
+        self.assertEqual(decide("GET", ["inbox"]), "read")
+        for part in ("key", "clean", "web", "discord", "telegram", "slack", "teams", "agentchannel", "restart", "shutdown", "nope"):
+            self.assertEqual(decide("GET", [part]), "refuse", part)
+        # The allowlist: Inbox answers, unpairing, clearing or ending a worker.
+        self.assertEqual(decide("POST", ["inbox"], {"kind": "question", "id": "m1", "action": "dismiss"}), "allow")
+        self.assertEqual(decide("POST", ["inbox"], {"kind": "approval", "id": "s9", "action": "approve"}), "allow")
+        self.assertEqual(decide("POST", ["owner", "revoke"]), "allow")
+        self.assertEqual(decide("POST", ["inbox"], {"kind": "approval", "id": "u1", "action": "approve"}), "step")
+        d.sessions["s-w"], d.sessions["s-std"] = {"id": "s-w", "agent": "a-w"}, {"id": "s-std", "agent": "a-std"}
+        d.spawns["sw"] = {"id": "sw", "worker": True, "agent_id": "s-w", "status": "started"}
+        self.addCleanup(lambda: [d.sessions.pop(k, None) for k in ("s-w", "s-std")] and d.spawns.pop("sw", None))
+        self.assertEqual(decide("POST", ["sessions", "s-w", "terminate"]), "allow")
+        self.assertEqual(decide("POST", ["sessions", "s-std", "terminate"]), "step")  # a standing agent asks again
+        # Everything else that changes something asks again, whatever its shape.
+        for rest, body in ((["sessions", "s1", "config"], {"muted": True}), (["sessions", "s1", "space"], {"space": "x"}),
+                           (["schedules"], {"start": True, "prompt": "go"}), (["schedules", "c1"], {}), (["schedules", "c1", "enable"], {}),
+                           (["rules"], {"text": "x"}), (["rules", "u1"], {}), (["spaces", "acme", "lead"], {}), (["messages"], {"to": "x"})):
+            self.assertEqual(decide("POST", rest, body), "step", rest)
+        # Settings: unknown keys and the network ones are refused; no change is allowed; each change is shown.
+        self.assertEqual(decide("PUT", ["config"], {"aaaa": 1}), "refuse")
+        self.assertEqual(decide("PUT", ["config"], {"listen_host": "0.0.0.0"}), "refuse")
+        self.assertEqual(decide("PUT", ["config"], {k: d.config.get(k) for k in ("listen_host", "token", "remotes")}), "allow")
+        what = d.owner_decision("PUT", ["config"], {"auto_approve_all": True, "wake_for": d.config.get("wake_for")})[1]
+        self.assertRegex(what, r"auto_approve_all: \w+ → true")
+        self.assertNotIn("wake_for", what)
+
+    def test_every_route_has_a_decision(self):
+        """A new route under a new path must say what a paired client may do with it, or this fails."""
+        import inspect
+        import re
+        src = inspect.getsource(d.Handler.route)
+        parts = set()
+        for pat in (r'rest\[0\] == "([\w-]+)"', r'rest(?:\[:\d\])? == \["([\w-]+)"'):
+            parts |= set(re.findall(pat, src))
+        self.assertGreater(len(parts), 25)
+        self.assertEqual(sorted(parts - set(d.OWNER_POLICY)), [])
+
+    def test_a_long_or_padded_change_is_shown_whole_and_never_on_touch_id(self):
+        asked = []
+        with unittest.mock.patch.object(d, "owner_ask", lambda rid, text, reason: asked.append((text, reason))):
+            tok = {"pair": "op-1", "device": "herdr"}
+            what = d.owner_decision("POST", ["sessions", "s1", "config"], {"auto_approve": True, "pad": "a" * 400})[1]
+            d.step_up_check(tok, "", what, "bind")
+        text, reason = asked[0]
+        self.assertIn('"auto_approve": true', text)
+        self.assertIn("a" * 400, text)
+        self.assertIsNone(reason)
 
 
 class TouchIdHelper(unittest.TestCase):
