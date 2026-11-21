@@ -2776,6 +2776,10 @@ def on_slash(cmd):
         return f"peerlink {VERSION} on {HOSTNAME} · {len(live_agents())} agents running · {queued} messages queued · usage limit: {held}", None
     if sub == "inbox":
         return inbox_text(cmd["channel_id"]), None
+    if sub == "unpair":
+        gone = owner_revoke()
+        return (f"Unpaired {', '.join(gone)}: {'it pairs' if len(gone) == 1 else 'they pair'} again with you present." if gone
+                else "Nothing is paired."), None
     if sub == "peers":
         rows = [f"• **{display_name(r)}** {'🛠️' if r.get('busy') else '💤'}{' 🔇' if session_cfg(r['id']).get('muted') else ''} `{tilde_path(r.get('cwd', ''))}`"
                 + (f": {oneline(r.get('summary') or '')[:90]}" if r.get("summary") else "") for r in live_agents()]
@@ -3129,6 +3133,8 @@ def on_press(press):
     and the buttons are disabled with yours highlighted, so it reads as answered."""
     if press["custom_id"].startswith("pt:"):
         return on_task_press(press)
+    if press["custom_id"].startswith("po:"):
+        return on_owner_press(press)
     if press["custom_id"].startswith("ps:"):
         return on_spawn_press(press)
     if press["custom_id"].startswith("pc:"):
@@ -3308,7 +3314,7 @@ def inbox_items():
     return sorted(out, key=lambda x: (order[x["kind"]], x["since"]))
 
 
-def inbox_act(body, discord_from=None):
+def inbox_act(body, discord_from=None, via="the web UI"):
     """Done or failed for your task, an answer or dismissal for a question, accept or dismiss for feedback."""
     kind, iid, action, text = body.get("kind"), body.get("id", ""), body.get("action", ""), (body.get("text") or "").strip()
     if kind == "task":
@@ -3325,7 +3331,7 @@ def inbox_act(body, discord_from=None):
         if action not in ("approve", "deny"):
             return 400, {"error": "a request to start an agent is approved or denied"}
         decide = decide_schedule if iid in schedules else decide_rule if iid in rules else decide_spawn
-        return decide(iid, action == "approve", chatlink.name(discord_from["channel_id"]) if discord_from else "the web UI")
+        return decide(iid, action == "approve", chatlink.name(discord_from["channel_id"]) if discord_from else via)
     if kind == "feedback":
         if action not in ("accepted", "dismissed"):
             return 400, {"error": "feedback is accepted or dismissed"}
@@ -6342,6 +6348,363 @@ def reap():
         start_queued()
 
 
+# Owner pairing. A client such as the herdr mod proves once, with you present, that it acts for you, and then holds
+# a token in memory only. Agents run as you with the key, so nothing they can read or call counts as you: the proof is
+# a Touch ID press or a Discord press from you (or an allowed user) on a prompt that names the code the client shows.
+# The daemon keeps only each token's sha256, in memory: a restart signs every client out. See docs/owner-pairing.md.
+OWNER_IDLE_S = 12 * 3600
+PAIR_TTL_S = 120
+PAIR_STARTS_PER_HOUR = 3
+STEP_UP_TTL_S = 120
+# Never with the owner token, step-up or not: the key, Start clean, sign-ins, and who may talk to your agents.
+OWNER_REFUSED = ("key", "clean", "web", "discord", "telegram", "slack", "teams", "agentchannel")
+owner_pairings = {}  # id -> {id, device, code, secret (its sha256), created, status, by}
+owner_tokens = {}    # sha256(token) -> {pair, device, created, last_used, by}
+owner_step_ups = {}  # id -> {id, pair, device, what, bind, created, status, by}
+owner_prompts = {}   # pairing or step-up id -> {channel_id, message_id}: its Discord post, whose buttons go once settled
+pair_starts = []     # when each pairing was started, for the hourly limit
+TOUCHID_SRC = os.path.join(_here, "touchid", "main.swift")
+TOUCHID_BIN = os.path.join(HOME, "bin", "peerlink-touchid")
+INTEGRITY_PATH = os.path.join(HOME, "integrity.json")
+_touch_id = threading.Lock()
+
+
+def sha256_hex(text):
+    return hashlib.sha256(text.encode() if isinstance(text, str) else text).hexdigest()
+
+
+def file_sha(path):
+    try:
+        with open(path, "rb") as f:
+            return sha256_hex(f.read())
+    except OSError:
+        return ""
+
+
+def owner_channel():
+    """Where owner prompts and alerts go: discord's owner_channel if set, else the first Discord channel mapped to an
+    agent. Only Discord: its bot drops presses from anyone but the owner and allowed_users. '' when there is none."""
+    if not chat_ready("0"):
+        return ""
+    if discord.get("owner_channel"):
+        return str(discord["owner_channel"])
+    return next((r["channel_id"] for r in discord.get("routes", []) if chatlink.platform(r["channel_id"]) == "discord"), "")
+
+
+def owner_alert(text):
+    log("owner alert:", text)
+    ch = owner_channel()
+    if ch:
+        post_async([(ch, "⚠️ " + text, None)])
+
+
+def expire_owner(now=None):
+    """Drop what has run out. Called with the lock held."""
+    now = now or time.time()
+    for p in list(owner_pairings.values()):
+        if p["status"] == "pending" and now - p["created"] > PAIR_TTL_S:
+            p["status"] = "expired"
+        if now - p["created"] > 3600:
+            owner_pairings.pop(p["id"], None)
+    for h, t in list(owner_tokens.items()):
+        if now - t["last_used"] > OWNER_IDLE_S:
+            owner_tokens.pop(h)
+            log("owner", t["device"], f"(pairing {t['pair']})", "signed out after 12 h unused")
+    for s in list(owner_step_ups.values()):
+        if s["status"] in ("pending", "approved") and now - s["created"] > STEP_UP_TTL_S:
+            s["status"] = "expired"
+        if now - s["created"] > 3600:
+            owner_step_ups.pop(s["id"], None)
+
+
+def owner_token_check(header):
+    """The token record for an `Authorization: Owner <token>` header, touched as used; None when it isn't one."""
+    scheme, _, token = str(header or "").strip().partition(" ")
+    if scheme != "Owner" or not token.strip():
+        return None
+    h = sha256_hex(token.strip())
+    with lock:
+        expire_owner()
+        rec = owner_tokens.get(h)
+        if rec:
+            rec["last_used"] = time.time()
+        return rec
+
+
+def owner_via(rec):
+    return f"{rec['device']} (pairing {rec['pair']})"
+
+
+def owner_ask(rid, text, reason):
+    """Ask you to be present: Touch ID on this Mac and a Discord prompt at once; the first answer settles it.
+    A test's daemon answers from PEERLINK_TEST_PRESENCE instead."""
+    canned = os.environ.get("PEERLINK_TEST_PRESENCE") if SCRATCH_HOME else None
+    if canned in ("yes", "no"):
+        threading.Thread(target=owner_decide, args=(rid, canned == "yes", "the test's presence"), daemon=True).start()
+        return
+    ch = owner_channel()
+    if ch:
+        def post():
+            try:
+                sent = chat_post(ch, text, None, choices(["Approve", "Deny"], f"po:{rid}"))
+                with lock:
+                    owner_prompts[rid] = {"channel_id": ch, "message_id": sent}
+            except ChatError as err:
+                log("owner", "prompt not posted:", err)
+        threading.Thread(target=post, daemon=True).start()
+    if touch_id_usable():
+        def ask():
+            yes = touch_id(reason)
+            if yes:  # a cancel or timeout at the Mac leaves Discord to answer; only a press counts either way
+                owner_decide(rid, True, "Touch ID")
+        threading.Thread(target=ask, daemon=True).start()
+    if not ch and not touch_id_usable():
+        log("owner", rid, "can't be approved: no Touch ID helper and no Discord channel")
+
+
+def owner_decide(rid, yes, via):
+    """Your answer to a pairing or a step-up, from Touch ID or Discord. The first answer counts."""
+    with lock:
+        expire_owner()
+        item = owner_pairings.get(rid) or owner_step_ups.get(rid)
+        if not item or item["status"] != "pending":
+            return False
+        item.update(status="approved" if yes else "denied", by=via)
+        post = owner_prompts.pop(rid, None)
+    log("owner", rid, "approved" if yes else "denied", "by", via)
+    if post:
+        try:
+            chat_clear_buttons(post["channel_id"], post["message_id"])
+            chat_post(post["channel_id"], f"{rid} {'approved' if yes else 'denied'} ({via}).", post["message_id"])
+        except ChatError:
+            pass
+    return True
+
+
+def on_owner_press(press):
+    """Approve or Deny on a pairing or step-up prompt. Only Discord counts: its bot passes presses from you and your
+    allowed users only."""
+    _, rid, idx = (press["custom_id"].split(":") + ["", ""])[:3]
+    if chatlink.platform(press["channel_id"]) != "discord":
+        return chat_answer_press(press, "Pairing is approved on Discord or with Touch ID only.")
+    with lock:
+        item = owner_pairings.get(rid) or owner_step_ups.get(rid)
+        status = item["status"] if item else "gone"
+    if status != "pending":
+        return chat_answer_press(press, f"{rid} is already {status}.")
+    chat_answer_press(press)
+    owner_decide(rid, idx == "0", chat_via(press["channel_id"], press["author"]))
+
+
+def pair_start(device):
+    """A client asks to pair: (code, body). Anyone may ask, an agent too; only you approve, and only when the client
+    shows the code the prompt names. One pending at a time: a second start cancels both, since one of them may be an
+    agent racing you. At most PAIR_STARTS_PER_HOUR an hour."""
+    device = re.sub(r"[^\w .-]", "", str(device or ""))[:40].strip() or "a client"
+    now = time.time()
+    with lock:
+        expire_owner(now)
+        pair_starts[:] = [t for t in pair_starts if t > now - 3600]
+        if len(pair_starts) >= PAIR_STARTS_PER_HOUR:
+            return 429, {"error": f"at most {PAIR_STARTS_PER_HOUR} pairings start an hour; try again later"}
+        pair_starts.append(now)
+        pending = [p for p in owner_pairings.values() if p["status"] == "pending"]
+        for p in pending:
+            p.update(status="cancelled", by="a second pairing started")
+        stale = [owner_prompts.pop(p["id"], None) for p in pending]
+        if not pending:
+            pid = "op-" + secrets.token_hex(8)
+            secret = secrets.token_urlsafe(32)
+            code = f"{secrets.randbelow(10 ** 6):06d}"
+            owner_pairings[pid] = {"id": pid, "device": device, "code": code, "secret": sha256_hex(secret),
+                                   "created": now, "status": "pending", "by": ""}
+    if pending:
+        for post in filter(None, stale):
+            try:
+                chat_clear_buttons(post["channel_id"], post["message_id"])
+            except ChatError:
+                pass
+        owner_alert(f"Two pairings were started at once ({', '.join(p['device'] for p in pending)} and {device}), so both "
+                    "were cancelled. If you didn't start one, an agent may be trying to pair as you. Start yours again.")
+        return 409, {"error": "another pairing was pending, so both were cancelled; start again"}
+    shown = f"{code[:3]} {code[3:]}"
+    log("owner", "pairing", pid, "started by", device)
+    owner_ask(pid, f"🔐 **{device} asks to manage peerlink as you.**\nApprove only if {device} is showing the code "
+              f"**{shown}** right now. If it isn't, press Deny: something else may be trying to pair as you.",
+              f"{device} asks to manage peerlink (code {shown})")
+    return 200, {"pair": pid, "code": code, "secret": secret, "expires_in_s": PAIR_TTL_S}
+
+
+def pair_poll(pid, secret):
+    """Where a pairing stands, for the client that started it (it alone has the secret). Once approved, the token is
+    made and handed out, once; only its sha256 is kept."""
+    with lock:
+        expire_owner()
+        p = owner_pairings.get(pid)
+        if not p or not secret or not hmac.compare_digest(p["secret"], sha256_hex(secret)):
+            return 404, {"error": "no such pairing"}
+        if p["status"] != "approved":
+            return 200, {"status": p["status"]}
+        token = secrets.token_urlsafe(32)
+        for h in [h for h, t in owner_tokens.items() if t["device"] == p["device"]]:
+            owner_tokens.pop(h)  # pairing again replaces that client's old token
+        now = time.time()
+        owner_tokens[sha256_hex(token)] = {"pair": pid, "device": p["device"], "created": now, "last_used": now, "by": p["by"]}
+        p["status"] = "paired"
+    log("owner", p["device"], f"(pairing {pid})", "paired, approved by", p["by"])
+    return 200, {"status": "paired", "token": token, "idle_expiry_s": OWNER_IDLE_S}
+
+
+def pair_cancel(pid, secret):
+    with lock:
+        p = owner_pairings.get(pid)
+        if not p or not secret or not hmac.compare_digest(p["secret"], sha256_hex(secret)):
+            return 404, {"error": "no such pairing"}
+        if p["status"] == "pending":
+            p.update(status="cancelled", by=p["device"])
+        post = owner_prompts.pop(pid, None)
+    if post:
+        try:
+            chat_clear_buttons(post["channel_id"], post["message_id"])
+        except ChatError:
+            pass
+    return 200, {"status": p["status"]}
+
+
+def owner_devices():
+    with lock:
+        expire_owner()
+        return [{"pair": t["pair"], "device": t["device"], "paired": t["created"], "last_used": t["last_used"], "approved_by": t["by"]}
+                for t in owner_tokens.values()]
+
+
+def owner_revoke(pair=None):
+    """Sign a paired client out (pair), or all of them."""
+    with lock:
+        gone = [h for h, t in owner_tokens.items() if pair is None or t["pair"] == pair]
+        names = [owner_via(owner_tokens.pop(h)) for h in gone]
+    for n in names:
+        log("owner", n, "unpaired")
+    return names
+
+
+def step_up_needed(method, rest, body):
+    """What a request does that needs a fresh press even with the owner token, or ''. These loosen the guards on who
+    may start or approve agents, or move who leads whom."""
+    if method == "GET" or not rest:
+        return ""
+    if rest == ["config"] and any(k in BROWSER_ONLY_SETTINGS for k in body):
+        return "change " + ", ".join(k.replace("_", " ") for k in body if k in BROWSER_ONLY_SETTINGS)
+    if len(rest) == 2 and rest[0] == "sessions" and "auto_approve" in body:
+        return "change an agent's auto-approve"
+    if rest == ["inbox"] and body.get("kind") == "approval" and str(body.get("id", "")) in rules:
+        return f"{body.get('action', 'decide')} rule {body.get('id')}"
+    if len(rest) == 2 and rest[0] == "rules":
+        return f"change rule {rest[1]}"
+    if len(rest) == 3 and rest[0] == "spaces" and rest[2] in ("lead", "delete", "parent"):
+        return {"lead": "set the lead of", "delete": "delete the space", "parent": "move the space"}[rest[2]] + f" {rest[1]}"
+    if rest in (["folders", "space"], ["members"], ["links"]):
+        return {"folders": "move an agent or folder to another space", "members": "change an agent's spaces",
+                "links": "link agents across spaces"}[rest[0]]
+    if len(rest) == 3 and rest[0] == "agents" and rest[2] == "delete":
+        return f"delete agent {rest[1]}"
+    return ""
+
+
+def step_up_check(tok, sid, what, bind):
+    """(True, None) when step-up `sid` was approved for exactly this request by this client and isn't used yet (it is
+    spent now); otherwise (False, body for a 428) with a new step-up asked for."""
+    with lock:
+        expire_owner()
+        s = owner_step_ups.get(sid or "")
+        if s and s["pair"] == tok["pair"] and s["bind"] == bind and s["status"] == "approved":
+            s["status"] = "used"
+            return True, None
+        for o in owner_step_ups.values():  # one open step-up per client
+            if o["pair"] == tok["pair"] and o["status"] == "pending":
+                o.update(status="cancelled", by="a newer request")
+        sid = "ou-" + secrets.token_hex(8)
+        owner_step_ups[sid] = {"id": sid, "pair": tok["pair"], "device": tok["device"], "what": what, "bind": bind,
+                               "created": time.time(), "status": "pending", "by": ""}
+    owner_ask(sid, f"🔐 **{owner_via(tok)} asks to {what}.**\nApprove only if you just did this there.",
+              f"{tok['device']} asks to {what}")
+    return False, {"error": "this needs your approval again", "step_up": sid, "what": what, "expires_in_s": STEP_UP_TTL_S}
+
+
+def step_up_status(tok, sid):
+    with lock:
+        expire_owner()
+        s = owner_step_ups.get(sid)
+        if not s or s["pair"] != tok["pair"]:
+            return 404, {"error": "no such step-up"}
+        return 200, {"status": s["status"], "what": s["what"]}
+
+
+def touch_id_usable():
+    """The helper is there, built from the source beside this file, and hasn't changed behind its source's back."""
+    if sys.platform != "darwin" or not os.access(TOUCHID_BIN, os.X_OK):
+        return False
+    return integrity_ok("helper")
+
+
+def touch_id(reason):
+    """Ask for Touch ID (or your password) through the helper: True on a press, False otherwise. The helper gets a
+    nonce and a one-time HMAC key on stdin and answers {"result", "nonce", "hmac"}: hmac is HMAC-SHA256(key,
+    nonce + ":" + result). A reply without the right nonce and HMAC counts for nothing."""
+    if not _touch_id.acquire(blocking=False):
+        return False
+    try:
+        nonce, key = secrets.token_hex(16), secrets.token_bytes(32)
+        try:
+            r = subprocess.run([TOUCHID_BIN], input=json.dumps({"reason": reason, "nonce": nonce, "key": key.hex()}),
+                               capture_output=True, text=True, timeout=90)
+            out = json.loads(r.stdout or "{}")
+        except (OSError, subprocess.SubprocessError, ValueError) as err:
+            log("owner", "Touch ID helper failed:", err)
+            return False
+        result = str(out.get("result", ""))
+        want = hmac.new(key, f"{nonce}:{result}".encode(), hashlib.sha256).hexdigest()
+        if out.get("nonce") != nonce or not hmac.compare_digest(str(out.get("hmac", "")), want):
+            owner_alert("The Touch ID helper answered without the right nonce or HMAC, so its answer was ignored. "
+                        f"Something may have replaced {tilde_path(TOUCHID_BIN)}.")
+            return False
+        return result == "yes"
+    finally:
+        _touch_id.release()
+
+
+def integrity_now():
+    return {"version": VERSION, "daemon": file_sha(os.path.abspath(__file__)), "helper": file_sha(TOUCHID_BIN),
+            "helper_src": file_sha(TOUCHID_SRC)}
+
+
+def integrity_ok(part=None):
+    """Compare this daemon's file and the Touch ID helper with what was recorded, alert on Discord about a change that
+    no update explains, and record the rest. The daemon changing while VERSION didn't, or the helper changing while
+    its source didn't, is what someone editing them in place looks like. False when `part` is one of those."""
+    now = integrity_now()
+    try:
+        with open(INTEGRITY_PATH) as f:
+            old = json.load(f)
+    except (OSError, ValueError):
+        old = {}
+    bad = []
+    if old.get("daemon") and old.get("version") == VERSION and now["daemon"] != old["daemon"]:
+        bad.append("daemon")
+        owner_alert(f"peerlinkd.py changed but its version ({VERSION}) didn't. If you didn't edit it, something may have.")
+    if old.get("helper") and now["helper"] and now["helper"] != old["helper"] and now["helper_src"] == old.get("helper_src"):
+        bad.append("helper")
+        owner_alert(f"The Touch ID helper ({tilde_path(TOUCHID_BIN)}) changed but its source didn't, so it isn't used. "
+                    "Reinstall peerlink to rebuild it.")
+    keep = {**now, **{k: old[k] for k in bad if k in old}}  # a suspect file isn't recorded as the new normal
+    if keep != old:
+        try:
+            write_json(INTEGRITY_PATH, keep, backup=False)
+        except OSError as err:
+            log("could not record integrity:", err)
+    return part not in bad
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "peerlink/" + VERSION
 
@@ -6359,7 +6722,7 @@ class Handler(BaseHTTPRequestHandler):
                 "state": bot.state if bot else ("off" if token else "unconfigured"), "error": bot.error if bot else "",
                 "reads_messages": bool(bot and bot.reads_messages),
                 "message_content_switch": discordlink.message_content_on(token) if token and q.get("check") else None,
-                "routes": discord.get("routes", []), "dm": discord.get("dm", ""),
+                "routes": discord.get("routes", []), "dm": discord.get("dm", ""), "owner_channel": discord.get("owner_channel", ""),
                 "buttons": discord.get("buttons", True), "files_out": discord.get("files_out", True),
                 "files_in": discord.get("files_in", True), "max_file_mb": discord.get("max_file_mb", 10),
                 "trusted_bots": discord.get("trusted_bots", []), "allowed_users": discord.get("allowed_users", []),
@@ -6381,6 +6744,8 @@ class Handler(BaseHTTPRequestHandler):
                     repointed = prune_grants()
                 if "dm" in b:
                     discord["dm"] = b["dm"] or ""
+                if "owner_channel" in b:  # where pairing prompts and owner alerts go; the first mapped channel if empty
+                    discord["owner_channel"] = re.sub(r"\D", "", str(b["owner_channel"] or ""))
                 for k in ("buttons", "files_out", "files_in"):
                     if k in b:
                         discord[k] = bool(b[k])
@@ -6616,8 +6981,11 @@ class Handler(BaseHTTPRequestHandler):
             while True:
                 if browser:
                     with lock:
-                        if not (web_sessions.get(browser, 0) > time.time()):
-                            return
+                        # Ends when the browser is signed out, or the paired client unpaired or idle for 12 h.
+                        alive = (any(t["pair"] == browser[6:] for t in owner_tokens.values()) if browser.startswith("owner:")
+                                 else web_sessions.get(browser, 0) > time.time())
+                    if not alive:
+                        return
                 snap = snapshot()
                 # Ages tick every second; they aren't a change worth sending.
                 for p in snap["peers"]["peers"]:
@@ -6637,11 +7005,12 @@ class Handler(BaseHTTPRequestHandler):
             return
 
     def body(self):
-        n = int(self.headers.get("Content-Length") or 0)
-        if not n:
-            return {}
+        """The JSON body, read once per request: the owner checks look at it before the route does."""
+        if getattr(self, "_raw", None) is None:
+            n = int(self.headers.get("Content-Length") or 0)
+            self._raw = self.rfile.read(n) if n else b""
         try:
-            out = json.loads(self.rfile.read(n))
+            out = json.loads(self._raw) if self._raw else {}
         except ValueError:
             return {}
         return out if isinstance(out, dict) else {}
@@ -6677,7 +7046,39 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         return bool(origin) and origin == f"http://{self.headers.get('Host', '')}"
 
+    def via(self):
+        """Who acted, for logs and records: your browser, or a paired client by name and pairing."""
+        return owner_via(self.owner) if self.owner else "the web UI"
+
+    def owner_gate(self, method, url, rest):
+        """For a request with the owner token: (code, body) when it's refused or needs a fresh press, else None.
+        Every one is logged with the client and its pairing."""
+        if rest is None or rest[:1] and rest[0] in OWNER_REFUSED or rest[:1] in (["restart"], ["shutdown"]):
+            return 403, {"error": "a paired client can't do this: use the web UI"}
+        what = step_up_needed(method, rest, self.body())
+        if what:
+            bind = sha256_hex(f"{method} {url.path}?{url.query}\n".encode() + (self._raw or b""))
+            ok, out = step_up_check(self.owner, self.headers.get("X-Owner-Step-Up", ""), what, bind)
+            if not ok:
+                log("owner", owner_via(self.owner), method, url.path, "needs a fresh approval:", what)
+                return 428, out
+        if method != "GET":
+            log("owner", owner_via(self.owner), method, url.path, f"({what}, approved again)" if what else "")
+        return None
+
+    def owner_pair_api(self, method, rest):
+        b = self.body() if method == "POST" else {}
+        secret = self.headers.get("X-Pair-Secret", "")
+        if rest == [] and method == "POST":
+            return pair_start(b.get("device"))
+        if len(rest) == 1 and method == "GET":
+            return pair_poll(rest[0], secret)
+        if len(rest) == 2 and rest[1] == "cancel" and method == "POST":
+            return pair_cancel(rest[0], secret)
+        return 404, {"error": "not found"}
+
     def route(self, method):
+        self._raw, self.owner = None, None  # a kept-alive connection reuses this handler
         url = urlparse(self.path)
         parts = [p for p in url.path.split("/") if p]
         q = parse_qs(url.query)
@@ -6708,12 +7109,21 @@ class Handler(BaseHTTPRequestHandler):
             attrs = f"{COOKIE}={cookie}; HttpOnly; SameSite=Strict; Path=/; Max-Age={WEB_SESSION_TTL_S}"
             return self.reply(302, "", "text/plain", {"Set-Cookie": attrs, "Location": "/"})
 
-        browser = self.is_local() and self.web_session()
+        # Pairing a client as you: anyone local may start one and its starter polls it with its secret; you approve.
+        if rest and rest[:2] == ["owner", "pair"] and self.is_local() and not self.via_remote:
+            return self.reply(*self.owner_pair_api(method, rest[2:]))
+        # A paired client's token counts as your browser, from this machine only; see owner_gate for what it can't do.
+        self.owner = owner_token_check(self.headers.get("Authorization")) if self.is_local() and not self.via_remote else None
+        browser = self.is_local() and (self.web_session() or (self.owner and "owner:" + self.owner["pair"]))
+        if self.owner:
+            refused = self.owner_gate(method, url, rest)
+            if refused:
+                return self.reply(*refused)
         if self.is_local() and not self.via_remote and not (self.key_ok() or browser):
             if method == "GET" and url.path in ("/", "/index.html"):
                 return self.page(401, "Sign in", "Open the web UI with <code>/peerlink web</code> in Claude Code, or <code>peerlink web</code> in a shell. Each link works once.")
             return self.reply(401, {"error": "missing or wrong key"})
-        if browser and method != "GET" and not self.same_origin():
+        if browser and not self.owner and method != "GET" and not self.same_origin():
             return self.reply(403, {"error": "cross-origin request refused"})
 
         if method == "GET" and url.path in ("/", "/index.html"):
@@ -6749,6 +7159,14 @@ class Handler(BaseHTTPRequestHandler):
             if not browser or self.key_ok():
                 return self.reply(403, {"error": "Start clean works only from the web UI in your browser"})
             return self.reply(*start_clean(self.body().get("parts")))
+
+        if rest == ["owner", "devices"] and method == "GET" and browser and not self.key_ok():
+            return self.reply(200, {"devices": owner_devices()})
+        if rest == ["owner", "revoke"] and method == "POST" and browser and not self.key_ok():
+            pair = self.body().get("pair")
+            return self.reply(200, {"unpaired": owner_revoke(str(pair) if pair else None)})
+        if len(rest) == 3 and rest[:2] == ["owner", "step-up"] and method == "GET" and self.owner:
+            return self.reply(*step_up_status(self.owner, rest[2]))
 
         if rest == ["snapshot"] and method == "GET":
             return self.reply(200, snapshot())
@@ -7083,13 +7501,13 @@ class Handler(BaseHTTPRequestHandler):
             # Only you, in the browser: no agent wipes another's context.
             if not browser or self.key_ok():
                 return self.reply(403, {"error": "an agent's context is cleared from the web UI"})
-            code, out = clear_context(rest[1], "the web UI")
+            code, out = clear_context(rest[1], self.via())
             return self.reply(code, out)
         if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "terminate" and method == "POST":
             # Only you, in the browser: no agent ends another.
             if not browser or self.key_ok():
                 return self.reply(403, {"error": "agents are ended from the web UI or Discord"})
-            code, out = terminate(rest[1], "the web UI")
+            code, out = terminate(rest[1], self.via())
             return self.reply(code, out)
         if len(rest) == 3 and rest[0] == "spaces" and rest[2] == "lead" and method == "POST":
             # Only you, in the browser: no agent or bot makes itself, or another, a lead.
@@ -7147,7 +7565,7 @@ class Handler(BaseHTTPRequestHandler):
             # Only you, in the browser: an agent holding the key must not close your tasks or answer for you.
             if not browser:
                 return self.reply(403, {"error": "the Inbox is answered from the web UI or Discord"})
-            code, out = inbox_act(self.body())
+            code, out = inbox_act(self.body(), via=self.via())
             return self.reply(code, out)
         if len(rest) == 2 and rest[0] == "approvals" and method == "GET":
             # An agent says which message it came on and who it is; only your browser may look one up bare.
@@ -7391,6 +7809,9 @@ def serve():
         log("another daemon holds port", PORT, "-", err)
         sys.exit(0)
     start_discord()
+    later = threading.Timer(20, integrity_ok)  # once the bot is up, so an alert reaches Discord
+    later.daemon = True
+    later.start()
     start_telegram()
     start_slack()
     start_teams()
