@@ -33,7 +33,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.70"
+VERSION = "0.9.71"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -6358,6 +6358,8 @@ PAIR_STARTS_PER_HOUR = 3
 STEP_UP_TTL_S = 120
 # Never with the owner token, step-up or not: the key, Start clean, sign-ins, and who may talk to your agents.
 OWNER_REFUSED = ("key", "clean", "web", "discord", "telegram", "slack", "teams", "agentchannel")
+# Settings that open the daemon to other machines: never with the token either.
+OWNER_REFUSED_SETTINGS = ("listen_host", "token", "remotes")
 owner_pairings = {}  # id -> {id, device, code, secret (its sha256), created, status, by}
 owner_tokens = {}    # sha256(token) -> {pair, device, created, last_used, by}
 owner_step_ups = {}  # id -> {id, pair, device, what, bind, created, status, by}
@@ -6593,12 +6595,17 @@ def step_up_needed(method, rest, body):
     may start or approve agents, or move who leads whom."""
     if method == "GET" or not rest:
         return ""
-    if rest == ["config"] and any(k in BROWSER_ONLY_SETTINGS for k in body):
-        return "change " + ", ".join(k.replace("_", " ") for k in body if k in BROWSER_ONLY_SETTINGS)
-    if len(rest) == 2 and rest[0] == "sessions" and "auto_approve" in body:
+    # Settings default to asking again, whichever they are: spaces, parents, guidance and the rest shape who
+    # hears whom as much as the guards do.
+    if rest == ["config"] and body:
+        return "change settings: " + ", ".join(sorted(str(k).replace("_", " ") for k in body))[:200]
+    # Matched on the setting, not the path, so no route that takes it slips by.
+    if rest[0] == "sessions" and "auto_approve" in body:
         return "change an agent's auto-approve"
     if rest == ["inbox"] and body.get("kind") == "approval" and str(body.get("id", "")) in rules:
         return f"{body.get('action', 'decide')} rule {body.get('id')}"
+    if rest == ["rules"]:
+        return "add a rule"
     if len(rest) == 2 and rest[0] == "rules":
         return f"change rule {rest[1]}"
     if len(rest) == 3 and rest[0] == "spaces" and rest[2] in ("lead", "delete", "parent"):
@@ -7053,7 +7060,8 @@ class Handler(BaseHTTPRequestHandler):
     def owner_gate(self, method, url, rest):
         """For a request with the owner token: (code, body) when it's refused or needs a fresh press, else None.
         Every one is logged with the client and its pairing."""
-        if rest is None or rest[:1] and rest[0] in OWNER_REFUSED or rest[:1] in (["restart"], ["shutdown"]):
+        if rest is None or rest[:1] and rest[0] in OWNER_REFUSED or rest[:1] in (["restart"], ["shutdown"]) \
+                or rest == ["config"] and method != "GET" and any(k in OWNER_REFUSED_SETTINGS for k in self.body()):
             return 403, {"error": "a paired client can't do this: use the web UI"}
         what = step_up_needed(method, rest, self.body())
         if what:
@@ -7111,6 +7119,10 @@ class Handler(BaseHTTPRequestHandler):
 
         # Pairing a client as you: anyone local may start one and its starter polls it with its secret; you approve.
         if rest and rest[:2] == ["owner", "pair"] and self.is_local() and not self.via_remote:
+            # A web page could post here from your browser: one that says it comes from a site is refused.
+            origin = self.headers.get("Origin") or ""
+            if re.match(r"https?://", origin, re.I) and not self.same_origin():
+                return self.reply(403, {"error": "cross-origin request refused"})
             return self.reply(*self.owner_pair_api(method, rest[2:]))
         # A paired client's token counts as your browser, from this machine only; see owner_gate for what it can't do.
         self.owner = owner_token_check(self.headers.get("Authorization")) if self.is_local() and not self.via_remote else None

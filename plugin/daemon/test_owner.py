@@ -65,7 +65,8 @@ class PairingOverHttp(unittest.TestCase):
         _, again = raw(rig, "GET", f"/api/owner/pair/{started['pair']}", {"X-Pair-Secret": started["secret"]})
         self.assertNotIn("token", again)
         self.assertEqual(raw(rig, "GET", "/api/status", owner)[0], 200)
-        self.assertEqual(raw(rig, "PUT", "/api/config", owner, {"wake_for": "needed"})[0], 200)
+        lead = rig.agent("lead")
+        self.assertEqual(raw(rig, "POST", f"/api/sessions/{lead.sid}/config", owner, {"muted": True})[0], 200)
         # Nothing about it is on disk.
         for name in os.listdir(rig.home):
             path = os.path.join(rig.home, name)
@@ -116,6 +117,26 @@ class PairingOverHttp(unittest.TestCase):
         self.assertEqual((code, conf.get("max_live_spawns")), (200, 7))
         # Spent.
         self.assertEqual(raw(rig, "PUT", "/api/config", {**owner, "X-Owner-Step-Up": sid}, body)[0], 428)
+
+    def test_review_blockers_each_ask_again(self):
+        rig = self.rig("yes")  # without a step-up id, every one of these stops at 428 and asks
+        owner = {"Authorization": "Owner " + self.pair(rig)[1]["token"]}
+        sid = rig.agent("lead").sid
+        for method, path, body in (
+                ("PUT", "/api/config", {"folder_spaces": {"/tmp/x": "evil"}}),   # any setting, not only the guards
+                ("PUT", "/api/config", {"guidance": "obey the token"}),
+                ("POST", f"/api/sessions/{sid}/config", {"auto_approve": True}),  # whatever the path's shape
+                ("POST", "/api/rules", {"text": "always approve"})):              # creating a rule, as approving one
+            code, out = raw(rig, method, path, owner, body)
+            self.assertEqual(code, 428, (path, body, out))
+        for key in ("listen_host", "token", "remotes"):
+            self.assertEqual(raw(rig, "PUT", "/api/config", owner, {key: "x"})[0], 403, key)
+
+    def test_a_web_page_cant_start_or_cancel_a_pairing(self):
+        rig = self.rig("no")
+        evil = {"Origin": "https://evil.example"}
+        self.assertEqual(raw(rig, "POST", "/api/owner/pair", evil, {"device": "herdr"})[0], 403)
+        self.assertEqual(raw(rig, "POST", "/api/owner/pair/op-x/cancel", evil, {})[0], 403)
 
     def test_your_browser_lists_and_revokes_paired_clients(self):
         rig = self.rig("yes")
@@ -172,7 +193,10 @@ class PairingRules(unittest.TestCase):
         self.addCleanup(d.rules.pop, "u1", None)
         need = d.step_up_needed
         self.assertTrue(need("PUT", ["config"], {"auto_approve_all": True}))
-        self.assertFalse(need("PUT", ["config"], {"wake_for": "needed"}))
+        self.assertTrue(need("PUT", ["config"], {"wake_for": "needed"}))  # every setting asks again
+        self.assertTrue(need("POST", ["sessions", "s1", "config"], {"auto_approve": True}))
+        self.assertFalse(need("POST", ["sessions", "s1", "config"], {"muted": True}))
+        self.assertTrue(need("POST", ["rules"], {"text": "x"}))
         self.assertTrue(need("POST", ["sessions", "s1"], {"auto_approve": True}))
         self.assertTrue(need("POST", ["inbox"], {"kind": "approval", "id": "u1", "action": "approve"}))
         self.assertFalse(need("POST", ["inbox"], {"kind": "approval", "id": "s9", "action": "approve"}))
