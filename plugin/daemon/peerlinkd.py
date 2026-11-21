@@ -33,7 +33,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.65"
+VERSION = "0.9.66"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -4992,6 +4992,93 @@ def night_guard_on(now=None):
     return start <= hour < end if start < end else hour >= start or hour < end
 
 
+def git(repo, *args, timeout=60):
+    """(returncode, output) of a git command in repo."""
+    try:
+        r = subprocess.run(["git", "-C", repo, *args], timeout=timeout, capture_output=True, text=True)
+        return r.returncode, (r.stdout if r.returncode == 0 else r.stderr or r.stdout).strip()
+    except (OSError, subprocess.SubprocessError) as err:
+        return 1, str(err)
+
+
+def plan_worktree(spec, folder):
+    """A spawn's worktree from request_spawn's worktree: {repo, branch, base}: (worktree, "") or (None, why not).
+    Its folder is `dir` when given, else beside the repo as <repo>-wt-<branch>. Nothing is created until it starts."""
+    if not isinstance(spec, dict):
+        return None, "worktree is {repo, branch, base}"
+    repo = os.path.abspath(os.path.expanduser(str(spec.get("repo") or "")))
+    branch, base = str(spec.get("branch") or "").strip(), str(spec.get("base") or "HEAD").strip()
+    code, top = git(repo, "rev-parse", "--show-toplevel")
+    if code != 0:
+        return None, f"{repo} isn't a git repository"
+    if not branch or git(repo, "check-ref-format", "--branch", branch)[0] != 0:
+        return None, f"'{branch}' isn't a branch name git takes"
+    path = folder or f"{top.rstrip(os.sep)}-wt-{re.sub(r'[^A-Za-z0-9._-]', '-', branch)}"
+    if os.path.exists(path) and git(path, "rev-parse", "--abbrev-ref", "HEAD") != (0, branch):
+        return None, f"{path} already exists and isn't a worktree on {branch}"
+    return {"repo": top, "branch": branch, "base": base, "path": path, "created": False}, ""
+
+
+def claude_trusts(path):
+    """Whether Claude Code trusts this folder or one above it, so it starts there without asking."""
+    try:
+        with open(os.path.expanduser("~/.claude.json")) as f:
+            projects = json.load(f).get("projects") or {}
+    except (OSError, ValueError):
+        return False
+    p = os.path.abspath(path)
+    while True:
+        if (projects.get(p) or {}).get("hasTrustDialogAccepted"):
+            return True
+        up = os.path.dirname(p)
+        if up == p:
+            return False
+        p = up
+
+
+def trust_folder(path):
+    """Mark a folder trusted for Claude Code, as answering its "trust this folder" question would, so an agent
+    started there with nobody watching doesn't stop at it. Only when no folder above it is trusted already."""
+    if claude_trusts(path):
+        return
+    conf = os.path.expanduser("~/.claude.json")
+    try:
+        with open(conf) as f:
+            data = json.load(f)
+        data.setdefault("projects", {}).setdefault(os.path.abspath(path), {})["hasTrustDialogAccepted"] = True
+        tmp = f"{conf}.peerlink-{os.getpid()}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, conf)
+        log("trusted", path, "for Claude Code")
+    except (OSError, ValueError) as err:
+        log("couldn't mark", path, "trusted for Claude Code:", err)
+
+
+def make_worktree(sp):
+    """Create the spawn's worktree before its agent starts: '' when it's there, else why not. A remote base is
+    fetched first, best effort, so the branch starts from what's pushed."""
+    wt = sp.get("worktree")
+    if not wt or wt.get("created"):
+        return ""
+    path, repo, branch, base = wt["path"], wt["repo"], wt["branch"], wt["base"]
+    if os.path.exists(path):
+        if git(path, "rev-parse", "--abbrev-ref", "HEAD") != (0, branch):
+            return f"{path} already exists and isn't a worktree on {branch}"
+    else:
+        remote = base.split("/", 1)[0] if "/" in base else ""
+        if remote and git(repo, "remote", "get-url", remote)[0] == 0:
+            git(repo, "fetch", "--quiet", remote, timeout=120)
+        exists = git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}")[0] == 0
+        code, out = git(repo, "worktree", "add", path, branch) if exists else git(repo, "worktree", "add", "-b", branch, path, base)
+        if code != 0:
+            return f"git couldn't add the worktree: {out[:300]}"
+    trust_folder(path)
+    wt["created"], wt["created_ts"] = True, time.time()
+    log("worktree", sp["id"], path, branch)
+    return ""
+
+
 def request_spawn(body):
     by = sessions.get(body.get("by") or "")
     if by is None:
@@ -5002,10 +5089,16 @@ def request_spawn(body):
     worker = bool(body.get("worker"))
     if worker and night_guard_on():
         return 409, {"error": f"the night guard is on ({config.get('night_guard')}): no workers start in those hours unless your user changes it in the web UI"}
-    folder = os.path.abspath(os.path.expanduser(str(body.get("dir") or "")))
+    folder = os.path.abspath(os.path.expanduser(str(body.get("dir") or ""))) if body.get("dir") else ""
     purpose, prompt = str(body.get("purpose") or "").strip(), str(body.get("first_prompt") or "").strip()
-    if not os.path.isdir(folder):
-        return 400, {"error": f"{folder} isn't a folder on this machine; it has to exist already"}
+    worktree = None
+    if body.get("worktree"):
+        worktree, why = plan_worktree(body["worktree"], folder)
+        if not worktree:
+            return 400, {"error": why}
+        folder = worktree["path"]
+    elif not os.path.isdir(folder):
+        return 400, {"error": f"{folder or 'dir'} isn't a folder on this machine; it has to exist already, or give worktree to have one made"}
     if not purpose or not prompt:
         return 400, {"error": "purpose and first_prompt are both required"}
     with lock:
@@ -5023,6 +5116,8 @@ def request_spawn(body):
               "status": "pending", "created": time.time(), "updated": time.time(), "note": ""}
         if worker:
             sp["worker"] = True
+        if worktree:
+            sp["worktree"] = worktree
         spawns[sp["id"]] = sp
         save_spawns()
         channel = approval_channel(by)
@@ -5178,6 +5273,13 @@ def start_spawn(sp, via):
                 save_spawns()
             return
     sid = sp["id"]
+    why = make_worktree(sp)
+    if why:
+        with lock:
+            sp["status"], sp["note"] = "failed", why
+            spawn_told(sp, f"{sid} didn't start: {why}")
+            save_spawns()
+        return
     how, err = launch(sp)
     with lock:
         if err:
@@ -5777,8 +5879,16 @@ def retire(sid, body):
         sp["status"], sp["updated"] = "retired", time.time()
         save_spawns()
         who = display_name(target)
+        # Links leads made for it end with it: a retired worker never comes back.
+        for key in [k for k in (config.get("link_info") or {}) if target.get("agent") in k.split("|")]:
+            drop_link(key, f"{who} retired")
+        wt = sp.get("worktree") or {}
         line = (f"{who} retired" + (f", {', '.join(done)}" if done else "") if target is by
                 else f"You retired {who}" + (f"; it still owns {', '.join(t['id'] for t in still)}: reassign or cancel them" if still else ""))
+        if wt.get("created"):
+            # Never removed for you: the branch may hold work not merged yet.
+            line += (f". Its worktree {tilde_path(wt['path'])} (branch {wt['branch']}) stays; once the work is merged, remove it with "
+                     f"git -C {tilde_path(wt['repo'])} worktree remove {tilde_path(wt['path'])}")
         if target is by and hirer.get("cwd"):
             asker = sessions.get(hirer.get("id") or "")
             task_message(None, hirer["cwd"], line + ".", prefer=asker if asker and is_live(asker) else successor(hirer["cwd"]))

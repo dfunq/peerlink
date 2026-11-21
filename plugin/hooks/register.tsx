@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.9.65'
+const DAEMON_VERSION = '0.9.66'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -1632,7 +1632,13 @@ export const register: Register = (on, options) => {
       inputSchema: {
         type: 'object',
         properties: {
-          dir: { type: 'string', description: 'The folder to start it in; it must exist already' },
+          dir: { type: 'string', description: 'The folder to start it in; it must exist already, unless worktree is given, when it is where the worktree goes (beside the repo by default)' },
+          worktree: {
+            type: 'object',
+            description: 'A new git worktree to start it in, made when it starts: repo (the repository), branch (new, or an existing one), base (what a new branch starts from, like origin/staging; the repo\'s HEAD by default). It stays after the agent ends: remove it once the work is merged',
+            properties: { repo: { type: 'string' }, branch: { type: 'string' }, base: { type: 'string' } },
+            required: ['repo', 'branch'],
+          },
           purpose: { type: 'string', description: 'Why it is needed, in a sentence your user decides on' },
           first_prompt: { type: 'string', description: 'What the new agent should do first' },
           name: { type: 'string', description: 'Its name, like "webshop-server"; needed when the folder already has an agent, which keeps the folder\'s name' },
@@ -1643,7 +1649,7 @@ export const register: Register = (on, options) => {
             description: "true to hire a worker for one piece of work: it counts against your user's cap on workers running at once (queued past it), can't start agents or schedules itself, and calls retire when done. Leave it out to start or restart a standing agent",
           },
         },
-        required: ['dir', 'purpose', 'first_prompt'],
+        required: ['purpose', 'first_prompt'],
       },
       isDeferred: false,
     })
@@ -1959,7 +1965,7 @@ export const register: Register = (on, options) => {
 
   on('tool.call', { tool: 'mcp__peerlink__request_spawn' }, async ($, e) => {
     const input = e as any
-    const res = await call($, 'POST', '/api/spawns', { by: sessionId, dir: input.dir, purpose: input.purpose, first_prompt: input.first_prompt, space: input.space, name: input.name, role: input.role, worker: !!input.worker })
+    const res = await call($, 'POST', '/api/spawns', { by: sessionId, dir: input.dir, purpose: input.purpose, first_prompt: input.first_prompt, space: input.space, name: input.name, role: input.role, worker: !!input.worker, worktree: input.worktree })
     if (!res.ok) return text(`Not asked: ${res.data.error ?? res.status}`)
     if (res.data.status === 'queued') return text(`${res.data.id} is queued without asking: your user's cap on workers running at once is reached. It starts when one retires, and you'll be told.`)
     if (res.data.status !== 'pending') return text(`${res.data.id} ${res.data.status === 'started' ? 'started' : `didn't start (${res.data.status})`} without asking: your user lets you start agents.${res.data.note ?? ''}`)
