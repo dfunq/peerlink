@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.9.66'
+const DAEMON_VERSION = '0.9.67'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -1632,7 +1632,7 @@ export const register: Register = (on, options) => {
       inputSchema: {
         type: 'object',
         properties: {
-          dir: { type: 'string', description: 'The folder to start it in; it must exist already, unless worktree is given, when it is where the worktree goes (beside the repo by default)' },
+          dir: { type: 'string', description: 'The folder to start it in; it must exist already. With worktree: leave it out (or give the repo) for <repo>-wt-<branch> beside the repo, or give the new folder, which must not exist yet' },
           worktree: {
             type: 'object',
             description: 'A new git worktree to start it in, made when it starts: repo (the repository), branch (new, or an existing one), base (what a new branch starts from, like origin/staging; the repo\'s HEAD by default). It stays after the agent ends: remove it once the work is merged',
