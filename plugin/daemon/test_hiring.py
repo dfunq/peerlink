@@ -308,6 +308,33 @@ class HerdrLaunchTest(unittest.TestCase):
         self.assertTrue(any(a.startswith("herdr.tab=tb") for a in argv))  # its own tab, named after it
         self.assertEqual(argv[-1], "/bin/claude")
 
+    def test_a_worker_nests_under_its_leads_terminal(self):
+        d.sessions["s-lead9"] = {"id": "s-lead9", "name": "lead9", "cwd": "/x/lead9", "pid": 77, "terminal": "hc:t2@50",
+                                 "last_seen": time.time()}
+        self.addCleanup(d.sessions.pop, "s-lead9", None)
+        for worker, lead_pid, parented in ((True, 50, True), (True, 51, False), (False, 50, False)):
+            with self.subTest(worker=worker, lead_pid=lead_pid):
+                sp = {"id": "s9", "dir": "/x/api", "name": "pg-client", "space": "pixelgrid", "worker": worker,
+                      "requester": {"id": "s-lead9", "cwd": "/x/lead9"}}
+                calls = []
+
+                def run(argv, **kw):
+                    calls.append(argv)
+                    out = {"terminals": []} if argv[1] == "ls" else {"state": "live", "pid": lead_pid} if argv[1] == "get" else {"address": "t42"}
+                    return unittest.mock.Mock(returncode=0, stdout=json.dumps(out), stderr="")
+                with unittest.mock.patch.object(d, "find_claude", lambda: "/bin/claude"), unittest.mock.patch.object(d, "find_hc", lambda: "/bin/hc"), \
+                        unittest.mock.patch.object(d.subprocess, "run", run):
+                    self.assertEqual(d.launch(sp)[1], "")
+                argv = next(a for a in calls if a[1] == "run")
+                self.assertIn("--outlive-parent", argv)
+                if parented:  # its lead's terminal still runs the lead's shell: nested under it, quietly
+                    self.assertEqual(argv[argv.index("--parent") + 1], "t2")
+                    self.assertIn("--no-notify", argv)
+                    self.assertNotIn("--no-parent", argv)
+                else:  # not a worker, or the address now belongs to another shell
+                    self.assertIn("--no-parent", argv)
+                    self.assertNotIn("--parent", argv)
+
     def test_when_hc_fails_it_falls_back_to_tmux(self):
         sp = {"id": "s9", "dir": "/x/api", "name": "", "space": ""}
         seen = []

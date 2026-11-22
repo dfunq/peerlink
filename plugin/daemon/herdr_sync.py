@@ -32,7 +32,8 @@ def plan(agents, terms, layout, smap, new_id):
 
     agents: [{"agent", "name", "space", "lead", "address"}], live peerlink agents running in hc terminals.
     terms:  {address: {"space": herdr.space label, "tab": herdr.tab label, "agent": peerlink.agent label,
-             "pspace": peerlink.space label}} for every live hc terminal.
+             "pspace": peerlink.space label, "parent": started by another terminal}} for every live hc terminal.
+             A terminal with a parent (a worker, nested under its lead) is never moved: herdr shows it with its parent.
     layout: the herdr app's spaces, [{"id", "name", "tabs": [{"id", "name", "terminals": [address]}]}], or None
             when the app isn't running (then nothing is renamed or reordered).
     smap:   {peerlink space: herdr space id} remembered from earlier passes.
@@ -111,7 +112,9 @@ def plan(agents, terms, layout, smap, new_id):
         addr, target = a["address"], smap[a["space"]]
         t = terms.get(addr) or {}
         labels = {}
-        if shown_in.get(addr, t.get("space")) != target or not t.get("tab"):
+        if t.get("parent"):
+            pass
+        elif shown_in.get(addr, t.get("space")) != target or not t.get("tab"):
             mates = tabs.get(t.get("tab") or "", [addr]) if t.get("tab") else [addr]
             others = [x for x in mates if x != addr]
             mixed = [x for x in others if x not in agent_at or agent_at[x]["space"] != a["space"]]

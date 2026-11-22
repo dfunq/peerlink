@@ -53,6 +53,14 @@ class Joins(unittest.TestCase):
 
 
 class Plan(unittest.TestCase):
+    def test_a_worker_nested_under_its_lead_is_never_moved(self):
+        agents = [agent("t8", "peerlink", "tools", lead=True), agent("t9", "worker", "tools")]
+        terms = {"t8": term("sptools", "tb8", "peerlink", "tools"), "t9": {**term("spother", "tb9", "worker", "tools"), "parent": True}}
+        layout = [{"id": "sptools", "name": "tools", "tabs": [{"id": "tb8", "name": "peerlink", "terminals": ["t8"]}]},
+                  {"id": "spother", "name": "other", "tabs": [{"id": "tb9", "name": "worker", "terminals": ["t9"]}]}]
+        actions, smap, notes = hs.plan(agents, terms, layout, {"tools": "sptools"}, ids())
+        self.assertFalse([a for a in actions if a[0] == "label" and a[1] == "t9"])
+
     def test_address(self):
         self.assertEqual(hs.hc_address("hc:t7@123"), "t7")
         self.assertEqual(hs.hc_address("hc:box/t1b@9"), "box/t1b")
