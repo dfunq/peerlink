@@ -24,6 +24,29 @@ class Patch(unittest.TestCase):
         self.assertIn('readTextFile("/x/tree.json")', out)  # the daemon's own home, not a guess at ~/.peerlink
         self.assertNotIn("PEERLINK_TREE", out)
 
+    def test_the_agents_mod_takes_peerlinks_parent_first(self):
+        fake = "\n".join(old for old, _ in hm.AGENTS_PATCHES) + "\n"
+        out, missing = hm.patch(fake, "/x/tree.json", hm.AGENTS_PATCHES)
+        self.assertIsNone(missing)
+        self.assertIn("peerlinkParent(k) === addr", out)
+        self.assertIn("if (lead.length > 6) return [];", out)
+        self.assertIn("(peerlinkTree.names || {})[k.address] || k.name", out)  # a nested row goes by its agent's name  # a loop in the tree can't recurse forever
+        self.assertIn('readTextFile("/x/tree.json")', out)
+        self.assertEqual(hm.point_layout('{"mod": "agents"}', "peerlink-agents", "agents"), '{"mod": "peerlink-agents"}')
+        self.assertEqual(hm.point_layout('{"mod": "agents"}', "peerlink-spaces", "spaces"), '{"mod": "agents"}')
+
+    @unittest.skipUnless(shutil.which("node"), "node isn't installed")
+    def test_peerlinks_parent_wins_else_hcs(self):
+        script = hm.AGENTS_JS.replace("readTextFile(PEERLINK_TREE)", "(async()=>null)()") + r'''
+peerlinkRead = Date.now();
+peerlinkTree = { agents: { t9: "t8", t7: "t7" } };
+console.log(JSON.stringify([peerlinkParent({ address: "t9", parent: null }), peerlinkParent({ address: "t6", parent: "t5" }),
+                            peerlinkParent({ address: "t7", parent: null })]));
+'''
+        r = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=20)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), ["t8", "t5", None])
+
     def test_a_layout_points_its_spaces_block(self):
         layout = '{"content": {"mod": "spaces"}, "x": {"mod": "agents"}, "y": {"mod":"spaces-extra"}}'
         self.assertEqual(hm.point_layout(layout, "peerlink-spaces"),
@@ -38,7 +61,7 @@ class Patch(unittest.TestCase):
     def test_the_tree_names_each_herdr_spaces_parent(self):
         smap = {"skyforge": "sp1", "ops": "sp2", "login": "sp3", "games": "sp4", "deep": "sp5"}
         parents = {"ops": "skyforge", "login": "skyforge", "deep": "ops", "games": "gone"}
-        self.assertEqual(hm.tree(smap, parents), {"parents": {"sp2": "sp1", "sp3": "sp1", "sp5": "sp2"}, "agents": {}})
+        self.assertEqual(hm.tree(smap, parents), {"parents": {"sp2": "sp1", "sp3": "sp1", "sp5": "sp2"}, "agents": {}, "names": {}})
 
     @unittest.skipUnless(shutil.which("node"), "node isn't installed")
     def test_the_nesting_orders_depth_first_and_keeps_worktrees_with_their_repo(self):
@@ -80,7 +103,7 @@ class Daemon(unittest.TestCase):
     def test_it_writes_the_tree_and_makes_the_mod_once(self):
         self.d.herdr_nest({"skyforge": "sp1", "ops": "sp2"}, {"ops": "skyforge"})
         with open(os.path.join(self.d.HOME, "herdr-tree.json")) as f:
-            self.assertEqual(json.load(f), {"parents": {"sp2": "sp1"}, "agents": {}})
+            self.assertEqual(json.load(f), {"parents": {"sp2": "sp1"}, "agents": {}, "names": {}})
         mod = os.path.join(self.app, "mods", "peerlink-spaces")
         with open(os.path.join(mod, "main.js")) as f:
             self.assertIn(json.dumps(os.path.join(self.d.HOME, "herdr-tree.json")), f.read())

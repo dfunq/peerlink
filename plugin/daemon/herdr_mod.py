@@ -87,6 +87,8 @@ AGENTS_PATCHES = [
     ("  tree(all, addr, lead = []) {\n", "  tree(all, addr, lead = []) {\n    if (lead.length > 6) return [];\n"),
     ('    const kids = all.filter((k) => k.parent === addr && k.state === "live");',
      '    const kids = all.filter((k) => peerlinkParent(k) === addr && k.state === "live");'),
+    ("      .child(div().flex_1().truncate().text_color(on ? t.foreground : t.muted).child(k.name || k.template || k.program?.name || k.address))",
+     "      .child(div().flex_1().truncate().text_color(on ? t.foreground : t.muted).child((peerlinkTree.names || {})[k.address] || k.name || k.template || k.program?.name || k.address))"),
 ]
 
 # herdr's mod -> (peerlink's copy, the patches that make it).
@@ -109,17 +111,19 @@ def point_layout(text, to, base="spaces"):
     return block.sub(lambda m: m.group(1) + to + m.group(3), text)
 
 
-def tree(smap, parents, agents=None):
+def tree(smap, parents, agents=None, names=None):
     """The file the patched mods read: each herdr space's parent herdr space, from peerlink's space tree, and each
     agent's parent terminal. smap: {peerlink space: herdr space id}; parents: {peerlink space: the space it sits
-    inside}; agents: {terminal address: parent terminal address}."""
+    inside}; agents: {terminal address: parent terminal address}; names: {terminal address: its agent's name}, shown
+    on a nested row in place of the terminal's own name."""
     out = {}
     for space, hid in sorted((smap or {}).items()):
         p = (parents or {}).get(space)
         if hid and p and smap.get(p) and smap[p] != hid:
             out[hid] = smap[p]
-    return {"parents": out, "agents": {a: p for a, p in sorted((agents or {}).items()) if a and p and a != p}}
+    return {"parents": out, "agents": {a: p for a, p in sorted((agents or {}).items()) if a and p and a != p},
+            "names": {a: n for a, n in sorted((names or {}).items()) if a and n}}
 
 
-def tree_text(smap, parents, agents=None):
-    return json.dumps(tree(smap, parents, agents), sort_keys=True, indent=1) + "\n"
+def tree_text(smap, parents, agents=None, names=None):
+    return json.dumps(tree(smap, parents, agents, names), sort_keys=True, indent=1) + "\n"
