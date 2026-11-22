@@ -611,5 +611,22 @@ class ScenarioTest(unittest.TestCase):
         self.assertLess(time.time() - start, 1)
 
 
+    def test_two_live_sessions_resuming_one_conversation_never_take_turns(self):
+        """SKY-683: the conversation resumed in a second terminal while the first still runs is another agent there."""
+        rig = self.rig()
+        cwd = rig.folder("pixelgrid")
+        reg = lambda sid, term, pid, succeeds=None: rig.call("POST", "/api/sessions", {
+            "id": sid, "name": "pixelgrid", "had_name": "pixelgrid" if succeeds else None, "cwd": cwd, "plugin": "rig",
+            "terminal": term, "pid": pid, "succeeds": succeeds})
+        self.assertEqual(reg("old", "tmux:%0@1", os.getppid())[1]["name"], "pixelgrid")
+        self.assertEqual(reg("new", "hc:t7@2", os.getpid(), succeeds="old")[1]["name"], "pixelgrid-2")
+        for _ in range(3):
+            for sid in ("old", "new"):
+                code, out = rig.call("POST", f"/api/sessions/{sid}/heartbeat", {"busy": False, "ack": []})
+                self.assertEqual(code, 200, out)
+        names = {p["id"]: p["name"] for p in rig.call("GET", "/api/peers?local=1")[1]["peers"]}
+        self.assertEqual((names.get("old"), names.get("new")), ("pixelgrid", "pixelgrid-2"))
+        self.assertIn("Two Claude sessions tried to be pixelgrid", rig.output())
+
 if __name__ == "__main__":
     unittest.main()
