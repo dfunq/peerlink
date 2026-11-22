@@ -34,7 +34,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.74"
+VERSION = "0.9.75"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -73,6 +73,7 @@ KEY_PATH = os.path.join(HOME, "key")
 DIRS_PATH = os.path.join(HOME, "dirs.json")
 DIR_MEMORY_S = 14 * 86400
 LAUNCHER_PATH = os.path.join(HOME, "bin", "peerlink")
+LAUNCH_JSON = os.path.join(HOME, "launch.json")
 LINK_TTL_S = 60
 WEB_SESSION_TTL_S = 12 * 3600
 COOKIE = "peerlink_session"
@@ -503,7 +504,16 @@ def remember_dir(rec):
 
 
 def write_launcher():
-    """~/.peerlink/bin/peerlink runs this file, wherever the plugin is installed."""
+    """~/.peerlink/bin/peerlink runs this file, wherever the plugin is installed. launch.json says the same for
+    programs that can't run a sh script, such as a herdr mod on Windows: {"python", "daemon"}."""
+    launch = json.dumps({"python": sys.executable or "python3", "daemon": os.path.abspath(__file__)}, indent=2) + "\n"
+    try:
+        with open(LAUNCH_JSON) as f:
+            same = f.read() == launch
+    except OSError:
+        same = False
+    if not same:
+        write_file(LAUNCH_JSON, launch, False, 0o644)
     os.makedirs(os.path.dirname(LAUNCHER_PATH), exist_ok=True)
     script = f'#!/bin/sh\nexec "{sys.executable or "python3"}" "{os.path.abspath(__file__)}" "$@"\n'
     try:
