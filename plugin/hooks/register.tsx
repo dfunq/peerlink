@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.9.79'
+const DAEMON_VERSION = '0.9.80'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -145,6 +145,11 @@ let turnGiven: string[] = []
 let lastGiven: string[] = []
 let failure = ''
 let pid: number | undefined
+// Since when Claude Code has refused to start this session's turns (a wake's prompt, its own reload), told to the
+// daemon so the agent shows as needing a prompt typed in, not idle; 0 once a turn starts. The messages a refused wake
+// put in the transcript wait there unread: held, not acked, until a turn takes them.
+let stuckSince = 0
+let stuckHeld: PeerMessage[] = []
 
 // Whether this runs on Windows, as the plugin's own path says: C:\\… or C:/….
 const onWindows = ($: EngineInterface) => /^[A-Za-z]:[\\/]/.test($.plugin.root)
@@ -240,10 +245,14 @@ let reloading = false
 // When the reload was queued, told to the daemon: a queued command can sit unrun (a dialog open in the terminal,
 // no turn ever ending), and the web UI then says so rather than leaving the agent quietly behind.
 let reloadQueued = 0
+// A reload Claude Code refused is tried again after 30s, then 5 minutes, then every 30: not every check.
+const RELOAD_BACKOFF_MS = [30_000, 300_000, 1_800_000]
+let reloadFails = 0
+let reloadRetryAt = 0
 async function reloadIfUpdated($: EngineInterface) {
   if (reloading || cfg?.auto_reload === false) return
   const now = await $.clock.now()
-  if (now - lastInstallCheck < 30_000) return
+  if (now - lastInstallCheck < 30_000 || now < reloadRetryAt) return
   lastInstallCheck = now
   const installed = await installedVersion($)
   if (!installed || !isOlder(DAEMON_VERSION, installed)) return
@@ -251,10 +260,14 @@ async function reloadIfUpdated($: EngineInterface) {
   reloadQueued = now
   $.ui.toast(`peerlink: updating to ${installed}`)
   $.ui.log(`peerlink: ${installed} is installed; reloading plugins to use it`)
-  await $.command.run({ command: 'reload-plugins' }).catch(() => {
+  await $.command.run({ command: 'reload-plugins' }).catch(async () => {
     reloading = false
     reloadQueued = 0
-    $.ui.log(`peerlink: ${installed} is installed; run /reload-plugins to use it`)
+    const wait = RELOAD_BACKOFF_MS[Math.min(reloadFails, RELOAD_BACKOFF_MS.length - 1)]!
+    reloadFails++
+    reloadRetryAt = (await $.clock.now()) + wait
+    stuckSince ||= now
+    $.ui.log(`peerlink: ${installed} is installed, but Claude Code refused /reload-plugins; run it yourself (tried again in ${Math.round(wait / 60_000) || 1}m)`)
   })
 }
 
@@ -678,7 +691,8 @@ async function deliverOnce($: EngineInterface) {
       pending = [...batch, ...pending]
       return
     }
-    acked($, batch)
+    stuckHeld.push(...batch)
+    stuckSince ||= now
     for (const m of batch) $.ui.log(`${logLine(m)}  (couldn't start a turn: read with your next prompt)`)
     $.ui.toast(`Message from ${batch.map(m => m.from_name).join(', ')}, waiting for your next prompt`)
     return
@@ -696,6 +710,10 @@ function turnStarted($: EngineInterface, text: unknown) {
     pending = pending.filter(m => !framedIds.includes(m.id))
     acked($, framedIds.map(id => ({ id }) as PeerMessage))
   }
+  // Any turn reads the transcript: what a refused wake left there has reached the agent now.
+  if (stuckHeld.length) acked($, stuckHeld)
+  stuckHeld = []
+  stuckSince = 0
   // A turn you started by typing isn't the one the prompt asked for.
   if (!submitted || (typeof text === 'string' && text && !submitted.batch.some(m => text.includes(m.id)))) return
   acked($, submitted.batch, true)
@@ -840,8 +858,8 @@ async function poll($: EngineInterface) {
     const ack = unacked
     unacked = []
     // What's here on purpose, waiting for the next turn: the daemon needn't hand it out again while this says so.
-    const holding = [...pending, ...notices].map(m => m.id)
-    res = await call($, 'POST', `/api/sessions/${sessionId}/heartbeat`, { busy, activity: busy ? activity : undefined, context: await contextPercent($), branch: await freshBranch($), reload_queued: reloadQueued, ack, holding })
+    const holding = [...pending, ...notices, ...stuckHeld].map(m => m.id)
+    res = await call($, 'POST', `/api/sessions/${sessionId}/heartbeat`, { busy, activity: busy ? activity : undefined, context: await contextPercent($), branch: await freshBranch($), reload_queued: reloadQueued, ack, holding, stuck: stuckSince })
     if (!res.ok) unacked.push(...ack)
   } catch {
     await ensureDaemon($)
@@ -888,7 +906,7 @@ async function poll($: EngineInterface) {
     await runNext($)
   }
   // The daemon hands a message out again until it's acked: skip one already here or already in the session.
-  const held = new Set([...pending, ...notices, ...(submitted?.batch ?? [])].map(m => m.id))
+  const held = new Set([...pending, ...notices, ...stuckHeld, ...(submitted?.batch ?? [])].map(m => m.id))
   const inbox = (res.data.inbox as PeerMessage[]).filter(m => !held.has(m.id) && !placed.has(m.id))
   for (const m of inbox.filter(m => m.kind === 'announcement')) {
     notices.push(m)
@@ -1102,7 +1120,7 @@ async function listPeers($: EngineInterface, withIds: boolean) {
   return peers
     .map(
       p =>
-        `- ${p.name}${p.remote ? '@' + p.host : ''}${withIds ? ` (id ${p.id})` : ''}${spaceTag(p)} — ${p.busy ? 'busy' : 'idle'}${p.muted ? ', muted' : ''}\n  dir: ${p.cwd}${p.branch ? ` [${p.branch}]` : ''}${p.role ? `\n  role: ${oneLine(p.role, 400)}` : ''}\n  summary: ${p.summary ? p.summary + summaryAge(p) : '(none)'}${taskNote(p)}`,
+        `- ${p.name}${p.remote ? '@' + p.host : ''}${withIds ? ` (id ${p.id})` : ''}${spaceTag(p)} — ${p.stuck ? "can't start turns: needs a prompt typed in its terminal" : p.busy ? 'busy' : 'idle'}${p.muted ? ', muted' : ''}\n  dir: ${p.cwd}${p.branch ? ` [${p.branch}]` : ''}${p.role ? `\n  role: ${oneLine(p.role, 400)}` : ''}\n  summary: ${p.summary ? p.summary + summaryAge(p) : '(none)'}${taskNote(p)}`,
     )
     .join('\n')
 }

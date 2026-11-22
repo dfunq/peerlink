@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.9.79', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.9.80', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (state.forget && path.endsWith('/heartbeat') && 'busy' in body) {
       state.forget = false
       return { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'unknown agent; register again' }) } }
@@ -954,9 +954,10 @@ test('your own message wakes an idle agent without waiting', async ($, on) => {
   expect(woke.length).toBe(1)
 })
 
-test('a message whose prompt starts no turn goes into the transcript, is acked, and a redelivery is not shown twice', async ($, on) => {
+test('a message whose prompt starts no turn goes into the transcript unread: held, the agent shown stuck, acked once a turn starts', async ($, on) => {
   const { clock, submits } = engine(on)
   const session = mock.session(on)
+  on('turn.start', (_: any, e: any) => ({ turnId: e.turnId }))
   submits.drop = 'not now'
   const inbox: any[] = []
   const daemon = fakeDaemon(on, 1, null, inbox, { wake_delay_s: 0 })
@@ -969,12 +970,46 @@ test('a message whose prompt starts no turn goes into the transcript, is acked, 
   const rows = session.appended().filter((r: any) => r.message.type === 'user')
   expect(rows.length).toBe(1)
   expect(rows[0].message.content[0].text).toContain('Status?')
-  expect(daemon.posted.some(p => p.path.endsWith('/ack') && p.body.ids.includes('m9'))).toBe(true)
-  // The daemon hands it out again (its ack crossed in flight): it isn't shown a second time.
+  const acks = () => daemon.posted.filter(p => (p.path.endsWith('/ack') && p.body.ids.includes('m9')) || (p.path.endsWith('/heartbeat') && p.body.ack?.includes('m9')))
+  expect(acks().length).toBe(0)
+  // The daemon hands it out again: it isn't shown a second time.
   inbox.push(msg)
   await clock.advance(600000)
   for (let i = 0; i < 10; i++) await settle()
   expect(session.appended().filter((r: any) => r.message.type === 'user').length).toBe(1)
+  const beat = () => daemon.posted.filter(p => p.path.endsWith('/heartbeat') && 'busy' in p.body).at(-1)!.body
+  expect(beat().stuck > 0).toBe(true)
+  expect(beat().holding).toContain('m9')
+  // Someone types a prompt: the turn reads the transcript, so m9 reached the agent, and it isn't stuck any more.
+  submits.drop = ''
+  await $.turn.start({ text: 'hello', turnId: 't1' } as any)
+  await clock.advance(600000)
+  for (let i = 0; i < 10; i++) await settle()
+  expect(acks().length > 0).toBe(true)
+  expect(beat().stuck).toBe(0)
+})
+
+test('a reload Claude Code refuses is tried again after 30s, 5m, then every 30m, and the agent shows stuck', async ($, on) => {
+  const { clock } = engine(on, { installed: '99.0.0' })
+  const daemon = fakeDaemon(on, 1, null, [], { poll_interval_ms: 60_000 })
+  let tries = 0
+  on('command.run', { command: 'reload-plugins' }, () => {
+    tries++
+    throw new Error('refused')
+  })
+  await $.session.start(START)
+  const at = async (ms: number) => {
+    await clock.advance(ms)
+    for (let i = 0; i < 10; i++) await settle()
+    return tries
+  }
+  expect(await at(60_000)).toBe(1)
+  expect(await at(60_000)).toBe(2)
+  expect(await at(60_000)).toBe(2)  // the next one waits 5 minutes
+  expect(await at(240_000)).toBe(3)
+  expect(await at(600_000)).toBe(3)  // and from there, 30
+  expect(await at(1_200_000)).toBe(4)
+  expect(daemon.posted.filter(p => p.path.endsWith('/heartbeat') && 'busy' in p.body).at(-1)!.body.stuck > 0).toBe(true)
 })
 
 test('a message that wakes the agent is acked, and every heartbeat carries acks', async ($, on) => {
@@ -1161,7 +1196,7 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.9.79 · daemon 0.9.79 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.9.80 · daemon 0.9.80 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the space is listed once', async ($, on) => {
@@ -1202,7 +1237,7 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.9.79')
+  expect(reg.plugin).toBe('0.9.80')
 })
 
 test('an agent registers again under the folder it started in, wherever the host has moved its root since', async ($, on) => {
@@ -1342,7 +1377,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.9.80', true], ['0.9.79', false]] as const)
+for (const [installed, reloads] of [['0.9.81', true], ['0.9.80', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     const daemon = fakeDaemon(on)
