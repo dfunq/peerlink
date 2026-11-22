@@ -5662,7 +5662,7 @@ def herdr_sync_once(apply):
         for addr, space in joined:
             at[addr]["space"] = space
     actions, smap, notes = herdr_sync.plan(placed, terms, layout, config.get("herdr_spaces") or {},
-                                           lambda prefix: prefix + secrets.token_hex(16))
+                                           lambda prefix: prefix + secrets.token_hex(16), herdr_label_keep(placed, terms))
     if apply:
         with lock:
             parents = {x: space_parent(x) for x in smap}
@@ -5825,6 +5825,31 @@ def herdr_point_layouts(app_home, base, mod):
 
 
 herdr_nest_warned = {}
+herdr_steady = {"since": time.time(), "last": 0.0}  # since when sync passes have run without a gap (sleep, outage)
+
+
+def herdr_label_keep(placed, terms, now=None):
+    """Terminals labelled for an agent that isn't shown there now, whose labels stay for now: right after the daemon
+    starts or the machine wakes, every agent's heartbeat is late, and it isn't gone. A terminal gives its labels up
+    only after the passes have run steadily for twice peer_ttl, and when its agent runs elsewhere or hasn't been seen
+    for that long (a label naming no agent peerlink knows, such as an old name, goes then too)."""
+    now = now or time.time()
+    ttl = 2 * config["peer_ttl_s"]
+    if herdr_steady["last"] and now - herdr_steady["last"] > config["peer_ttl_s"]:
+        herdr_steady["since"] = now
+    herdr_steady["last"] = now
+    steady = now - herdr_steady["since"] >= ttl
+    shown = {a["agent"] for a in placed}
+    keep = set()
+    with lock:
+        for addr, t in terms.items():
+            label = t.get("agent") or ""
+            if not (label or t.get("pspace")) or any(a["address"] == addr for a in placed):
+                continue
+            a = agents.get(label)
+            if not steady or (a and label not in shown and now - (a.get("seen") or 0) < ttl):
+                keep.add(addr)
+    return keep
 HERDR_SYNC_EVERY_S = 30
 
 

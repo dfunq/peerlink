@@ -27,7 +27,7 @@ def key_pid(terminal_key):
     return int(m.group(1)) if m else 0
 
 
-def plan(agents, terms, layout, smap, new_id):
+def plan(agents, terms, layout, smap, new_id, keep=()):
     """What to change so the herdr app shows the peerlink grouping.
 
     agents: [{"agent", "name", "space", "lead", "address"}], live peerlink agents running in hc terminals.
@@ -38,6 +38,7 @@ def plan(agents, terms, layout, smap, new_id):
             when the app isn't running (then nothing is renamed or reordered).
     smap:   {peerlink space: herdr space id} remembered from earlier passes.
     new_id: a function (prefix) -> a fresh id, like 'sp' + 32 hex.
+    keep:   addresses whose peerlink labels stay though no agent shows there now (it may only be slow to come back).
 
     Returns (actions, smap, notes). Actions, in order:
       ("label", address, {key: value})      set hc labels (a herdr.space/herdr.tab change moves the terminal)
@@ -136,7 +137,7 @@ def plan(agents, terms, layout, smap, new_id):
     # taken to be named after it). Only once: with the labels gone it's an ordinary terminal.
     stale = set()
     for addr, t in sorted(terms.items()):
-        if addr not in agent_at and (t.get("agent") or t.get("pspace")):
+        if addr not in agent_at and addr not in keep and (t.get("agent") or t.get("pspace")):
             actions.append(("label", addr, {k: "" for k, v in (("peerlink.agent", t.get("agent")), ("peerlink.space", t.get("pspace"))) if v}))
             stale.add(addr)
 
