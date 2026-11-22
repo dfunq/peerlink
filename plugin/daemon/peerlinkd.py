@@ -5539,11 +5539,14 @@ def herdr_sync_once(apply):
     joined, seen = herdr_sync.joins(placed, terms, layout, config.get("herdr_spaces") or {}, time.time())
     at = {p["address"]: p for p in placed}
     join_lines = [f"{at[addr]['name']} ({addr}) joins the {space} space: you opened it in that herdr space" for addr, space in joined]
+    join_failed = []
     if apply:
         for addr, space in joined:
             code, out = set_agent_space(at[addr]["sid"], space, "Your user opened you in the herdr space that mirrors a peerlink space, so you moved")
             if code == 200:
                 at[addr]["space"] = out["space"]
+            else:  # it's still marked seen: say so, since the plan below moves its tab back to its own space
+                join_failed.append(f"{at[addr]['name']} ({addr}) couldn't join the {space} space: {out.get('error', code)}")
         if seen:
             with lock:
                 for aid in seen:
@@ -5562,7 +5565,7 @@ def herdr_sync_once(apply):
     if not apply:
         return {"actions": lines, "notes": notes}
     app = herdr_app()
-    failed = []
+    failed = list(join_failed)
     shown = {x for s in layout or [] for tb in s["tabs"] for x in tb["terminals"]}
 
     def do(argv):

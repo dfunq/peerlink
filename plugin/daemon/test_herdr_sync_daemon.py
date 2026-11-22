@@ -146,12 +146,19 @@ class Pass(unittest.TestCase):
         r = self.run_pass(apply=False)
         self.assertTrue(any("peerlink (t8) joins the ops space" in x for x in r["actions"]))
         self.assertNotIn("a-peerlink", d.config.get("agent_spaces") or {})
+        self.assertNotIn("herdr_seen", d.agents["a-peerlink"])  # a preview judges nobody
         self.run_pass()
         self.assertEqual(d.config["agent_spaces"]["a-peerlink"], "ops")
         self.assertTrue(d.agents["a-peerlink"]["herdr_seen"])
         self.assertEqual(self.labels["t8"]["herdr.space"], "spmac")  # it stays where you opened it
         self.assertEqual(self.labels["t8"]["peerlink.space"], "ops")
         self.assertFalse([a for a in self.ran if a[:3] == ["do", "terminal.park", "--terminal"]])
+
+    def test_a_join_that_fails_is_said(self):
+        self.opened_in_ops()
+        with unittest.mock.patch.object(d, "set_agent_space", lambda *a: (404, {"error": "that agent isn't running"})):
+            r = self.run_pass()
+        self.assertTrue(any("couldn't join the ops space" in f for f in r["failed"]))
 
     def test_only_the_first_sighting_counts(self):
         self.opened_in_ops()
