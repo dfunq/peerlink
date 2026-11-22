@@ -179,6 +179,27 @@ class Pass(unittest.TestCase):
         self.assertTrue(d.join_never("ops, tools") >= d.join_never(d.config["herdr_join_never"]))
         self.assertFalse(d.join_never("tools") >= d.join_never(d.config["herdr_join_never"]))
 
+    def test_a_new_agent_takes_its_tabs_name_and_the_tab_keeps_it(self):
+        d.agents["a-peerlink"] = {"id": "a-peerlink", "created": time.time() - 60}
+        d.config["herdr_spaces"] = {"tools": "spmac", "ops": "spops"}  # t8 is already where it belongs
+        real = self.fake_run
+
+        def named(argv, **kw):
+            r = real(argv, **kw)
+            if os.path.basename(argv[0]) == "herdr-app" and argv[1:] == ["ls"] and r.stdout:
+                out = json.loads(r.stdout)
+                for s in out["spaces"]:
+                    for tb in s["tabs"]:
+                        if tb["id"] == "tb8":
+                            tb["name"] = "reviewer"
+                r = subprocess.CompletedProcess(argv, 0, json.dumps(out), "")
+            return r
+        self.fake_run = named
+        r = self.run_pass()
+        self.assertEqual(d.sessions["s1"]["name"], "reviewer")
+        self.assertTrue(any("takes its tab's name, reviewer" in x for x in r["actions"]))
+        self.assertFalse([a for a in self.ran if a[:2] == ["do", "tab.rename"] and a[3] == "tb8"])
+
     def test_a_join_that_fails_is_said(self):
         self.opened_in_ops()
         with unittest.mock.patch.object(d, "set_agent_space", lambda *a: (404, {"error": "that agent isn't running"})):

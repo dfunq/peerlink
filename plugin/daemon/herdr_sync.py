@@ -193,6 +193,30 @@ def joins(agents, terms, layout, smap, now, fresh_s=JOIN_FRESH_S, closed=()):
     return out, seen
 
 
+def tab_names(agents, terms, layout, now, fresh_s=JOIN_FRESH_S):
+    """New agents that take the name you gave their tab, on their first sighting: [(address, name)].
+
+    herdr tabs have no name until someone gives one, and the plan later names a tab after its agent. So a new agent
+    shown alone in a tab with a name of its own (not its number, not the agent's name already) was opened there by
+    you, under that name. Same gate as joins: not seen before, made in the last fresh_s, not started by peerlink.
+    """
+    if layout is None:
+        return []
+    out = []
+    by_addr = {a["address"]: a for a in agents}
+    for s in layout:
+        for tb in s.get("tabs") or []:
+            addrs = tb.get("terminals") or []
+            name = (tb.get("name") or "").strip()
+            if len(addrs) != 1 or addrs[0] not in by_addr or not name or name.isdigit():
+                continue
+            a, t = by_addr[addrs[0]], terms.get(addrs[0]) or {}
+            if a.get("seen") or t.get("spawned") or now - (a.get("created") or 0) > fresh_s or name.lower() == a["name"].lower():
+                continue
+            out.append((a["address"], name))
+    return sorted(out)
+
+
 def describe(action, who=None, smap=None):
     """One line for people about an action. who: {address: agent name}; smap: {peerlink space: herdr space id}."""
     kind, who = action[0], who or {}

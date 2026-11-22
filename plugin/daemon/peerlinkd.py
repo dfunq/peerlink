@@ -5563,6 +5563,19 @@ def herdr_sync_once(apply):
         closed = closed_to_joins()
     joined, seen = herdr_sync.joins(placed, terms, layout, config.get("herdr_spaces") or {}, time.time(), closed=closed)
     at = {p["address"]: p for p in placed}
+    # A new agent opened in a tab you named takes that name, before the plan would name the tab after it.
+    named = herdr_sync.tab_names(placed, terms, layout, time.time())
+    name_lines = [f"{at[addr]['name']} ({addr}) takes its tab's name, {name}" for addr, name in named]
+    for addr, name in named if apply else []:
+        code, out = rename_self(at[addr]["sid"], name)
+        if code == 200:
+            at[addr]["name"] = out["name"]
+            with lock:
+                rec = sessions.get(at[addr]["sid"])
+                if rec:
+                    task_message(None, rec.get("cwd", ""), f"Your user opened you in a herdr tab named {out['name']}, so that's your name now.", prefer=rec)
+        else:
+            name_lines.append(f"{at[addr]['name']} ({addr}) couldn't take its tab's name {name}: {out.get('error', code)}")
     join_lines = [f"{at[addr]['name']} ({addr}) joins the {space} space: you opened it in that herdr space" for addr, space in joined]
     join_failed = []
     if apply:
@@ -5591,7 +5604,7 @@ def herdr_sync_once(apply):
     actions, smap, notes = herdr_sync.plan(placed, terms, layout, config.get("herdr_spaces") or {},
                                            lambda prefix: prefix + secrets.token_hex(16))
     who = {a["address"]: a["name"] for a in placed}
-    lines = join_lines + [herdr_sync.describe(a, who, smap) for a in actions]
+    lines = name_lines + join_lines + [herdr_sync.describe(a, who, smap) for a in actions]
     if layout is None:
         notes.append("the herdr app isn't open: spaces and tabs keep herdr's names until it is")
     if not apply:
@@ -5630,8 +5643,8 @@ def herdr_sync_once(apply):
         if smap != (config.get("herdr_spaces") or {}):
             config["herdr_spaces"] = smap
             save_config()
-    if actions or joined:
-        log(f"herdr sync: {len(joined) + len(actions) - len(failed)} change(s)" + (f", {len(failed)} failed: {failed[0]}" if failed else ""))
+    if actions or joined or named:
+        log(f"herdr sync: {len(named) + len(joined) + len(actions) - len(failed)} change(s)" + (f", {len(failed)} failed: {failed[0]}" if failed else ""))
     return {"actions": lines, "notes": notes, "failed": failed}
 
 
