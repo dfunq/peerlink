@@ -117,6 +117,12 @@ class Pass(unittest.TestCase):
         d.delete_space("gone")
         self.assertEqual(d.config["herdr_spaces"], {"ops": "sp2"})
 
+    def test_a_session_without_its_terminal_uses_its_agents(self):
+        d.sessions["s1"].pop("terminal")  # back after a daemon restart, before its plugin registers again
+        d.agents["a-peerlink"] = {"id": "a-peerlink", "terminal": "hc:t8@100"}
+        self.run_pass()
+        self.assertEqual(self.labels["t8"]["peerlink.space"], "tools")
+
     def test_off_when_herdr_is_off(self):
         with unittest.mock.patch.dict(d.config, {"use_herdr": False}):
             self.assertIn("error", d.herdr_sync_pass())
