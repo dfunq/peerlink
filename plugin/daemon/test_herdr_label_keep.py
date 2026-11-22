@@ -16,7 +16,7 @@ import peerlinkd as d  # noqa: E402
 class LabelKeep(unittest.TestCase):
     def setUp(self):
         d.load_config()
-        d.config["peer_ttl_s"] = 60
+        d.config["peer_ttl_s"] = 30  # as live
         self.agents = {"a-vault": {"id": "a-vault", "seen": 0}, "a-gone": {"id": "a-gone", "seen": 0}}
         for name, value in (("agents", self.agents), ("herdr_steady", {"since": 1000.0, "last": 0.0})):
             p = unittest.mock.patch.object(d, name, value)
@@ -42,6 +42,19 @@ class LabelKeep(unittest.TestCase):
         self.assertEqual(d.herdr_label_keep(self.placed, self.terms, now=1130), set())
         # The machine slept an hour: everything waits again.
         self.assertEqual(d.herdr_label_keep(self.placed, self.terms, now=4731), {"t3", "t9", "t4"})
+
+    def test_passes_a_sync_interval_apart_reach_steady(self):
+        # The syncer sleeps HERDR_SYNC_EVERY_S and then takes a few seconds: every gap is a little over 30 s.
+        now = 1000.0
+        for gap in (31, 37, 40, 33, 39):
+            now += gap
+            kept = d.herdr_label_keep(self.placed, self.terms, now=now)
+        self.assertGreaterEqual(now - 1000, 2 * d.config["peer_ttl_s"])
+        self.assertEqual(kept, set())
+
+    def test_a_preview_doesnt_move_the_clock(self):
+        d.herdr_label_keep(self.placed, self.terms, apply=False, now=1500)
+        self.assertEqual(d.herdr_steady, {"since": 1000.0, "last": 0.0})
 
     def test_plan_leaves_kept_terminals_alone(self):
         terms = {"t3": {"space": "sp1", "tab": "tb3", "agent": "a-vault", "pspace": "s"}}

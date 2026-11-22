@@ -5662,7 +5662,7 @@ def herdr_sync_once(apply):
         for addr, space in joined:
             at[addr]["space"] = space
     actions, smap, notes = herdr_sync.plan(placed, terms, layout, config.get("herdr_spaces") or {},
-                                           lambda prefix: prefix + secrets.token_hex(16), herdr_label_keep(placed, terms))
+                                           lambda prefix: prefix + secrets.token_hex(16), herdr_label_keep(placed, terms, apply))
     if apply:
         with lock:
             parents = {x: space_parent(x) for x in smap}
@@ -5828,16 +5828,19 @@ herdr_nest_warned = {}
 herdr_steady = {"since": time.time(), "last": 0.0}  # since when sync passes have run without a gap (sleep, outage)
 
 
-def herdr_label_keep(placed, terms, now=None):
+def herdr_label_keep(placed, terms, apply=True, now=None):
     """Terminals labelled for an agent that isn't shown there now, whose labels stay for now: right after the daemon
     starts or the machine wakes, every agent's heartbeat is late, and it isn't gone. A terminal gives its labels up
     only after the passes have run steadily for twice peer_ttl, and when its agent runs elsewhere or hasn't been seen
-    for that long (a label naming no agent peerlink knows, such as an old name, goes then too)."""
+    for that long (a label naming no agent peerlink knows, such as an old name, goes then too). Only passes that apply
+    count toward steady: a preview from the web UI says nothing about the gaps."""
     now = now or time.time()
     ttl = 2 * config["peer_ttl_s"]
-    if herdr_steady["last"] and now - herdr_steady["last"] > config["peer_ttl_s"]:
-        herdr_steady["since"] = now
-    herdr_steady["last"] = now
+    if apply:
+        # Passes come every HERDR_SYNC_EVERY_S plus however long one takes: a gap is longer than that and a heartbeat.
+        if herdr_steady["last"] and now - herdr_steady["last"] > HERDR_SYNC_EVERY_S + config["peer_ttl_s"]:
+            herdr_steady["since"] = now
+        herdr_steady["last"] = now
     steady = now - herdr_steady["since"] >= ttl
     shown = {a["agent"] for a in placed}
     keep = set()
