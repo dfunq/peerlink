@@ -64,7 +64,7 @@ An agent's space belongs to its folder, so every agent opened there is in it, ac
 
 **Links leads broker.** A [space lead](#space-leads) can link one of its agents (in its space or a space inside it) with an agent in another space, using the `link` tool. The other agent's lead agrees by calling `link` from its side, and only then are the two linked. A lead over both links them at once. Both agents are told who the other is and why, and a short line is posted to your channel. A link made for a task ends when that task closes, and either lead can remove one with `remove: true`. A link you set in the web UI stays yours: leads can't remove it, and you can remove any link there. An ask nobody agrees to lapses after a day, or when the daemon restarts.
 
-**Deleting a space.** Press **Delete space** in its box on the Spaces page. Every setting that names it goes: its folders and agents fall back to their `.peerlink` space, else unassigned, its lead is cleared, and spaces inside it move to the top. A running agent whose `.peerlink` still names the space stays in it, and you're told which folders those are.
+**Deleting a space.** Press **Delete space** in its box on the Spaces page. A space that no agent runs in, but that a setting still names (a lead, a folder, an Inside), is listed under **Spaces with no agent running** with its own **Delete space**. Every setting that names it goes: its folders and agents fall back to their `.peerlink` space, else unassigned, its lead is cleared, and spaces inside it move to the top. A running agent whose `.peerlink` still names the space stays in it, and you're told which folders those are.
 
 Space names are lowercased. Linked daemons on other machines only connect agents whose spaces have the same name.
 

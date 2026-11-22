@@ -732,7 +732,15 @@ async function refresh(force,snap){
   document.body.classList.toggle('drawer',!!picked);
   // The default space is always listed: it's where every agent with no space set lands.
   const dflt=groups.default?'':`<div class="chart"><div class="orow" style="justify-content:flex-start"><div class="ocol"><div class="sbox" style="min-height:0"><div class="name">unassigned</div><div class="small mut">agents whose folder has no space · none live</div></div></div></div></div>`;
-  $('#spacelist').innerHTML=`<div class="sgrid">${all((n,seen)=>{const u=sunit(n,seen);return u?`<div class="chart">${u}</div>`:''})}</div>`+dflt;
+  // A space the config still names but no agent runs in (a lead record, a folder or parent setting) gets a small box
+  // too, so it can be deleted here rather than linger with nothing to click.
+  const known=[...Object.keys(leadOf),...Object.values(cfg.folder_spaces||{}),...Object.keys(cfg.space_parents||{}),
+    ...Object.values(cfg.space_parents||{}),...Object.values(cfg.agent_spaces||{})];
+  const empties=[...new Set(known)].filter(n=>n&&n!=='default'&&!groups[n]).sort();
+  const emptyBox=n=>`<div class="chart"><div class="orow" style="justify-content:flex-start"><div class="ocol"><div class="sbox" style="min-height:0"><div class="name">${esc(n)}</div>
+    <div class="small mut">no agents running${leadOf[n]?` · lead ${esc(leadOf[n].name)}, offline`:''}</div><button class="ghost small" data-delspace="${esc(n)}">Delete space</button></div></div></div></div>`;
+  $('#spacelist').innerHTML=`<div class="sgrid">${all((n,seen)=>{const u=sunit(n,seen);return u?`<div class="chart">${u}</div>`:''})}</div>`+dflt
+    +(empties.length?`<div class="k small" style="margin-top:14px">Spaces with no agent running</div><div class="sgrid">${empties.map(emptyBox).join('')}</div>`:'');
   livePeers=p.peers;lastMsgs=m.messages;renderMessages(lastMsgs);renderTasks();renderFeedback();renderInbox();renderSchedules();
 }
 // Schedules: what's active or waiting first; the ones that ended fold away. Each says who'd get it now.
@@ -1037,7 +1045,10 @@ document.addEventListener('click',async e=>{const t=e.target.closest('button');i
   if(t.dataset.delagent){if(!await ask(`Delete ${t.dataset.name}? Its settings and the spaces you set for it go; messages queued for it wait for its folder's next agent.`))return;
     const r=await post(`/api/agents/${encodeURIComponent(t.dataset.delagent)}/delete`);if(r.error)tell(r.error);refresh(true);return}
   if(t.dataset.delspace){const n=t.dataset.delspace;if(!await ask(`Delete the ${n} space? Its agents go back to their .peerlink space or unassigned, and spaces inside it move to the top.`))return;
-    const r=await post(`/api/spaces/${encodeURIComponent(n)}/delete`);if(r.error)tell(r.error);
+    const r=await post(`/api/spaces/${encodeURIComponent(n)}/delete`);
+    // This page's copy of the settings forgets the space too, as the daemon's did, so its box goes at once.
+    if(!r.error)for(const k of ['folder_spaces','space_parents','agent_spaces']){const m=cfg[k]||{};delete m[n];for(const x in m)if(m[x]===n)delete m[x]}
+    if(r.error)tell(r.error);
     else if(r.still_in_files.length){const f=r.still_in_files;tell(`Deleted. The .peerlink in ${f.join(', ')} still name${f.length===1?'s':''} ${n}, so the agents there stay in it until you change ${f.length===1?'that file':'those files'}.`)};refresh(true);return}
   if(t.dataset.sel!==undefined){sel=sel===t.dataset.sel?'':t.dataset.sel;editing=false;refresh(true);return}
   if(t.dataset.close!==undefined){sel='';editing=false;refresh(true);return}
