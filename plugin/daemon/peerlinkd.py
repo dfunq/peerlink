@@ -34,7 +34,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.79"
+VERSION = "0.9.80"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -1401,6 +1401,8 @@ def public_peer(rec):
         "context": rec.get("context"),  # percent of the context window in use, when the agent reports it
         "stale": rec.get("plugin", "") != VERSION,
         "reload_queued": rec.get("reload_queued"),
+        # Since when Claude Code has refused to start its turns (a wake, its own reload): it needs a prompt typed in.
+        "stuck": rec.get("stuck"),
         "muted": session_cfg(rec["id"])["muted"],
         "auto_approve": rec.get("cwd", "") in (config.get("auto_approve_folders") or []),
         "terminating": bool(rec.get("terminate")),
@@ -1694,7 +1696,7 @@ def load_messages():
     for m in messages:
         # Handed to an agent that acks, and never acked: the daemon stopped before the agent said it had it. It's
         # queued again; the plugin skips one it already has, so a message is never lost and never shown twice.
-        if m.get("status") == "delivered" and m.get("tracked") and not m.get("acked") and m.get("v") == 2 \
+        if m.get("status") in ("delivered", "waiting") and m.get("tracked") and not m.get("acked") and m.get("v") == 2 \
                 and time.time() - m["ts"] < 3600:
             inboxes.setdefault(m["to"], []).append(m)
             continue
@@ -6155,6 +6157,43 @@ def retire(sid, body):
     return 200, {"retired": who, "told": hirer.get("name") if target is by else "", "note": line}
 
 
+STUCK_TEXT = "can't start turns: needs a prompt typed in its terminal"
+
+
+def note_stuck(rec, since):
+    """The plugin says Claude Code has refused to start its turns since `since` (ms; 0 once one starts). Messages it
+    holds unread show as waiting, not delivered; its space's lead (else the one above) is told once, and so is each
+    agent waiting on a reply from it. Called with the lock held."""
+    sid, name = rec["id"], display_name(rec)
+    if not isinstance(since, (int, float)) or isinstance(since, bool) or since <= 0:
+        if rec.pop("stuck", None):
+            log("agent", name, "starts turns again")
+        rec.pop("stuck_told", None)
+        return
+    first = not rec.get("stuck")
+    rec["stuck"] = since / 1000
+    told = rec.setdefault("stuck_told", [])
+    held = [m for m, _ in handed.get(sid, {}).values() if not m.get("acked")]
+    for m in held:
+        if m.get("status") == "delivered":
+            m["status"] = "waiting"
+            append_log({"id": m["id"], "status": "waiting"})
+    if first:
+        log("agent", name, STUCK_TEXT)
+        space = space_of(rec)[0]
+        lead = lead_rec(space)
+        if lead and lead["id"] == sid:
+            lead = lead_rec(space_parent(space)) if space_parent(space) else None
+        if lead and lead["id"] != sid and is_live(lead):
+            task_message(None, lead.get("cwd", ""), f"{name} {STUCK_TEXT}. What's sent to it waits unread in its transcript until someone types a prompt there (or runs /reload-plugins).", prefer=lead)
+    for m in held:
+        sender = sessions.get(m.get("from") or "")
+        if not m.get("expects_reply") or m["id"] in told or not sender or sender["id"] == sid or not is_live(sender):
+            continue
+        told.append(m["id"])
+        task_message(None, sender.get("cwd", ""), f"{name} {STUCK_TEXT}: your {m['id']} waits unread until then, so don't count on its reply yet.", prefer=sender)
+
+
 def ack(sid, ids, holding=None):
     """The plugin says these messages reached its session: stop handing them out. Ones it says it's `holding` (an
     announcement for its next turn, a message that needs no turn of its own) it still has: they aren't handed out
@@ -6165,7 +6204,16 @@ def ack(sid, ids, holding=None):
             got = mine.pop(str(mid), None)
             if got:
                 got[0]["acked"] = True
-                append_log({"id": str(mid), "acked": True})
+                entry = {"id": str(mid), "acked": True}
+                if got[0].get("status") == "waiting":  # it waited out a spell of no turns, and a turn has it now
+                    got[0]["status"] = entry["status"] = "delivered"
+                append_log(entry)
+            else:
+                # Handed so long ago (or before a restart) that it's no longer tracked: still, it waits no more.
+                late = next((m for m in reversed(messages) if m.get("id") == str(mid) and m.get("status") == "waiting"), None)
+                if late:
+                    late["status"] = "delivered"
+                    append_log({"id": str(mid), "acked": True, "status": "delivered"})
         now = time.time()
         for mid in holding if isinstance(holding, list) else []:
             if str(mid) in mine:
@@ -7061,6 +7109,8 @@ class Handler(BaseHTTPRequestHandler):
                 # When it queued /reload-plugins for a newer peerlink that hasn't run yet; 0 once none is waiting.
                 if isinstance(b.get("reload_queued"), (int, float)):
                     rec["reload_queued"] = b["reload_queued"] / 1000 if b["reload_queued"] else None
+                if "stuck" in b:
+                    note_stuck(rec, b["stuck"])
                 note_lone_leads()
                 if b.get("summary") is not None:
                     if b["summary"][:500] != rec.get("summary"):

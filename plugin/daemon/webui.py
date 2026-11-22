@@ -491,7 +491,7 @@ function agentPanel(x,others=[]){const sc=cfg.sessions?.[x.id]||{};const setSpac
   return `<div class="card panel${x.leads?' is-lead':''}">
    <div class="top"><span class="phead"><span class="plogo" style="background:${x.leads?'var(--acc)':'var(--mut)'}"><b style="color:#fff">${initial(x.name)}</b></span>
      <span class="ptitle"><span><span class="name">${esc(x.name)}</span>${x.remote?` <span class="mut small">@${esc(x.host)}</span>`:''}</span>
-     <span class="psub"><span class="dot ${x.busy?'busy':''}"></span>${x.busy?'working':'idle'}${x.busy_since?' '+ago(x.busy_since):''} · <span class="pill">${esc(x.space||'default')}</span>${x.leads?' <span class="pill acc">lead</span>':''}</span></span></span><button class="ghost x" data-close title="Close">✕</button></div>
+     <span class="psub"><span class="dot ${x.busy?'busy':''}"></span>${x.stuck?`<span style="color:var(--warn)">can't start turns ${ago(x.stuck)}: type a prompt in its terminal</span>`:(x.busy?'working':'idle')+(x.busy_since?' '+ago(x.busy_since):'')} · <span class="pill">${esc(x.space||'default')}</span>${x.leads?' <span class="pill acc">lead</span>':''}</span></span></span><button class="ghost x" data-close title="Close">✕</button></div>
    <div class="pwhere"><span class="mono">${esc(tilde(x.cwd))}${x.branch?' · ⎇ '+esc(x.branch):''}</span><button class="ghost small copy" data-copy="${esc(x.cwd)}" title="Copy the folder path">Copy</button></div>
    ${x.role?`<div class="role"><span class="k">Role</span> ${esc(x.role)}</div>`:''}
    <div class="pnow"><div class="k small">Now${x.summary_ts&&x.summary?` · set ${ago(x.summary_ts)} ago${oldSummary(x)?', may be out of date':''}`:''}</div>${oldSummary(x)?`<span class="mut">${esc(x.summary)}</span>`:esc(x.summary)||'<span class="mut">no summary yet</span>'}</div>
@@ -630,7 +630,7 @@ async function refresh(force,snap){
   const members=n=>[...(groups[n]||[]).filter(x=>!isLead(x,n)&&!(x.leads&&!x.parent)).sort(rank).sort((a,b)=>a.name.localeCompare(b.name)),
     ...(kids[n]||[]).filter(c=>c!==n).sort().map(c=>inside[c].peer)];
   const short=d=>{const t=tilde(d).split('/');return t.length>3?'…/'+t.slice(-2).join('/'):t.join('/')};
-  const state=x=>(x.busy?'working':'idle')+(x.busy_since?' '+ago(x.busy_since):'');
+  const state=x=>x.stuck?`can't start turns ${ago(x.stuck)}`:(x.busy?'working':'idle')+(x.busy_since?' '+ago(x.busy_since):'');
   // Messages sent in the last hour, flagged from 20: each one can cost its recipient a turn.
   const rate=x=>x.sent_hour?`<span class="${x.sent_hour>=20?'hot':'mut'}" title="messages sent in the last hour">${x.sent_hour}/h</span>`:'';
   // Context as a small meter: how full the agent's window is, its number on hover.
@@ -685,7 +685,7 @@ async function refresh(force,snap){
     return `<${x.offline?'div':'button'} class="lrow${x.leads?' is-lead':''}${x.offline?' off':''}${x.id&&x.id===sel?' sel':''}"${x.offline?'':` data-sel="${esc(x.id)}"`}>
       <span class="lid"><span class="ln"><span title="${esc(x.name)}">${x.offline?'':`<span class="dot ${x.busy?'busy':''}"></span>`}${esc(x.name)}</span>${leadBadge(x)}</span><span class="lwhere mono" title="${esc(tilde(x.cwd))}">${where}</span></span>
       <span class="lw${oldSummary(x)?' old':''}" title="${esc((x.summary||x.role||'')+(oldSummary(x)?` (set ${ago(x.summary_ts)} ago)`:''))}">${esc(headline(x)||x.role||(x.offline?'offline':''))}</span>
-      <span class="lr">${offBtn(x)}${alsoBadges(x)}${x.busy&&!x.offline?`<span class="lbusy">${state(x)}</span>`:''}${x.sent_hour>=20?rate(x):''}${x.open_tasks?`<span class="pill acc">${x.open_tasks} task${x.open_tasks>1?'s':''}</span>`:''}${ctx(x)}</span></${x.offline?'div':'button'}>`};
+      <span class="lr">${offBtn(x)}${alsoBadges(x)}${x.stuck&&!x.offline?`<span class="lbusy" style="color:var(--warn)" title="Claude Code refuses to start its turns: type a prompt in its terminal">${state(x)}</span>`:x.busy&&!x.offline?`<span class="lbusy">${state(x)}</span>`:''}${x.sent_hour>=20?rate(x):''}${x.open_tasks?`<span class="pill acc">${x.open_tasks} task${x.open_tasks>1?'s':''}</span>`:''}${ctx(x)}</span></${x.offline?'div':'button'}>`};
   const lspace=(n,seen)=>{if(seen.has(n))return '';seen.add(n);
     const nested=inside[n]&&inside[n].parent!==n;
     const head=nested?(leads[n]||[]):tops(n);
