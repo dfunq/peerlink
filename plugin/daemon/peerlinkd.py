@@ -34,7 +34,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.72"
+VERSION = "0.9.73"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -5030,7 +5030,7 @@ def git(repo, *args, timeout=60):
 # can keep showing the older schemas until it restarts, so it is told what it may pass anyway: the plugin forwards
 # whatever the call carries.
 TOOL_CHANGES = [
-    ("0.9.72", "request_spawn takes model (like opus or sonnet) and effort (low, medium, high, xhigh or max) for the agent it starts."),
+    ("0.9.73", "request_spawn takes model (like opus or sonnet) and effort (low, medium, high, xhigh or max) for the agent it starts."),
     ("0.9.66", "request_spawn takes worker (true to hire a worker for one piece of work) and worktree ({repo, branch, "
                "base}: a new git worktree made when it starts; leave dir out, or give the repo, for <repo>-wt-<branch>)."),
 ]
