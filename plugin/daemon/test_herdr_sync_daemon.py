@@ -11,6 +11,7 @@ import unittest.mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ["PEERLINK_HOME"] = tempfile.mkdtemp(prefix="peerlink-herdr-sync-test-")
+os.environ["HERDR_APP_HOME"] = tempfile.mkdtemp(prefix="herdr-app-test-")  # never the real app's mods
 
 import peerlinkd as d  # noqa: E402
 
