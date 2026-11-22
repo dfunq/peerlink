@@ -34,7 +34,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.85"
+VERSION = "0.9.86"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -5440,6 +5440,16 @@ def hc_app_space(hc, cwd, pid=0):
     return found
 
 
+def lead_terminal(terminal_key):
+    """The hc address of the terminal a lead runs in, when its terminal key ('hc:t7@123') still names a live terminal
+    running that shell; '' otherwise (hc hands an ended terminal's address to the next one)."""
+    addr, pid = herdr_sync.hc_address(terminal_key), herdr_sync.key_pid(terminal_key)
+    if not addr or not pid:
+        return ""
+    info = hc_terminal(addr)
+    return addr if info.get("state") == "live" and int(info.get("pid") or 0) == pid else ""
+
+
 def name_herdr_tab(tab, name):
     """Name a hire's tab in the herdr app, once the app has taken the terminal in. Best effort: without the app
     running the tab just keeps its number."""
@@ -5641,17 +5651,21 @@ def herdr_syncer():
 
 
 def launch_hc(hc, claude, sp):
-    """Start the agent in a herdr terminal: (how, "") or ("", why not). No parent, so it outlives the terminal the
-    daemon was started from; removed once it exits, so a retired agent's terminal doesn't linger."""
+    """Start the agent in a herdr terminal: (how, "") or ("", why not). It outlives the terminal the daemon was
+    started from, and is removed once it exits, so a retired agent's terminal doesn't linger. A worker's parent is its
+    lead's terminal, so herdr nests it under the lead; anything else has no parent."""
     if sp.get("hc") and hc_pid(sp["hc"]):
         return f"still starting in the herdr app (hc attach {sp['hc']})", ""
     name = re.sub(r"[^a-z0-9_-]", "-", (sp.get("name") or os.path.basename(sp["dir"])).lower())[:24].strip("-") + "-" + sp["id"]
-    argv = [hc, "run", "--bg", "--json", "--no-parent", "--outlive-parent", "--rm", "--cwd", sp["dir"], "--name", name[:32],
-            "--label", f"peerlink.spawn={sp['id']}", "--label", f"peerlink.space={sp.get('space') or ''}"]
-    # The herdr app shows a terminal only once it's in one of its spaces: a hire goes in its lead's, as a new tab.
     asker = sp.get("requester") or {}
     with lock:
-        pid = int((sessions.get(asker.get("id") or "") or {}).get("pid") or 0)
+        lead = sessions.get(asker.get("id") or "") or {}
+        pid = int(lead.get("pid") or 0)
+    parent = lead_terminal(lead.get("terminal") or "") if sp.get("worker") else ""
+    argv = [hc, "run", "--bg", "--json", *(["--parent", parent, "--no-notify"] if parent else ["--no-parent"]), "--outlive-parent",
+            "--rm", "--cwd", sp["dir"], "--name", name[:32],
+            "--label", f"peerlink.spawn={sp['id']}", "--label", f"peerlink.space={sp.get('space') or ''}"]
+    # The herdr app shows a terminal only once it's in one of its spaces: a hire goes in its lead's, as a new tab.
     space = hc_app_space(hc, asker.get("cwd") or "", pid) if asker.get("cwd") else ""
     tab = ""
     if space:
