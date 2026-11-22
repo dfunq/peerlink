@@ -257,6 +257,21 @@ class Pass(unittest.TestCase):
         self.assertEqual(d.sessions["s1"]["name"], "peerlink")  # the lead keeps its name
         self.assertIn(["do", "tab.rename", "--id", "tb8", "--name", "peerlink"], self.ran)  # and its tab gets it back
 
+    def test_the_agents_list_puts_an_agent_under_its_lead_and_a_worker_under_its_hirer(self):
+        d.config["herdr_spaces"] = {"tools": "spmac", "ops": "spops"}
+        d.config["folder_spaces"][self.ops] = "tools"  # services sits in tools now, under peerlink
+        d.config["space_leads"] = {"tools": {"cwd": self.tools, "how": "set"}}
+        self.session("s3", "helper", self.ops, "hc:t10@300")
+        self.labels["t10"], self.pids["t10"] = {"herdr.space": "spmac", "herdr.tab": "tb10"}, 300
+        d.spawns["sp1"] = {"id": "sp1", "worker": True, "status": "started", "agent_id": "s3", "requester": {"id": "s2"}}
+        self.addCleanup(d.spawns.pop, "sp1", None)
+        d.forget_spaces()
+        self.run_pass()
+        with open(os.path.join(d.HOME, "herdr-tree.json")) as f:
+            got = json.load(f)
+        self.assertEqual(got["agents"], {"t9": "t8", "t10": "t9"})  # lead > agent > sub-agent
+        self.assertEqual(got["names"]["t10"], "helper")
+
     def test_a_join_that_fails_is_said(self):
         self.opened_in_ops()
         with unittest.mock.patch.object(d, "set_agent_space", lambda *a: (404, {"error": "that agent isn't running"})):
