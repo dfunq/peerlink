@@ -34,7 +34,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.82"
+VERSION = "0.9.83"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -5465,13 +5465,16 @@ def herdr_app():
 def herdr_sync_inputs(hc):
     """What herdr_sync.plan needs: (agents, terms, layout). Reads hc and the herdr app outside the lock."""
     with lock:
-        live = sorted((r for r in sessions.values() if is_live(r) and herdr_sync.hc_address(r.get("terminal"))),
+        # A session back after a daemon restart has no terminal until its plugin registers again: its agent's
+        # record still says where it runs (the pid check below catches one that's out of date).
+        term_of = lambda r: r.get("terminal") or (agents.get(r.get("agent") or "") or {}).get("terminal") or ""
+        live = sorted((r for r in sessions.values() if is_live(r) and herdr_sync.hc_address(term_of(r))),
                       key=lambda r: r["last_seen"])
         found = {}
         for r in live:  # the newest session in a terminal is the one running there
-            found[herdr_sync.hc_address(r["terminal"])] = {"agent": r.get("agent") or r["id"], "name": display_name(r),
-                                                           "space": space_of(r)[0], "lead": bool(leads(r)),
-                                                           "pid": herdr_sync.key_pid(r["terminal"])}
+            found[herdr_sync.hc_address(term_of(r))] = {"agent": r.get("agent") or r["id"], "name": display_name(r),
+                                                        "space": space_of(r)[0], "lead": bool(leads(r)),
+                                                        "pid": herdr_sync.key_pid(term_of(r))}
     try:
         out = subprocess.run([hc, "ls", "--json"], timeout=10, capture_output=True, text=True)
         listed = json.loads(out.stdout).get("terminals") or [] if out.returncode == 0 else []
@@ -5491,7 +5494,7 @@ def herdr_sync_inputs(hc):
             found.pop(addr)
         terms[addr] = {"space": labels.get("herdr.space") or "", "tab": labels.get("herdr.tab") or "",
                        "agent": labels.get("peerlink.agent") or "", "pspace": labels.get("peerlink.space") or ""}
-    agents = [{"address": a, **{k: v[k] for k in ("agent", "name", "space", "lead")}} for a, v in found.items() if a in terms]
+    placed = [{"address": a, **{k: v[k] for k in ("agent", "name", "space", "lead")}} for a, v in found.items() if a in terms]
     layout = None
     app = herdr_app()
     if app:
@@ -5506,7 +5509,7 @@ def herdr_sync_inputs(hc):
                           for s in spaces if not s.get("machine")]
         except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
             layout = None
-    return agents, terms, layout
+    return placed, terms, layout
 
 
 herdr_sync_lock = threading.Lock()
