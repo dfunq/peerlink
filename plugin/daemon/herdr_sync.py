@@ -158,12 +158,13 @@ def plan(agents, terms, layout, smap, new_id):
 JOIN_FRESH_S = 600  # only an agent made this recently can join by where its tab is
 
 
-def joins(agents, terms, layout, smap, now, fresh_s=JOIN_FRESH_S):
+def joins(agents, terms, layout, smap, now, fresh_s=JOIN_FRESH_S, closed=()):
     """Agents to put in the peerlink space their herdr space mirrors, on their first sighting.
 
     agents: as for plan, plus "created" (when the agent was first made), "explicit" (its space was chosen for it: set
             on the agent, or the space a spawn started it for) and "seen" (an earlier pass already judged it).
     terms:  as for plan, plus "parent" (another terminal started it) and "spawned" (peerlink started it).
+    closed: peerlink spaces nobody joins this way (placing an agent there stays yours to do).
 
     Returns (joins, seen): joins is [(address, peerlink space)], seen the agent ids judged on this pass, whether they
     joined or not, so a later move in herdr never changes their space. Only where the app shows a terminal counts, not
@@ -184,7 +185,7 @@ def joins(agents, terms, layout, smap, now, fresh_s=JOIN_FRESH_S):
         if a.get("explicit") or t.get("parent") or t.get("spawned") or now - (a.get("created") or 0) > fresh_s:
             continue
         space = mirrors.get(shown_in[a["address"]])
-        if space and space != a["space"]:
+        if space and space != a["space"] and space not in closed:
             out.append((a["address"], space))
     return out, seen
 

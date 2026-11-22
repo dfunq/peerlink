@@ -154,6 +154,31 @@ class Pass(unittest.TestCase):
         self.assertEqual(self.labels["t8"]["peerlink.space"], "ops")
         self.assertFalse([a for a in self.ran if a[:3] == ["do", "terminal.park", "--terminal"]])
 
+    def test_the_lead_there_is_told(self):
+        self.opened_in_ops()
+        d.config["space_leads"] = {"ops": {"cwd": self.ops, "how": "set"}}
+        told = []
+        with unittest.mock.patch.object(d, "task_message", lambda t, cwd, text, **kw: told.append((cwd, text))):
+            self.run_pass()
+        self.assertTrue(any(cwd == self.ops and "peerlink" in text and "joined your ops space" in text for cwd, text in told))
+
+    def test_listed_and_parent_spaces_take_nobody(self):
+        for setup in (lambda: d.config.update({"herdr_join_never": "tools, ops"}),
+                      lambda: d.config.update({"space_parents": {"tools": "ops"}})):
+            with self.subTest(setup=setup):
+                self.setUp()
+                self.opened_in_ops()
+                setup()
+                self.run_pass()
+                self.assertNotEqual((d.config.get("agent_spaces") or {}).get("a-peerlink"), "ops")
+                self.assertTrue(d.agents["a-peerlink"].get("herdr_seen"))
+
+    def test_agents_may_only_close_spaces(self):
+        d.config["herdr_join_never"] = "ops"
+        self.assertEqual(d.join_never(" ops ,tools,"), {"ops", "tools"})
+        self.assertTrue(d.join_never("ops, tools") >= d.join_never(d.config["herdr_join_never"]))
+        self.assertFalse(d.join_never("tools") >= d.join_never(d.config["herdr_join_never"]))
+
     def test_a_join_that_fails_is_said(self):
         self.opened_in_ops()
         with unittest.mock.patch.object(d, "set_agent_space", lambda *a: (404, {"error": "that agent isn't running"})):

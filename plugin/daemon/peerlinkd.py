@@ -192,6 +192,7 @@ DEFAULT_CONFIG = {
     "night_guard": "",
     "herdr_sync": False,  # the herdr app's spaces mirror peerlink spaces, one tab per agent (peerlink -> herdr only)
     "herdr_spaces": {},  # peerlink space -> the herdr space id herdr sync shows it in
+    "herdr_join_never": "",  # spaces a tab you open in herdr never joins on its own, comma separated (a space others nest in never does either); agents can add to it, only the web UI removes
     "use_herdr": True,  # start agents in herdr's terminals when herdr (hc) is installed; off, or without herdr, tmux or Terminal as before  # hours no worker is started, like "22-8"; empty is off; set only from the web UI
     "task_nudge_h": 24,  # an open task with no update for this many hours is raised with its owner, then with whoever asked; 0 is off
     "ask_defaults": True,  # a question to you may name a default the agent goes with when you haven't answered in time
@@ -5519,6 +5520,18 @@ def herdr_sync_inputs(hc):
 herdr_sync_lock = threading.Lock()
 
 
+def join_never(value):
+    """The spaces named in a herdr_join_never setting."""
+    return {clean_space(x) for x in (value or "").split(",")} - {""}
+
+
+def closed_to_joins():
+    """Spaces a herdr tab never joins on its own: those you listed, and every space another nests in (the top of a
+    tree hears from all of it). Called with the lock held."""
+    nested = set(config.get("space_parents") or {}) | set(config.get("herdr_spaces") or {}) | {space_of(r)[0] for r in sessions.values() if is_live(r)}
+    return join_never(config.get("herdr_join_never")) | {p for p in (space_parent(x) for x in nested) if p}
+
+
 def herdr_sync_pass(apply=True):
     """One herdr sync pass: {"actions": [lines], "notes": [lines]} of what it changed (or, apply=False, would change).
     {"error": why} when it can't run. peerlink -> herdr only; see herdr_sync.py. One pass at a time, so two never
@@ -5536,7 +5549,9 @@ def herdr_sync_once(apply):
         return {"error": "hc couldn't say what's in every terminal; nothing changed"}
     placed, terms, layout = got
     # A Claude Code tab you opened in a herdr space that mirrors a peerlink space joins it, on its first sighting.
-    joined, seen = herdr_sync.joins(placed, terms, layout, config.get("herdr_spaces") or {}, time.time())
+    with lock:
+        closed = closed_to_joins()
+    joined, seen = herdr_sync.joins(placed, terms, layout, config.get("herdr_spaces") or {}, time.time(), closed=closed)
     at = {p["address"]: p for p in placed}
     join_lines = [f"{at[addr]['name']} ({addr}) joins the {space} space: you opened it in that herdr space" for addr, space in joined]
     join_failed = []
@@ -5545,6 +5560,13 @@ def herdr_sync_once(apply):
             code, out = set_agent_space(at[addr]["sid"], space, "Your user opened you in the herdr space that mirrors a peerlink space, so you moved")
             if code == 200:
                 at[addr]["space"] = out["space"]
+                with lock:  # tell the lead there, so a wrong join is seen at once
+                    rec = sessions.get(at[addr]["sid"]) or {}
+                    lead = lead_rec(space)
+                    said = f"{at[addr]['name']} (from {tilde_path(rec.get('cwd', ''))}) joined your {space} space: your user opened it in the herdr space that mirrors {space}, and herdr sync moved it in."
+                    if lead and lead.get("id") != rec.get("id"):
+                        task_message(None, lead.get("cwd", ""), said + " If it doesn't belong, move it on the Spaces page.", prefer=lead)
+                    log("herdr sync join:", said)
             else:  # it's still marked seen: say so, since the plan below moves its tab back to its own space
                 join_failed.append(f"{at[addr]['name']} ({addr}) couldn't join the {space} space: {out.get('error', code)}")
         if seen:
@@ -7130,6 +7152,10 @@ class Handler(BaseHTTPRequestHandler):
                 # Only you, in the browser: no agent lets itself start agents without asking.
                 if (not browser or self.key_ok()) and any(k in BROWSER_ONLY_SETTINGS and checked[k][0] != config.get(k) for k in checked):
                     return self.reply(403, {"error": "auto-approve, the worker cap and the night guard are set only from the web UI"})
+                # An agent may close more spaces to herdr joins, never open one.
+                if (not browser or self.key_ok()) and "herdr_join_never" in checked and isinstance(checked["herdr_join_never"][0], str) \
+                        and not join_never(checked["herdr_join_never"][0]) >= join_never(config.get("herdr_join_never")):
+                    return self.reply(403, {"error": "only the web UI takes a space off herdr_join_never"})
                 bad = [why for _, why in checked.values() if why]
                 if bad:
                     return self.reply(400, {"error": "; ".join(bad)})

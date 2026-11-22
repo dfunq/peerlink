@@ -42,6 +42,10 @@ class Joins(unittest.TestCase):
             with self.subTest(why):
                 self.assertEqual(hs.joins(agents, terms, layout, {"ops": "spops"}, now)[0], [])
 
+    def test_a_closed_space_takes_nobody(self):
+        got = hs.joins([self.new()], {}, self.layout, {"ops": "spops"}, 1100, closed={"ops"})
+        self.assertEqual(got, ([], ["a-peerlink"]))  # judged all the same: it never joins later either
+
     def test_labels_alone_dont_count(self):
         # Any process can label a terminal: without the app showing it, nobody is judged, so nobody is marked seen.
         self.assertEqual(hs.joins([self.new()], {"t8": term("spops", "tb1")}, None, {"ops": "spops"}, 1100), ([], []))
