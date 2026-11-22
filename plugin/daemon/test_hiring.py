@@ -335,6 +335,33 @@ class HerdrLaunchTest(unittest.TestCase):
                     self.assertIn("--no-parent", argv)
                     self.assertNotIn("--parent", argv)
 
+    def test_any_agent_but_the_lead_nests_under_its_spaces_lead(self):
+        d.sessions["s-lead9"] = {"id": "s-lead9", "name": "lead9", "cwd": "/x/lead9", "pid": 77, "terminal": "hc:t2@50", "last_seen": time.time()}
+        d.sessions["s-boss"] = {"id": "s-boss", "name": "boss", "cwd": "/x/boss", "pid": 78, "terminal": "hc:t5@55", "last_seen": time.time()}
+        for sid in ("s-lead9", "s-boss"):
+            self.addCleanup(d.sessions.pop, sid, None)
+        leads = {"pixelgrid": {"cwd": "/x/lead9", "how": "set"}}
+        pids = {"t2": 50, "t5": 55}
+        cases = (("a standing agent in the space", {"dir": "/x/api", "space": "pixelgrid", "requester": {"id": "s-boss"}}, "t2"),
+                 ("the lead restarting", {"dir": "/x/lead9", "space": "pixelgrid", "requester": {"id": "s-boss"}}, ""),
+                 ("a worker in a space with no lead running", {"dir": "/x/api", "space": "games", "worker": True, "requester": {"id": "s-boss"}}, "t5"),
+                 ("an agent in no space", {"dir": "/x/api", "space": "", "requester": {}}, ""))
+        for why, extra, parent in cases:
+            with self.subTest(why), unittest.mock.patch.dict(d.config, {"space_leads": leads}):
+                sp = {"id": "s9", "name": "pg-client", **extra}
+                calls = []
+
+                def run(argv, **kw):
+                    calls.append(argv)
+                    out = {"terminals": []} if argv[1] == "ls" else {"state": "live", "pid": pids.get(argv[2], 0)} if argv[1] == "get" else {"address": "t42"}
+                    return unittest.mock.Mock(returncode=0, stdout=json.dumps(out), stderr="")
+                with unittest.mock.patch.object(d, "find_claude", lambda: "/bin/claude"), unittest.mock.patch.object(d, "find_hc", lambda: "/bin/hc"), \
+                        unittest.mock.patch.object(d.subprocess, "run", run), unittest.mock.patch.object(d, "space_of", lambda r: ("skyforge", "", "")), \
+                        unittest.mock.patch.object(d, "lead_rec", lambda space: d.sessions["s-lead9"] if space == "pixelgrid" else None):
+                    self.assertEqual(d.launch(sp)[1], "")
+                argv = next(a for a in calls if a[1] == "run")
+                self.assertEqual(argv[argv.index("--parent") + 1] if "--parent" in argv else "", parent)
+
     def test_when_hc_fails_it_falls_back_to_tmux(self):
         sp = {"id": "s9", "dir": "/x/api", "name": "", "space": ""}
         seen = []
