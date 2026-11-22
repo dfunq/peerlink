@@ -1,4 +1,8 @@
-"""The herdr app's spaces sidebar, nested like peerlink's spaces.
+"""The herdr app's spaces sidebar and agents list, nested like peerlink's spaces and leads.
+
+The agents list (herdr's `agents` mod) nests a sub-agent under the terminal hc says started it, which is fixed when a
+terminal starts. Its copy, `peerlink-agents`, takes the parent from peerlink first: an agent under its space's lead, a
+worker under whoever hired it, so agents already running nest too. Both copies read the same tree file.
 
 herdr's own `spaces` mod nests a worktree's space under its repo's and keeps the order it shows by moving spaces.
 The daemon copies it, from the herdr app's own folder on this machine (none of herdr's code is in this repo), to
@@ -12,21 +16,24 @@ import json
 import re
 
 MOD = "peerlink-spaces"
-TREE_FILE = "herdr-tree.json"  # in peerlink's home: {"parents": {herdr space id: parent herdr space id}}
+AGENTS_MOD = "peerlink-agents"
+TREE_FILE = "herdr-tree.json"  # in peerlink's home: {"parents": {herdr space id: its parent's}, "agents": {terminal: parent terminal}}
 
 # The nesting, added to the cloned mod. `out` holds rows {w, i, g, tree} in order; a row with `tree` is a worktree
 # under the row before it, and moves with it.
-NEST_JS = r'''
-// peerlink: nest spaces as peerlink nests its spaces (the tree comes from the file the peerlink daemon writes).
-let peerlinkTree = { parents: {} }, peerlinkRead = 0;
+LOAD_JS = r'''
+// peerlink: nest as peerlink does (the tree comes from the file the peerlink daemon writes).
+let peerlinkTree = { parents: {}, agents: {} }, peerlinkRead = 0;
 function peerlinkLoad() {
   if (Date.now() - peerlinkRead < 3000) return;
   peerlinkRead = Date.now();
   readTextFile(PEERLINK_TREE).then((t) => {
-    try { const got = JSON.parse(t || "{}"); if (got && typeof got.parents === "object") peerlinkTree = got; } catch (e) {}
+    try { const got = JSON.parse(t || "{}"); if (got && typeof got === "object") peerlinkTree = got; } catch (e) {}
   }, () => {});
 }
-function peerlinkNest(out) {
+'''
+
+NEST_JS = LOAD_JS + r'''function peerlinkNest(out) {
   peerlinkLoad();
   const parents = peerlinkTree.parents || {};
   const groups = [];
@@ -65,34 +72,54 @@ PATCHES = [
 ]
 
 
-def patch(src, tree_path):
-    """herdr's spaces mod made into peerlink's, reading the tree at tree_path: (patched source, None), or (None, the
-    first piece it couldn't find)."""
-    for old, new in PATCHES:
+AGENTS_JS = LOAD_JS + r'''
+function peerlinkParent(k) {
+  peerlinkLoad();
+  const p = (peerlinkTree.agents || {})[k.address];
+  return p && p !== k.address ? p : k.parent;
+}
+'''
+
+AGENTS_PATCHES = [
+    ('import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout } from "herdr";',
+     'import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout, readTextFile } from "herdr";'
+     + AGENTS_JS),
+    ("  tree(all, addr, lead = []) {\n", "  tree(all, addr, lead = []) {\n    if (lead.length > 6) return [];\n"),
+    ('    const kids = all.filter((k) => k.parent === addr && k.state === "live");',
+     '    const kids = all.filter((k) => peerlinkParent(k) === addr && k.state === "live");'),
+]
+
+# herdr's mod -> (peerlink's copy, the patches that make it).
+MODS = {"spaces": (MOD, PATCHES), "agents": (AGENTS_MOD, AGENTS_PATCHES)}
+
+
+def patch(src, tree_path, patches=PATCHES):
+    """herdr's mod made into peerlink's, reading the tree at tree_path: (patched source, None), or (None, the first
+    piece it couldn't find)."""
+    for old, new in patches:
         if src.count(old) != 1:
             return None, old.strip().splitlines()[0][:80]
         src = src.replace(old, new)
     return src.replace("readTextFile(PEERLINK_TREE)", "readTextFile(" + json.dumps(tree_path) + ")"), None
 
 
-SPACES_BLOCK = re.compile(r'("mod"\s*:\s*")(spaces|peerlink-spaces)(")')
+def point_layout(text, to, base="spaces"):
+    """A layout file's text with its `base` block (herdr's mod or peerlink's copy of it) showing mod `to`."""
+    block = re.compile(r'("mod"\s*:\s*")(' + re.escape(base) + "|" + re.escape(MODS[base][0]) + r')(")')
+    return block.sub(lambda m: m.group(1) + to + m.group(3), text)
 
 
-def point_layout(text, to):
-    """A layout file's text with its spaces sidebar block showing mod `to` ('peerlink-spaces' or 'spaces')."""
-    return SPACES_BLOCK.sub(lambda m: m.group(1) + to + m.group(3), text)
-
-
-def tree(smap, parents):
-    """The file the patched mod reads: each herdr space's parent herdr space, from peerlink's space tree.
-    smap: {peerlink space: herdr space id}; parents: {peerlink space: the space it sits inside}."""
+def tree(smap, parents, agents=None):
+    """The file the patched mods read: each herdr space's parent herdr space, from peerlink's space tree, and each
+    agent's parent terminal. smap: {peerlink space: herdr space id}; parents: {peerlink space: the space it sits
+    inside}; agents: {terminal address: parent terminal address}."""
     out = {}
     for space, hid in sorted((smap or {}).items()):
         p = (parents or {}).get(space)
         if hid and p and smap.get(p) and smap[p] != hid:
             out[hid] = smap[p]
-    return {"parents": out}
+    return {"parents": out, "agents": {a: p for a, p in sorted((agents or {}).items()) if a and p and a != p}}
 
 
-def tree_text(smap, parents):
-    return json.dumps(tree(smap, parents), sort_keys=True, indent=1) + "\n"
+def tree_text(smap, parents, agents=None):
+    return json.dumps(tree(smap, parents, agents), sort_keys=True, indent=1) + "\n"

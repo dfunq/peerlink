@@ -5623,7 +5623,8 @@ def herdr_sync_once(apply):
     if apply:
         with lock:
             parents = {x: space_parent(x) for x in smap}
-        herdr_nest(smap, parents)
+            agent_tree = herdr_agent_tree(placed)
+        herdr_nest(smap, parents, agent_tree)
     who = {a["address"]: a["name"] for a in placed}
     lines = name_lines + join_lines + [herdr_sync.describe(a, who, smap) for a in actions]
     if layout is None:
@@ -5674,16 +5675,34 @@ def herdr_sync_once(apply):
     return {"actions": lines, "notes": notes, "failed": failed}
 
 
+def herdr_agent_tree(placed):
+    """Each placed agent's parent terminal in herdr's agents list: a worker under whoever hired it, any other agent
+    under its space's lead, a lead at the top. Called with the lock held."""
+    where = {p["agent"]: p["address"] for p in placed}
+    out = {}
+    for p in placed:
+        if p.get("lead"):
+            continue
+        rec = sessions.get(p.get("sid") or "") or {}
+        sp = worker_spawn(rec) if rec else None
+        boss = sessions.get(((sp or {}).get("requester") or {}).get("id") or "") if sp else None
+        boss = boss or lead_rec(p["space"])
+        addr = where.get((boss or {}).get("agent") or "")
+        if addr and addr != p["address"]:
+            out[p["address"]] = addr
+    return out
+
+
 def herdr_app_home():
     return os.environ.get("HERDR_APP_HOME") or os.path.expanduser("~/.config/herdr-app")
 
 
-def herdr_nest(smap, parents):
-    """The herdr app's spaces sidebar nests like peerlink's spaces: write the tree the peerlink-spaces mod reads, and
-    keep that mod a patched copy of the herdr app's own spaces mod (made again when herdr ships a new one). Best
-    effort: the app is optional, and without the copy its sidebar just stays flat."""
+def herdr_nest(smap, parents, agent_tree=None):
+    """The herdr app's spaces sidebar and agents list nest like peerlink's spaces and leads: write the tree the
+    peerlink-spaces and peerlink-agents mods read, and keep each a patched copy of the herdr app's own mod (made
+    again when herdr ships a new one). Best effort: the app is optional, and without a copy its list stays flat."""
     path = os.path.join(HOME, herdr_mod.TREE_FILE)
-    text = herdr_mod.tree_text(smap, parents)
+    text = herdr_mod.tree_text(smap, parents, agent_tree)
     try:
         with open(path) as f:
             same = f.read() == text
@@ -5696,14 +5715,19 @@ def herdr_nest(smap, parents):
             os.replace(path + ".tmp", path)
         except OSError as err:
             log("herdr nest: couldn't write the tree:", err)
-    app_home = herdr_app_home()
-    src_dir, dst_dir = os.path.join(app_home, "mods", "spaces"), os.path.join(app_home, "mods", herdr_mod.MOD)
+    for base, (mod, patches) in herdr_mod.MODS.items():
+        herdr_copy_mod(herdr_app_home(), base, mod, patches, path)
+
+
+def herdr_copy_mod(app_home, base, mod, patches, path):
+    """Keep `mod` a copy of the herdr app's `base` mod with `patches` in, and point the layouts at it when it's made."""
+    src_dir, dst_dir = os.path.join(app_home, "mods", base), os.path.join(app_home, "mods", mod)
     try:
         with open(os.path.join(src_dir, "main.js")) as f:
             src = f.read()
     except OSError:
         return  # no herdr app here
-    stamp = hashlib.sha256(src.encode() + json.dumps([herdr_mod.PATCHES, path]).encode()).hexdigest()[:16]
+    stamp = hashlib.sha256(src.encode() + json.dumps([patches, path]).encode()).hexdigest()[:16]
     try:
         with open(os.path.join(dst_dir, ".peerlink")) as f:
             made = f.read().strip()
@@ -5711,13 +5735,13 @@ def herdr_nest(smap, parents):
         made = ""
     if made == stamp:  # the layouts were pointed when it was made: a switch back by hand is yours to keep
         return
-    patched, missing = herdr_mod.patch(src, path)
+    patched, missing = herdr_mod.patch(src, path, patches)
     if patched is None:
         if not made:  # no copy to show: the layouts show herdr's own
-            herdr_point_layouts(app_home, "spaces")
-        if herdr_nest_warned[0] != stamp:
-            herdr_nest_warned[0] = stamp
-            log(f"herdr nest: the herdr app's spaces mod changed and peerlink's patch no longer fits ({missing}); its sidebar stays flat")
+            herdr_point_layouts(app_home, base, base)
+        if herdr_nest_warned.get(base) != stamp:
+            herdr_nest_warned[base] = stamp
+            log(f"herdr nest: the herdr app's {base} mod changed and peerlink's patch no longer fits ({missing}); it stays flat")
         return
     try:
         os.makedirs(dst_dir, exist_ok=True)
@@ -5728,15 +5752,15 @@ def herdr_nest(smap, parents):
             f.write(patched)
         with open(os.path.join(dst_dir, ".peerlink"), "w") as f:
             f.write(stamp + "\n")
-        log(f"herdr nest: made the {herdr_mod.MOD} mod from the herdr app's spaces mod")
+        log(f"herdr nest: made the {mod} mod from the herdr app's {base} mod")
     except OSError as err:
         log("herdr nest: couldn't make the mod:", err)
         return
-    herdr_point_layouts(app_home, herdr_mod.MOD)
+    herdr_point_layouts(app_home, base, mod)
 
 
-def herdr_point_layouts(app_home, mod):
-    """Every herdr layout's spaces sidebar shows `mod`: peerlink's nested copy, or herdr's own when there's no copy."""
+def herdr_point_layouts(app_home, base, mod):
+    """Every herdr layout's `base` block shows `mod`: peerlink's nested copy, or herdr's own when there's no copy."""
     folder = os.path.join(app_home, "layouts")
     try:
         names = [n for n in os.listdir(folder) if n.endswith(".json")]
@@ -5747,17 +5771,17 @@ def herdr_point_layouts(app_home, mod):
         try:
             with open(p) as f:
                 text = f.read()
-            new = herdr_mod.point_layout(text, mod)
+            new = herdr_mod.point_layout(text, mod, base)
             if new != text:
                 with open(p + ".tmp", "w") as f:
                     f.write(new)
                 os.replace(p + ".tmp", p)
-                log(f"herdr nest: the {name[:-5]} layout's spaces sidebar now shows {mod}")
+                log(f"herdr nest: the {name[:-5]} layout's {base} block now shows {mod}")
         except OSError as err:
             log("herdr nest: couldn't change a layout:", err)
 
 
-herdr_nest_warned = [""]
+herdr_nest_warned = {}
 HERDR_SYNC_EVERY_S = 30
 
 
