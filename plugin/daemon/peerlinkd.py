@@ -34,7 +34,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.93"
+VERSION = "0.9.94"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -195,6 +195,7 @@ DEFAULT_CONFIG = {
     "herdr_spaces": {},  # peerlink space -> the herdr space id herdr sync shows it in
     "herdr_tab_names": {},  # herdr tab id -> the name herdr sync last left it showing: a tab renamed since renames its agent
     "herdr_join_never": "",  # spaces a tab you open in herdr never joins on its own, comma separated (a space others nest in never does either); agents can add to it, only the web UI removes
+    "herdr_mods_source": "",  # a folder (a clone of your private mods repo) that Install herdr mods copies from; set only from the web UI
     "use_herdr": True,  # start agents in herdr's terminals when herdr (hc) is installed; off, or without herdr, tmux or Terminal as before  # hours no worker is started, like "22-8"; empty is off; set only from the web UI
     "task_nudge_h": 24,  # an open task with no update for this many hours is raised with its owner, then with whoever asked; 0 is off
     "ask_defaults": True,  # a question to you may name a default the agent goes with when you haven't answered in time
@@ -537,12 +538,96 @@ def log(*parts):
     print(time.strftime("%H:%M:%S"), *parts, flush=True)
 
 
+# What Install herdr mods never copies: sign-ins and secrets each machine makes for itself, logs, and what herdr-app
+# writes into every mod folder on its own.
+HERDR_MODS_SKIP = {"tokens.json", "app.json", "jsconfig.json", ".DS_Store", ".git", "__pycache__", "node_modules"}
+
+
+def herdr_mods_files(root):
+    """(relative path, absolute path) of each file under root that Install herdr mods copies. Symlinks aren't followed."""
+    out = []
+    for dirpath, dirs, files in os.walk(root):
+        dirs[:] = sorted(x for x in dirs if x not in HERDR_MODS_SKIP and not os.path.islink(os.path.join(dirpath, x)))
+        for f in sorted(files):
+            full = os.path.join(dirpath, f)
+            if f in HERDR_MODS_SKIP or f.endswith((".log", ".d.ts", ".pyc")) or os.path.islink(full):
+                continue
+            out.append((os.path.relpath(full, root), full))
+    return out
+
+
+def install_herdr_mods(source=None):
+    """Copy your mods from herdr_mods_source (or `source`, which is then saved as it): mods/<name>/ into herdr-app's
+    mods, layouts/*.json into its layouts when you don't have that layout yet, and _home/ into your home folder. What it replaces is first copied to
+    ~/.peerlink/backups/herdr-mods-<time>/, not beside it, since herdr-app runs every folder in mods/. peerlink's own
+    panel (mods/peerlink) is never replaced."""
+    if source is not None:
+        source = os.path.expanduser(str(source).strip())
+        if source != config.get("herdr_mods_source"):
+            with lock:
+                config["herdr_mods_source"] = source
+                save_config()
+    src = os.path.expanduser(str(config.get("herdr_mods_source") or ""))
+    if not src:
+        return 400, {"error": "set the herdr mods folder first: a clone of your mods repo"}
+    if not os.path.isdir(src):
+        return 400, {"error": f"{src} isn't a folder"}
+    app, home = herdr_app_home(), os.path.expanduser("~")
+    if not os.path.isdir(os.path.join(app, "mods")):
+        return 409, {"error": f"the herdr app isn't set up here ({tilde_path(app)} has no mods folder)"}
+    plan = []  # (destination, source file)
+    mods = os.path.join(src, "mods")
+    names = sorted(n for n in os.listdir(mods) if os.path.isdir(os.path.join(mods, n))) if os.path.isdir(mods) else []
+    for name in names:
+        if name == "peerlink":
+            continue
+        for rel, full in herdr_mods_files(os.path.join(mods, name)):
+            plan.append((os.path.join(app, "mods", name, rel), full))
+    # A layout is yours to arrange once it's there (herdr-app saves it as you do), so it's only added, never replaced.
+    layouts, layouts_kept = os.path.join(src, "layouts"), []
+    for f in sorted(os.listdir(layouts)) if os.path.isdir(layouts) else []:
+        if f.endswith(".json") and os.path.isfile(os.path.join(layouts, f)):
+            if os.path.exists(os.path.join(app, "layouts", f)):
+                layouts_kept.append(f)
+            else:
+                plan.append((os.path.join(app, "layouts", f), os.path.join(layouts, f)))
+    for rel, full in herdr_mods_files(os.path.join(src, "_home")) if os.path.isdir(os.path.join(src, "_home")) else []:
+        plan.append((os.path.join(home, rel), full))
+    if not plan and not layouts_kept:
+        return 400, {"error": f"nothing to install in {tilde_path(src)}: it needs mods/<name>/, layouts/ or _home/"}
+    backup = os.path.join(HOME, "backups", time.strftime("herdr-mods-%Y%m%d-%H%M%S"))
+    copied, kept = [], []
+    for dest, full in plan:
+        with open(full, "rb") as f:
+            data = f.read()
+        try:
+            with open(dest, "rb") as f:
+                if f.read() == data:
+                    continue
+            rel = os.path.join("herdr-app", os.path.relpath(dest, app)) if dest.startswith(app + os.sep) \
+                else os.path.join("home", os.path.relpath(dest, home))
+            os.makedirs(os.path.dirname(os.path.join(backup, rel)), exist_ok=True)
+            shutil.copy2(dest, os.path.join(backup, rel))
+            kept.append(rel)
+        except FileNotFoundError:
+            pass
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        tmp = f"{dest}.peerlink-{os.getpid()}"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, dest)
+        copied.append(tilde_path(dest))
+    log("herdr", "installed", len(copied), "mod files from", tilde_path(src), f"(backup {tilde_path(backup)})" if kept else "")
+    return 200, {"mods": [n for n in names if n != "peerlink"], "copied": copied, "unchanged": len(plan) - len(copied),
+                 "backup": tilde_path(backup) if kept else "", "layouts_kept": layouts_kept}
+
+
 # Settings that must be at least 1: zero would reap every agent at once or block every message.
 CONFIG_MIN_1 = {"poll_interval_ms", "peer_ttl_s", "max_hops", "rate_limit_per_min", "max_message_chars"}
 
 
 # What no agent changes for itself: who starts agents without asking, and how many workers run when.
-BROWSER_ONLY_SETTINGS = ("auto_approve_all", "auto_approve_folders", "max_live_spawns", "night_guard")
+BROWSER_ONLY_SETTINGS = ("auto_approve_all", "auto_approve_folders", "max_live_spawns", "night_guard", "herdr_mods_source")
 
 
 def config_value(name, value):
@@ -7355,6 +7440,11 @@ class Handler(BaseHTTPRequestHandler):
             log("key rotated")
             return self.reply(200, {"ok": True})
 
+        if rest == ["herdr", "install-mods"] and method == "POST":
+            # Only you, in the browser: it copies code that herdr-app runs.
+            if not browser or self.key_ok():
+                return self.reply(403, {"error": "Install herdr mods works only from the web UI in your browser"})
+            return self.reply(*install_herdr_mods(self.body().get("source")))
         if rest == ["clean"] and method == "POST":
             # Only you, in the browser: no agent wipes the record of what other agents did.
             if not browser or self.key_ok():
