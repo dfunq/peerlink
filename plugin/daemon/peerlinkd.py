@@ -5667,16 +5667,21 @@ def herdr_syncer():
 
 def launch_hc(hc, claude, sp):
     """Start the agent in a herdr terminal: (how, "") or ("", why not). It outlives the terminal the daemon was
-    started from, and is removed once it exits, so a retired agent's terminal doesn't linger. A worker's parent is its
-    lead's terminal, so herdr nests it under the lead; anything else has no parent."""
+    started from, and is removed once it exits, so a retired agent's terminal doesn't linger. Any agent that won't lead
+    its space gets its space's lead's terminal as parent, so herdr nests it under the lead (a worker whose space has no
+    running lead, under whoever hired it); the lead itself has no parent."""
     if sp.get("hc") and hc_pid(sp["hc"]):
         return f"still starting in the herdr app (hc attach {sp['hc']})", ""
     name = re.sub(r"[^a-z0-9_-]", "-", (sp.get("name") or os.path.basename(sp["dir"])).lower())[:24].strip("-") + "-" + sp["id"]
     asker = sp.get("requester") or {}
     with lock:
-        lead = sessions.get(asker.get("id") or "") or {}
-        pid = int(lead.get("pid") or 0)
-    parent = lead_terminal(lead.get("terminal") or "") if sp.get("worker") else ""
+        hirer = sessions.get(asker.get("id") or "") or {}
+        pid = int(hirer.get("pid") or 0)
+        pspace = sp.get("space") or (space_of(hirer)[0] if hirer else "")
+        head = lead_rec(pspace) if pspace and pspace != DEFAULT_SPACE else None
+        leads_it = bool(pspace) and not sp.get("worker") and space_lead(pspace)[0] == sp["dir"]
+    under = None if leads_it else head or (hirer if sp.get("worker") else None)
+    parent = lead_terminal((under or {}).get("terminal") or "")
     argv = [hc, "run", "--bg", "--json", *(["--parent", parent, "--no-notify"] if parent else ["--no-parent"]), "--outlive-parent",
             "--rm", "--cwd", sp["dir"], "--name", name[:32],
             "--label", f"peerlink.spawn={sp['id']}", "--label", f"peerlink.space={sp.get('space') or ''}"]
