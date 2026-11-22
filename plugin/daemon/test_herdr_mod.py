@@ -87,10 +87,14 @@ class Daemon(unittest.TestCase):
         with open(os.path.join(self.app, "layouts", "mine.json")) as f:  # the sidebar shows the copy now
             self.assertEqual(f.read(), '{"id": "spaces", "content": {"mod": "peerlink-spaces"}}')
         self.assertTrue(os.path.exists(os.path.join(mod, "mod.json")))
+        with open(os.path.join(self.app, "layouts", "mine.json"), "w") as f:  # you switch it back by hand
+            f.write('{"content": {"mod": "spaces"}}')
         before = os.path.getmtime(os.path.join(mod, "main.js"))
         with unittest.mock.patch.object(self.d.herdr_mod, "patch", side_effect=AssertionError("made again")):
             self.d.herdr_nest({"skyforge": "sp1", "ops": "sp2"}, {"ops": "skyforge"})
         self.assertEqual(os.path.getmtime(os.path.join(mod, "main.js")), before)
+        with open(os.path.join(self.app, "layouts", "mine.json")) as f:
+            self.assertEqual(f.read(), '{"content": {"mod": "spaces"}}')  # and it stays that way
 
     def test_without_a_copy_the_layouts_show_herdrs_own(self):
         with open(os.path.join(self.app, "layouts", "mine.json"), "w") as f:

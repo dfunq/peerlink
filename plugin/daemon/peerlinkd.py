@@ -5690,8 +5690,7 @@ def herdr_nest(smap, parents):
             made = f.read().strip()
     except OSError:
         made = ""
-    if made == stamp:
-        herdr_point_layouts(app_home, herdr_mod.MOD)
+    if made == stamp:  # the layouts were pointed when it was made: a switch back by hand is yours to keep
         return
     patched, missing = herdr_mod.patch(src, path)
     if patched is None:
