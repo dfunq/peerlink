@@ -64,5 +64,9 @@ class IdentityClaims(unittest.TestCase):
         self.assertEqual(d.config["space_leads"]["crew"].get("agent"), "a6")
 
 
+    def test_a_huge_pid_counts_as_alive(self):
+        self.assertTrue(d.pid_alive(10 ** 30))
+
+
 if __name__ == "__main__":
     unittest.main()
