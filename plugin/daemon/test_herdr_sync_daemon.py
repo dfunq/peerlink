@@ -38,6 +38,7 @@ class Pass(unittest.TestCase):
         self.app_open = True
         self.ran = []
         self.broken = set()
+        self.label_fails = set()
 
     def session(self, sid, name, cwd, terminal):
         d.sessions[sid] = {"id": sid, "name": name, "cwd": cwd, "terminal": terminal, "agent": "a-" + name,
@@ -54,6 +55,8 @@ class Pass(unittest.TestCase):
             out = json.dumps({"address": args[1], "state": "live", "pid": self.pids[args[1]], "labels": self.labels[args[1]]})
         elif tool == "hc" and args[:1] == ["label"]:
             self.ran.append(args)
+            if args[1] in self.label_fails:
+                return subprocess.CompletedProcess(argv, 1, "", "no")
             self.labels[args[1]].update(dict(kv.split("=", 1) for kv in args[2:]))
         elif tool == "herdr-app" and args == ["ls"]:
             if not self.app_open:
@@ -88,6 +91,8 @@ class Pass(unittest.TestCase):
         self.assertEqual(self.labels["t8"]["herdr.space"], tools)
         self.assertEqual(self.labels["t8"]["peerlink.space"], "tools")
         self.assertIn(["do", "space.rename", "--id", "spmac", "--name", "ops"], self.ran)
+        park = self.ran.index(["do", "terminal.park", "--terminal", "t8"])
+        self.assertTrue(self.ran[park + 1][:2] == ["label", "t8"])  # parked, then relabelled
         self.ran.clear()
         self.run_pass()  # the moved tab shows up now: it gets its names
         self.assertIn(["do", "space.rename", "--id", tools, "--name", "tools"], self.ran)
@@ -102,7 +107,7 @@ class Pass(unittest.TestCase):
         self.app_open = False
         r = self.run_pass()
         self.assertEqual(self.labels["t8"]["herdr.space"], d.config["herdr_spaces"]["tools"])
-        self.assertFalse([a for a in self.ran if a[0] == "do"])
+        self.assertFalse([a for a in self.ran if a[0] == "do"])  # nothing shown, so nothing parked
         self.assertTrue(any("isn't open" in n for n in r["notes"]))
 
     def test_a_terminal_hc_cant_read_stops_the_pass(self):
@@ -122,6 +127,12 @@ class Pass(unittest.TestCase):
         d.agents["a-peerlink"] = {"id": "a-peerlink", "terminal": "hc:t8@100"}
         self.run_pass()
         self.assertEqual(self.labels["t8"]["peerlink.space"], "tools")
+
+    def test_a_failed_relabel_after_parking_gives_the_pane_back(self):
+        self.label_fails = {"t8"}
+        r = self.run_pass()
+        self.assertIn(["do", "terminal.keep", "--terminal", "t8", "--place", "tab"], self.ran)
+        self.assertTrue(any("t8" in f and "pane is back" in f for f in r["failed"]))
 
     def test_off_when_herdr_is_off(self):
         with unittest.mock.patch.dict(d.config, {"use_herdr": False}):

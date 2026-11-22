@@ -34,7 +34,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.83"
+VERSION = "0.9.84"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -5541,7 +5541,20 @@ def herdr_sync_once(apply):
         return {"actions": lines, "notes": notes}
     app = herdr_app()
     failed = []
+    shown = {x for s in layout or [] for tb in s["tabs"] for x in tb["terminals"]}
+
+    def do(argv):
+        try:
+            return subprocess.run(argv, timeout=10, capture_output=True, text=True).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+
     for act in actions:
+        parked = False
+        if act[0] == "label" and "herdr.space" in act[2] and act[1] in shown and app:
+            # The app keeps a terminal it shows where it is whatever its labels say: take its pane away first
+            # (it keeps running), and the relabel brings it back in its new space.
+            parked = do([app, "do", "terminal.park", "--terminal", act[1]])
         if act[0] == "label":
             argv = [hc, "label", act[1]] + [f"{k}={v}" for k, v in act[2].items()]
         elif act[0] == "rename_space":
@@ -5550,13 +5563,12 @@ def herdr_sync_once(apply):
             argv = [app, "do", "tab.rename", "--id", act[1], "--name", act[2]]
         else:
             argv = [app, "do", "tab.move", "--id", act[1], "--index", "1"]
-        try:
-            r = subprocess.run(argv, timeout=10, capture_output=True, text=True)
-            ok = r.returncode == 0
-        except (OSError, subprocess.SubprocessError):
-            ok = False
-        if not ok:
-            failed.append(herdr_sync.describe(act, who, smap))
+        if not do(argv):
+            line = herdr_sync.describe(act, who, smap)
+            if parked:  # the relabel didn't happen: give it its pane back rather than leave it running unseen
+                back = do([app, "do", "terminal.keep", "--terminal", act[1], "--place", "tab"])
+                line += " (its pane is back in a new tab)" if back else " (parked, not shown: hc attach " + act[1] + ")"
+            failed.append(line)
     with lock:
         if smap != (config.get("herdr_spaces") or {}):
             config["herdr_spaces"] = smap

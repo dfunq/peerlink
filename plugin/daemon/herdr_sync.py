@@ -103,11 +103,13 @@ def plan(agents, terms, layout, smap, new_id):
         if t.get("tab"):
             tabs.setdefault(t["tab"], []).append(addr)
     moved_tabs = {}
+    # Where the app shows a terminal wins over its labels: it doesn't move one it shows when only the labels change.
+    shown_in = {x: s["id"] for s in layout or [] for tb in s.get("tabs") or [] for x in tb.get("terminals") or []}
     for a in sorted(agents, key=lambda a: (a["space"], not a["lead"], a["name"].lower())):
         addr, target = a["address"], smap[a["space"]]
         t = terms.get(addr) or {}
         labels = {}
-        if t.get("space") != target or not t.get("tab"):
+        if shown_in.get(addr, t.get("space")) != target or not t.get("tab"):
             mates = tabs.get(t.get("tab") or "", [addr]) if t.get("tab") else [addr]
             others = [x for x in mates if x != addr]
             mixed = [x for x in others if x not in agent_at or agent_at[x]["space"] != a["space"]]
