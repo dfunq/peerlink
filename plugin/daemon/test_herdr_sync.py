@@ -20,6 +20,38 @@ def term(space, tab, name=None, pspace=None):
     return {"space": space, "tab": tab, "agent": ("a-" + name) if name else "", "pspace": pspace or ""}
 
 
+class Joins(unittest.TestCase):
+    layout = [{"id": "spops", "name": "ops", "tabs": [{"id": "tb1", "name": "1", "terminals": ["t8"]}]}]
+
+    def new(self, **kw):
+        return {**agent("t8", "peerlink", "tools"), "created": 1000, **kw}
+
+    def test_a_new_agent_shown_in_a_mirrored_space_joins_it(self):
+        got = hs.joins([self.new()], {"t8": term("spops", "tb1")}, self.layout, {"ops": "spops"}, 1100)
+        self.assertEqual(got, ([("t8", "ops")], ["a-peerlink"]))
+
+    def test_who_stays(self):
+        cases = {"seen": ([self.new(seen=True)], {}, self.layout, 1100),
+                 "explicit": ([self.new(explicit=True)], {}, self.layout, 1100),
+                 "old": ([self.new()], {}, self.layout, 1000 + hs.JOIN_FRESH_S + 1),
+                 "parent": ([self.new()], {"t8": {"parent": True}}, self.layout, 1100),
+                 "spawned": ([self.new()], {"t8": {"spawned": True}}, self.layout, 1100),
+                 "unmirrored": ([self.new()], {}, [{**self.layout[0], "id": "spx"}], 1100),
+                 "already there": ([self.new(space="ops")], {}, self.layout, 1100)}
+        for why, (agents, terms, layout, now) in cases.items():
+            with self.subTest(why):
+                self.assertEqual(hs.joins(agents, terms, layout, {"ops": "spops"}, now)[0], [])
+
+    def test_a_closed_space_takes_nobody(self):
+        got = hs.joins([self.new()], {}, self.layout, {"ops": "spops"}, 1100, closed={"ops"})
+        self.assertEqual(got, ([], ["a-peerlink"]))  # judged all the same: it never joins later either
+
+    def test_labels_alone_dont_count(self):
+        # Any process can label a terminal: without the app showing it, nobody is judged, so nobody is marked seen.
+        self.assertEqual(hs.joins([self.new()], {"t8": term("spops", "tb1")}, None, {"ops": "spops"}, 1100), ([], []))
+        self.assertEqual(hs.joins([self.new()], {"t8": term("spops", "tb1")}, [], {"ops": "spops"}, 1100), ([], []))
+
+
 class Plan(unittest.TestCase):
     def test_address(self):
         self.assertEqual(hs.hc_address("hc:t7@123"), "t7")

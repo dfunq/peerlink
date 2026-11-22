@@ -172,6 +172,14 @@ class ScenarioTest(unittest.TestCase):
         self.assertIn("isn't approved", out["error"])
         self.assertEqual(rig.call("POST", "/api/approvals/da1/revoke", {})[0], 404)
 
+    def test_an_agent_closes_spaces_to_herdr_joins_but_only_you_open_one(self):
+        rig = self.rig()
+        self.assertEqual(rig.call("PUT", "/api/config", {"herdr_join_never": "ops"})[0], 200)
+        self.assertEqual(rig.call("PUT", "/api/config", {"herdr_join_never": "ops, vault"})[0], 200)
+        code, out = rig.call("PUT", "/api/config", {"herdr_join_never": "vault"})
+        self.assertEqual((code, out["error"]), (403, "only the web UI takes a space off herdr_join_never"))
+        self.assertEqual(rig.user("PUT", "/api/config", {"herdr_join_never": ""})["herdr_join_never"], "")
+
     def test_work_goes_down_a_tree_of_tasks_and_word_comes_back_without_a_relay(self):
         rig = self.rig()
         chief, core, loop = self.team(rig)
