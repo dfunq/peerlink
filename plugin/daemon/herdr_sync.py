@@ -27,7 +27,7 @@ def key_pid(terminal_key):
     return int(m.group(1)) if m else 0
 
 
-def plan(agents, terms, layout, smap, new_id):
+def plan(agents, terms, layout, smap, new_id, keep=()):
     """What to change so the herdr app shows the peerlink grouping.
 
     agents: [{"agent", "name", "space", "lead", "address"}], live peerlink agents running in hc terminals.
@@ -38,11 +38,12 @@ def plan(agents, terms, layout, smap, new_id):
             when the app isn't running (then nothing is renamed or reordered).
     smap:   {peerlink space: herdr space id} remembered from earlier passes.
     new_id: a function (prefix) -> a fresh id, like 'sp' + 32 hex.
+    keep:   addresses whose peerlink labels stay though no agent shows there now (it may only be slow to come back).
 
     Returns (actions, smap, notes). Actions, in order:
       ("label", address, {key: value})      set hc labels (a herdr.space/herdr.tab change moves the terminal)
       ("rename_space", herdr id, name)
-      ("rename_tab", herdr tab id, name)
+      ("rename_tab", herdr tab id, name)  an empty name gives the tab back herdr's number
       ("first_tab", herdr tab id)           move a tab to the front of its space
     notes: lines for people, about what was left alone and why.
     """
@@ -131,9 +132,23 @@ def plan(agents, terms, layout, smap, new_id):
             labels["peerlink.space"] = a["space"]
         if labels:
             actions.append(("label", addr, labels))
+    # A terminal no agent runs in any more (it quit, or moved to another pane) gives up peerlink's labels; its tab gives
+    # up the agent's name, back to herdr's number, so it isn't taken for the agent (and a new agent there isn't
+    # taken to be named after it). Only once: with the labels gone it's an ordinary terminal.
+    stale = set()
+    for addr, t in sorted(terms.items()):
+        if addr not in agent_at and addr not in keep and (t.get("agent") or t.get("pspace")):
+            actions.append(("label", addr, {k: "" for k, v in (("peerlink.agent", t.get("agent")), ("peerlink.space", t.get("pspace"))) if v}))
+            stale.add(addr)
 
     if layout is None:
         return actions, smap, notes
+    for s in layout:
+        for tab in s.get("tabs") or []:
+            addrs = tab.get("terminals") or []
+            name = (tab.get("name") or "").strip()
+            if len(addrs) == 1 and addrs[0] in stale and name and not name.isdigit():
+                actions.append(("rename_tab", tab["id"], ""))
 
     # 3. With the app open: herdr spaces named after their peerlink space, tabs after their agent, the lead's tab first.
     #    Only tabs holding one agent are renamed or moved; a tab just moved shows up on the next pass.
@@ -248,11 +263,13 @@ def describe(action, who=None, smap=None):
         labels, name = action[2], who.get(action[1]) or action[1]
         if "herdr.space" in labels:
             return f"move {name} ({action[1]}) to herdr space {space_of.get(labels['herdr.space'], labels['herdr.space'])}"
+        if not any(labels.values()):
+            return f"take peerlink's labels off {name} ({action[1]}): no agent runs there now"
         return f"label {name} ({action[1]}): " + ", ".join(f"{k}={v}" for k, v in sorted(labels.items()))
     if kind == "rename_space":
         return f"rename herdr space {action[1]} to {action[2]}"
     if kind == "rename_tab":
-        return f"rename tab {action[1]} to {action[2]}"
+        return f"rename tab {action[1]} to {action[2]}" if action[2] else f"give tab {action[1]} back herdr's number"
     if kind == "first_tab":
         return f"put tab {action[1]} first in its space"
     return repr(action)

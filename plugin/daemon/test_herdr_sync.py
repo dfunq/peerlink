@@ -102,6 +102,35 @@ class Plan(unittest.TestCase):
         actions, smap, notes = hs.plan(agents, terms, layout, {"tools": "sptools"}, ids())
         self.assertFalse([a for a in actions if a[0] == "label" and a[1] == "t9"])
 
+    def test_a_terminal_its_agent_left_gives_up_the_labels_and_the_name_once(self):
+        # SKY-689: vault moved from t3 to t2g; t3 is a shell still labelled vault, its tab still named vault.
+        agents = [agent("t2d", "skyforge", "skyforge", lead=True), agent("t2g", "vault", "skyforge")]
+        terms = {"t2d": term("sp1", "tb1", "skyforge", "skyforge"), "t2g": term("sp1", "tb2", "vault", "skyforge"),
+                 "t3": term("sp1", "tb3", "vault", "skyforge"), "t46": term("sp1", "tb4")}
+        layout = [{"id": "sp1", "name": "skyforge", "tabs": [
+            {"id": "tb1", "name": "skyforge", "terminals": ["t2d"]}, {"id": "tb2", "name": "vault", "terminals": ["t2g"]},
+            {"id": "tb3", "name": "vault", "terminals": ["t3"]}, {"id": "tb4", "name": "notes", "terminals": ["t46"]}]}]
+        actions, _, _ = hs.plan(agents, terms, layout, {"skyforge": "sp1"}, ids())
+        self.assertEqual(actions, [("label", "t3", {"peerlink.agent": "", "peerlink.space": ""}), ("rename_tab", "tb3", "")])
+        self.assertEqual(hs.describe(actions[0], {"t3": "t3"}), "take peerlink's labels off t3 (t3): no agent runs there now")
+        # Next pass, labels gone: an ordinary terminal, its tab whatever you call it.
+        terms["t3"] = term("sp1", "tb3")
+        layout[0]["tabs"][2]["name"] = "scratch"
+        self.assertEqual(hs.plan(agents, terms, layout, {"skyforge": "sp1"}, ids())[0], [])
+
+    def test_a_shared_tab_keeps_its_name_when_one_agent_leaves(self):
+        agents = [agent("t1", "lead", "s", lead=True)]
+        terms = {"t1": term("sp1", "tb1", "lead", "s"), "t2": term("sp1", "tb1", "gone", "s")}
+        layout = [{"id": "sp1", "name": "s", "tabs": [{"id": "tb1", "name": "pair", "terminals": ["t1", "t2"]}]}]
+        actions, _, _ = hs.plan(agents, terms, layout, {"s": "sp1"}, ids())
+        self.assertIn(("label", "t2", {"peerlink.agent": "", "peerlink.space": ""}), actions)
+        self.assertFalse([a for a in actions if a[0] == "rename_tab" and a[1] == "tb1" and a[2] == ""])
+
+    def test_without_the_app_only_the_labels_go(self):
+        terms = {"t3": term("sp1", "tb3", "vault", "skyforge")}
+        actions, _, _ = hs.plan([], terms, None, {}, ids())
+        self.assertEqual(actions, [("label", "t3", {"peerlink.agent": "", "peerlink.space": ""})])
+
     def test_address(self):
         self.assertEqual(hs.hc_address("hc:t7@123"), "t7")
         self.assertEqual(hs.hc_address("hc:box/t1b@9"), "box/t1b")
