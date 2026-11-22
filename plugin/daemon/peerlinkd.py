@@ -34,7 +34,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.77"
+VERSION = "0.9.78"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -894,6 +894,11 @@ def delete_agent(aid):
             (config.get(k) or {}).pop(aid, None)
         if config.get("agent_links"):
             config["agent_links"] = [p for p in config["agent_links"] if aid not in p]
+        named = [sp for sp in spawns.values() if sp.get("agent") == aid]
+        for sp in named:  # what started it no longer names it
+            sp.pop("agent")
+        if named:
+            save_spawns()
         cwd = a.get("cwd", "")
         nobody_there = not any(is_live(r) and r.get("cwd") == cwd for r in sessions.values())
         for space, lead in list((config.get("space_leads") or {}).items()):
@@ -3990,21 +3995,42 @@ AGENT_SESSIONS_KEPT = 2000
 AGENT_KEPT_S = 60 * 86400
 
 
+agent_seq = [0]  # the highest agent id ever handed out: kept in agents.json, so a deleted agent's id never returns
+
+
+def agent_number(aid):
+    m = re.fullmatch(r"a(\d+)", str(aid or ""))
+    return int(m.group(1)) if m else 0
+
+
 def load_agents():
     try:
         data = read_json(AGENTS_PATH, {})
         for a in data.get("agents", []):
             agents[a["id"]] = a
         agent_of.update({k: v for k, v in data.get("sessions", {}).items() if v in agents})
-    except (KeyError, TypeError, AttributeError):
+        agent_seq[0] = int(data.get("seq") or 0)
+    except (KeyError, TypeError, AttributeError, ValueError):
         pass
+    # Ids handed out before the counter was kept can live on where their agent no longer does: in a spawn, or a
+    # setting kept for the agent. None of them is handed out again.
+    held = [agent_number(a) for a in agents] + [agent_number(sp.get("agent")) for sp in spawns.values()]
+    held += [agent_number(k) for k in config.get("agent_spaces") or {}] + [agent_number(k) for k in config.get("agent_members") or {}]
+    agent_seq[0] = max([agent_seq[0], *held])
+
+
+def new_agent_id():
+    """A fresh agent id, never one handed out before: a reused one would inherit what still names the old agent,
+    such as the spawn that started it as a worker. Called with the lock held."""
+    agent_seq[0] = max([agent_seq[0], *(agent_number(a) for a in agents)]) + 1
+    return f"a{agent_seq[0]}"
 
 
 def save_agents():
     for gone in list(agent_of)[:-AGENT_SESSIONS_KEPT]:
         agent_of.pop(gone)
     try:
-        write_json(AGENTS_PATH, {"agents": list(agents.values()), "sessions": agent_of})
+        write_json(AGENTS_PATH, {"agents": list(agents.values()), "sessions": agent_of, "seq": agent_seq[0]})
     except OSError as err:
         log("could not save agents:", err)
 
@@ -4028,7 +4054,7 @@ def agent_for(rec, old=None):
         if known:
             aid = max(known, key=lambda a: a.get("seen", 0))["id"]
         else:
-            aid = f"a{max([int(i[1:]) for i in agents] or [0]) + 1}"
+            aid = new_agent_id()
             agents[aid] = {"id": aid, "created": now}
     a = agents[aid]
     before = a.get("sid") if a.get("sid") != rec["id"] else None
@@ -4991,12 +5017,15 @@ def spawn_agent(sp):
 
 
 def worker_spawn(rec):
-    """The spawn that started this agent as a worker, or None: kept by agent, so it holds across /clear."""
-    aid = (rec or {}).get("agent") or ""
-    for sp in spawns.values():
-        if sp.get("worker") and (sp.get("agent_id") == (rec or {}).get("id") or (aid and spawn_agent(sp) == aid)):
-            return sp
-    return None
+    """The spawn that started this agent as a worker, or None: kept by agent, so it holds across /clear. The spawn of
+    this very session first; else the newest one still running for its agent, never one that ended (a worker that
+    retired long ago may have had the same agent id, from before ids were never reused)."""
+    sid, aid = (rec or {}).get("id") or "", (rec or {}).get("agent") or ""
+    mine = [sp for sp in spawns.values() if sp.get("worker") and sid and sp.get("agent_id") == sid]
+    if mine:
+        return mine[-1]
+    theirs = [sp for sp in spawns.values() if sp.get("worker") and aid and sp["status"] == "started" and spawn_agent(sp) == aid]
+    return max(theirs, key=lambda sp: sp.get("created", 0)) if theirs else None
 
 
 def worker_live(sp, now):
