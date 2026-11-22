@@ -231,7 +231,6 @@ SLASH = {"type": 1, "name": "peerlink", "description": "peerlink: your agents", 
     {"type": 1, "name": "cancel", "description": "Cancel a schedule",
      "options": [{"type": 3, "name": "id", "description": "The schedule, like c3", "required": True, "autocomplete": True}]},
     {"type": 1, "name": "resume", "description": "Lift a usage-limit hold, after switching accounts"},
-    {"type": 1, "name": "unpair", "description": "Sign out every client paired to manage peerlink as you (the herdr mod)"},
 ]}
 
 
