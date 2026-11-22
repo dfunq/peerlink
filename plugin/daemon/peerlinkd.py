@@ -33,7 +33,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.72"
+VERSION = "0.9.73"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -6802,6 +6802,50 @@ def integrity_ok(part=None):
     return part not in bad
 
 
+def build_touch_id():
+    """Build the Touch ID helper from the source beside this file, when it's missing or its source changed since the
+    last build (an install or update). It's built here, never shipped as a binary. The new build is recorded in
+    integrity.json with its source, so integrity_ok takes it as the new normal rather than a swap."""
+    if sys.platform != "darwin" or not os.path.exists(TOUCHID_SRC) or not shutil.which("swiftc"):
+        return False
+    src = file_sha(TOUCHID_SRC)
+    old = read_json(INTEGRITY_PATH, {}) or {}
+    # A helper that changed while its source didn't is left alone: integrity_ok alerts on it and stops using it.
+    # Rebuilding over it here would hide the swap.
+    if os.access(TOUCHID_BIN, os.X_OK) and old.get("helper_src") == src:
+        return False
+    os.makedirs(os.path.dirname(TOUCHID_BIN), exist_ok=True)
+    tmp = f"{TOUCHID_BIN}.build-{os.getpid()}"
+    try:
+        r = subprocess.run(["swiftc", "-O", "-o", tmp, TOUCHID_SRC], capture_output=True, text=True, timeout=300)
+        if r.returncode != 0:
+            log("owner", "Touch ID helper didn't build:", (r.stderr or r.stdout).strip()[:500])
+            return False
+        if file_sha(TOUCHID_SRC) != src:  # the source changed while it built: build again next start
+            return False
+        os.chmod(tmp, 0o700)
+        os.replace(tmp, TOUCHID_BIN)
+    except (OSError, subprocess.SubprocessError) as err:
+        log("owner", "Touch ID helper didn't build:", err)
+        return False
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    try:
+        write_json(INTEGRITY_PATH, {**old, "helper": file_sha(TOUCHID_BIN), "helper_src": src}, backup=False)
+    except OSError as err:
+        log("could not record integrity:", err)
+    log("owner", "built the Touch ID helper at", tilde_path(TOUCHID_BIN))
+    return True
+
+
+def start_integrity():
+    if not SCRATCH_HOME:  # a test's daemon doesn't build: its tests stub the helper
+        build_touch_id()
+    time.sleep(20)  # once the bot is up, so an alert reaches Discord
+    integrity_ok()
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "peerlink/" + VERSION
 
@@ -7916,9 +7960,7 @@ def serve():
         log("another daemon holds port", PORT, "-", err)
         sys.exit(0)
     start_discord()
-    later = threading.Timer(20, integrity_ok)  # once the bot is up, so an alert reaches Discord
-    later.daemon = True
-    later.start()
+    threading.Thread(target=start_integrity, name="integrity", daemon=True).start()
     start_telegram()
     start_slack()
     start_teams()

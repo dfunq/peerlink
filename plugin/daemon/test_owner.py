@@ -7,6 +7,7 @@ import hmac
 import json
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -349,6 +350,57 @@ class TouchIdHelper(unittest.TestCase):
                 f.write("new source")
             self.assertTrue(d.integrity_ok("helper"))  # an update rebuilt it
         self.assertEqual(len(alerts), 2)
+
+
+class TouchIdBuild(unittest.TestCase):
+    """The daemon builds the helper when it's missing or its source changed, records the build, and never rebuilds
+    over a helper that changed behind its source's back (that would hide the swap from integrity_ok)."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp(prefix="touchid-build-")
+        self.src, self.bin = os.path.join(self.home, "main.swift"), os.path.join(self.home, "bin", "peerlink-touchid")
+        with open(self.src, "w") as f:
+            f.write("source 1")
+        self.builds = []
+
+    def fake_swiftc(self, cmd, **kw):
+        self.builds.append(cmd)
+        with open(cmd[cmd.index("-o") + 1], "w") as f:
+            f.write("built from " + open(cmd[-1]).read())
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    def build(self):
+        alerts = []
+        with unittest.mock.patch.multiple(d, TOUCHID_SRC=self.src, TOUCHID_BIN=self.bin,
+                                          INTEGRITY_PATH=os.path.join(self.home, "i.json"), owner_alert=alerts.append), \
+                unittest.mock.patch.object(d.sys, "platform", "darwin"), \
+                unittest.mock.patch.object(d.shutil, "which", lambda name: "/usr/bin/" + name), \
+                unittest.mock.patch.object(d.subprocess, "run", self.fake_swiftc):
+            built = d.build_touch_id()
+            return built, d.integrity_ok("helper"), alerts
+
+    def test_builds_once_then_again_only_when_the_source_changes(self):
+        self.assertEqual(self.build(), (True, True, []))
+        self.assertTrue(os.access(self.bin, os.X_OK))
+        self.assertEqual(self.build(), (False, True, []))
+        with open(self.src, "w") as f:
+            f.write("source 2")
+        self.assertEqual(self.build(), (True, True, []))
+        self.assertEqual(open(self.bin).read(), "built from source 2")
+        self.assertEqual(len(self.builds), 2)
+
+    def test_a_swapped_helper_is_not_rebuilt_over_and_is_not_used(self):
+        self.build()
+        with open(self.bin, "w") as f:
+            f.write("swapped")
+        built, ok, alerts = self.build()
+        self.assertEqual((built, ok, len(alerts)), (False, False, 1))
+        self.assertEqual(open(self.bin).read(), "swapped")
+
+    def test_a_deleted_helper_is_rebuilt(self):
+        self.build()
+        os.remove(self.bin)
+        self.assertEqual(self.build(), (True, True, []))
 
 
 if __name__ == "__main__":
