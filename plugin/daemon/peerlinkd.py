@@ -33,7 +33,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.71"
+VERSION = "0.9.72"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -6501,6 +6501,12 @@ def pair_start(device):
     shows the code the prompt names. One pending at a time: a second start cancels both, since one of them may be an
     agent racing you. At most PAIR_STARTS_PER_HOUR an hour."""
     device = re.sub(r"[^\w .-]", "", str(device or ""))[:40].strip() or "a client"
+    # Nobody could approve it: no Discord channel to ask in and no Touch ID helper. Say so now, rather than leave
+    # the client waiting on a code nobody is asked about.
+    canned = SCRATCH_HOME and os.environ.get("PEERLINK_TEST_PRESENCE") in ("yes", "no")
+    if not canned and not owner_channel() and not touch_id_usable():
+        return 409, {"error": "nothing can approve a pairing here: map a Discord channel to an agent (or set owner_channel "
+                              "on the Channels page) so you're asked there"}
     now = time.time()
     with lock:
         expire_owner(now)

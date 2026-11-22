@@ -181,10 +181,18 @@ class PairingRules(unittest.TestCase):
         for x in (d.owner_pairings, d.owner_tokens, d.owner_step_ups, d.pair_starts):
             x.clear()
         self.asked, self.alerts = [], []
-        for target, fake in (("owner_ask", lambda rid, *a: self.asked.append(rid)), ("owner_alert", self.alerts.append)):
+        for target, fake in (("owner_ask", lambda rid, *a: self.asked.append(rid)), ("owner_alert", self.alerts.append),
+                             ("owner_channel", lambda: "123")):
             p = unittest.mock.patch.object(d, target, fake)
             p.start()
             self.addCleanup(p.stop)
+
+    def test_no_pairing_starts_when_nothing_could_approve_it(self):
+        with unittest.mock.patch.object(d, "owner_channel", lambda: ""), unittest.mock.patch.object(d, "touch_id_usable", lambda: False):
+            code, out = d.pair_start("herdr")
+        self.assertEqual(code, 409)
+        self.assertIn("Discord", out["error"])
+        self.assertEqual((d.owner_pairings, d.pair_starts), ({}, []))  # nor does it use up the hourly limit
 
     def test_a_second_pending_pairing_cancels_both_and_alerts_you(self):
         code, first = d.pair_start("herdr")
