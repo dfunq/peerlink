@@ -88,6 +88,8 @@ class Pass(unittest.TestCase):
         self.assertEqual(self.labels["t8"]["herdr.space"], tools)
         self.assertEqual(self.labels["t8"]["peerlink.space"], "tools")
         self.assertIn(["do", "space.rename", "--id", "spmac", "--name", "ops"], self.ran)
+        park = self.ran.index(["do", "terminal.park", "--terminal", "t8"])
+        self.assertTrue(self.ran[park + 1][:2] == ["label", "t8"])  # parked, then relabelled
         self.ran.clear()
         self.run_pass()  # the moved tab shows up now: it gets its names
         self.assertIn(["do", "space.rename", "--id", tools, "--name", "tools"], self.ran)
@@ -102,7 +104,7 @@ class Pass(unittest.TestCase):
         self.app_open = False
         r = self.run_pass()
         self.assertEqual(self.labels["t8"]["herdr.space"], d.config["herdr_spaces"]["tools"])
-        self.assertFalse([a for a in self.ran if a[0] == "do"])
+        self.assertFalse([a for a in self.ran if a[0] == "do"])  # nothing shown, so nothing parked
         self.assertTrue(any("isn't open" in n for n in r["notes"]))
 
     def test_a_terminal_hc_cant_read_stops_the_pass(self):

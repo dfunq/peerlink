@@ -34,7 +34,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.83"
+VERSION = "0.9.84"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -5541,7 +5541,15 @@ def herdr_sync_once(apply):
         return {"actions": lines, "notes": notes}
     app = herdr_app()
     failed = []
+    shown = {x for s in layout or [] for tb in s["tabs"] for x in tb["terminals"]}
     for act in actions:
+        if act[0] == "label" and "herdr.space" in act[2] and act[1] in shown and app:
+            # The app keeps a terminal it shows where it is whatever its labels say: take its pane away first
+            # (it keeps running), and the relabel brings it back in its new space.
+            try:
+                subprocess.run([app, "do", "terminal.park", "--terminal", act[1]], timeout=10, capture_output=True, text=True)
+            except (OSError, subprocess.SubprocessError):
+                pass
         if act[0] == "label":
             argv = [hc, "label", act[1]] + [f"{k}={v}" for k, v in act[2].items()]
         elif act[0] == "rename_space":

@@ -124,6 +124,15 @@ class Plan(unittest.TestCase):
         _, smap, _ = hs.plan(agents, terms, None, {"games": "spgames"}, ids())
         self.assertEqual(smap, {"games": "spgames", "s": "spnew1"})
 
+    def test_a_terminal_shown_elsewhere_than_its_labels_say_moves(self):
+        # Labelled for loop-control already, but the app still shows it in login.
+        agents = [agent("t6", "loop-control", "loop-control", lead=True), agent("t5", "core", "login", lead=True)]
+        terms = {"t6": term("splc", "tb6", "loop-control", "loop-control"), "t5": term("splogin", "tb5", "core", "login")}
+        layout = [{"id": "splogin", "name": "login", "tabs": [{"id": "tb5", "name": "core", "terminals": ["t5"]},
+                                                             {"id": "tb6", "name": "loop-control", "terminals": ["t6"]}]}]
+        actions, _, _ = hs.plan(agents, terms, layout, {"login": "splogin", "loop-control": "splc"}, ids())
+        self.assertIn(("label", "t6", {"herdr.space": "splc", "herdr.tab": "tbnew1"}), actions)
+
     def test_describe(self):
         line = hs.describe(("label", "t8", {"herdr.space": "spnew1", "herdr.tab": "tb"}), {"t8": "peerlink"}, {"tools": "spnew1"})
         self.assertEqual(line, "move peerlink (t8) to herdr space tools")
