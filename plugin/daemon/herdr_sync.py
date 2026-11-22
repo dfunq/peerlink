@@ -63,6 +63,10 @@ def plan(agents, terms, layout, smap, new_id):
     # 1. Each peerlink space with live agents gets a herdr space: the one remembered, else one already named after
     #    it, else the herdr space holding most of its agents (its lead breaks a tie), else a new one.
     claimed = {}
+    # A herdr space remembered for a peerlink space with nobody live right now stays that space's.
+    for space, hid in smap.items():
+        if space not in by_space and hid:
+            claimed.setdefault(hid, space)
     for space in sorted(by_space):
         hid = smap.get(space)
         if hid and (layout is None or hid in herdr_names) and hid not in claimed:

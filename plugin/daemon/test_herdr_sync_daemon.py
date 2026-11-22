@@ -37,6 +37,7 @@ class Pass(unittest.TestCase):
         self.pids = {"t8": 100, "t9": 200}
         self.app_open = True
         self.ran = []
+        self.broken = set()
 
     def session(self, sid, name, cwd, terminal):
         d.sessions[sid] = {"id": sid, "name": name, "cwd": cwd, "terminal": terminal, "agent": "a-" + name,
@@ -48,6 +49,8 @@ class Pass(unittest.TestCase):
         if tool == "hc" and args[:1] == ["ls"]:
             out = json.dumps({"terminals": [{"address": a, "state": "live"} for a in self.labels]})
         elif tool == "hc" and args[:1] == ["get"]:
+            if args[1] in self.broken:
+                return subprocess.CompletedProcess(argv, 1, "", "gone")
             out = json.dumps({"address": args[1], "state": "live", "pid": self.pids[args[1]], "labels": self.labels[args[1]]})
         elif tool == "hc" and args[:1] == ["label"]:
             self.ran.append(args)
@@ -101,6 +104,13 @@ class Pass(unittest.TestCase):
         self.assertEqual(self.labels["t8"]["herdr.space"], d.config["herdr_spaces"]["tools"])
         self.assertFalse([a for a in self.ran if a[0] == "do"])
         self.assertTrue(any("isn't open" in n for n in r["notes"]))
+
+    def test_a_terminal_hc_cant_read_stops_the_pass(self):
+        self.labels["t5"], self.pids["t5"] = {"herdr.space": "spmac", "herdr.tab": "tb8"}, 500  # a shell in t8's tab
+        self.broken = {"t5"}
+        r = self.run_pass()
+        self.assertIn("error", r)
+        self.assertEqual(self.ran, [])
 
     def test_off_when_herdr_is_off(self):
         with unittest.mock.patch.dict(d.config, {"use_herdr": False}):

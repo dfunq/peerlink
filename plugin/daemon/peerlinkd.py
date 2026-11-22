@@ -5483,6 +5483,8 @@ def herdr_sync_inputs(hc):
         if not addr or t.get("state") != "live":
             continue
         info = hc_terminal(addr)
+        if not info or not info.get("pid"):
+            return None  # fail closed: without every terminal's labels a shared tab could look like the agent's own
         labels = info.get("labels") or {}
         # hc hands an ended terminal's address to a new one: an agent is only placed by a terminal still running its shell.
         if addr in found and found[addr]["pid"] and info.get("pid") and int(info["pid"]) != found[addr]["pid"]:
@@ -5507,15 +5509,24 @@ def herdr_sync_inputs(hc):
     return agents, terms, layout
 
 
+herdr_sync_lock = threading.Lock()
+
+
 def herdr_sync_pass(apply=True):
     """One herdr sync pass: {"actions": [lines], "notes": [lines]} of what it changed (or, apply=False, would change).
-    {"error": why} when it can't run. peerlink -> herdr only; see herdr_sync.py."""
+    {"error": why} when it can't run. peerlink -> herdr only; see herdr_sync.py. One pass at a time, so two never
+    make different herdr ids for the same space."""
+    with herdr_sync_lock:
+        return herdr_sync_once(apply)
+
+
+def herdr_sync_once(apply):
     hc = find_hc() if config.get("use_herdr", True) else ""
     if not hc:
         return {"error": "herdr isn't installed, or starting agents in herdr is off"}
     got = herdr_sync_inputs(hc)
     if got is None:
-        return {"error": "hc couldn't list its terminals"}
+        return {"error": "hc couldn't say what's in every terminal; nothing changed"}
     agents, terms, layout = got
     actions, smap, notes = herdr_sync.plan(agents, terms, layout, config.get("herdr_spaces") or {},
                                            lambda prefix: prefix + secrets.token_hex(16))

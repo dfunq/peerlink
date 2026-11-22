@@ -117,6 +117,13 @@ class Plan(unittest.TestCase):
         _, smap, _ = hs.plan(agents, terms, None, {"one": "sp1", "two": "sp1"}, ids())
         self.assertNotEqual(smap["one"], smap["two"])
 
+    def test_an_offline_spaces_herdr_space_isnt_taken(self):
+        # games has nobody live; its remembered herdr space holds a stray agent of another space.
+        agents = [agent("t1", "x", "s")]
+        terms = {"t1": term("spgames", "tb1", "x", "s")}
+        _, smap, _ = hs.plan(agents, terms, None, {"games": "spgames"}, ids())
+        self.assertEqual(smap, {"games": "spgames", "s": "spnew1"})
+
     def test_describe(self):
         line = hs.describe(("label", "t8", {"herdr.space": "spnew1", "herdr.tab": "tb"}), {"t8": "peerlink"}, {"tools": "spnew1"})
         self.assertEqual(line, "move peerlink (t8) to herdr space tools")
