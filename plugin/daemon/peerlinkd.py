@@ -4423,7 +4423,7 @@ def rename_self(sid, name, hold=False):
         for k in [k for k, v in holds.items() if v.get("until", 0) < now]:
             holds.pop(k)
         held = holds.get(name.lower())
-        if held and held.get("agent") != rec.get("agent"):
+        if held and held.get("agent") != (rec.get("agent") or sid):
             return 409, {"error": f"{name} was given up less than a day ago and is still kept for the agent that had it"}
         was = display_name(rec)
         if hold and was.lower() != name.lower():
