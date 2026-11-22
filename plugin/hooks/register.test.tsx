@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.9.78', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.9.79', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (state.forget && path.endsWith('/heartbeat') && 'busy' in body) {
       state.forget = false
       return { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'unknown agent; register again' }) } }
@@ -101,13 +101,15 @@ function engine(on: any, { turns = 0, percent = 85, readme = '', claudeMd = '', 
   })
   const ran: string[][] = []
   // This Claude Code process's id, as `sh -c 'echo $PPID'` gives it; 0 for none.
-  const proc = { pid: 0 }
+  // And the terminal it runs in, as the terminal probe gives it ('hc:…', 'tmux:…' or 'tty:…'); '' for none.
+  const proc = { pid: 0, terminal: '' }
   on('process.run', (_: any, e: any) => {
     ran.push(e.argv)
     const [cmd, ...args] = e.argv
     let stdout = ''
     let exitCode = 0
-    if (cmd === 'sh' && proc.pid) stdout = `${proc.pid}\n`
+    if (cmd === 'sh' && String(args[1] ?? '').includes('HC_TERMINAL_ID')) stdout = proc.terminal ? `${proc.terminal}\n` : ''
+    else if (cmd === 'sh' && proc.pid) stdout = `${proc.pid}\n`
     if (cmd === 'git') {
       if (!git.dirs) exitCode = 128
       else if (args.includes('--git-dir')) stdout = git.dirs.join('\n') + '\n'
@@ -1159,7 +1161,7 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.9.78 · daemon 0.9.78 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.9.79 · daemon 0.9.79 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the space is listed once', async ($, on) => {
@@ -1200,7 +1202,7 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.9.78')
+  expect(reg.plugin).toBe('0.9.79')
 })
 
 test('an agent registers again under the folder it started in, wherever the host has moved its root since', async ($, on) => {
@@ -1214,6 +1216,23 @@ test('an agent registers again under the folder it started in, wherever the host
   const regs = daemon.posted.filter(p => p.path === '/api/sessions').map(p => [p.body.cwd, p.body.name])
   expect(regs.length).toBe(2)
   expect(regs[1]).toEqual(['/Users/x/r/web', 'web'])
+})
+
+test('a session registers the terminal it runs in, so a restart in the same pane is the same agent', async ($, on) => {
+  const { proc } = engine(on)
+  proc.pid = 222
+  proc.terminal = 'hc:t7'
+  const daemon = fakeDaemon(on)
+  await $.session.start(START)
+  const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
+  expect([reg.pid, reg.terminal]).toEqual([222, 'hc:t7'])
+})
+
+test('with no terminal to tell, a session registers none', async ($, on) => {
+  engine(on)
+  const daemon = fakeDaemon(on)
+  await $.session.start(START)
+  expect(daemon.posted.find(p => p.path === '/api/sessions')!.body.terminal).toBeUndefined()
 })
 
 test('a session resumed by a new process in another folder registers as that folder, not the one it started in', async ($, on) => {
@@ -1323,7 +1342,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.9.79', true], ['0.9.78', false]] as const)
+for (const [installed, reloads] of [['0.9.80', true], ['0.9.79', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     const daemon = fakeDaemon(on)

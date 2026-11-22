@@ -34,7 +34,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.78"
+VERSION = "0.9.79"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -781,6 +781,16 @@ def parent_of(rec):
     return space_parent(space_of(rec)[0]) if leads(rec) else ""
 
 
+def lead_to_pin(space, cwd):
+    """The agent a lead with none pinned yet gets pinned to: the one lead_rec picks, when it's the folder's own (going
+    by the folder's name, or alone there) and no worker, else none yet. Called with the lock held."""
+    lead = lead_rec(space)
+    if not lead or lead.get("cwd") != cwd or not lead.get("agent") or worker_spawn(lead):
+        return ""
+    here = [r for r in sessions.values() if is_live(r) and r.get("cwd") == cwd and space_of(r)[0] == space]
+    return lead["agent"] if display_name(lead).lower() == folder_name(cwd).lower() or len(here) == 1 else ""
+
+
 def note_lone_leads():
     """An agent alone in its space leads it, and keeps leading when others join, until you pick another.
     The default space is where unsorted agents land, not a team, so it has no lead. Called with the lock held."""
@@ -797,12 +807,23 @@ def note_lone_leads():
         # at once when its agent has moved to another space.
         # A lead you cleared stays cleared until you pick one: the space's last agent doesn't take it back.
         folder, how = space_lead(space)
-        if folder == cwd or how == "set" or ((config.get("space_leads") or {}).get(space) or {}).get("how") == "none":
+        entry = (config.get("space_leads") or {}).get(space) or {}
+        if folder == cwd and how == "only" and not entry.get("agent"):
+            # A default lead set before its agent was known (it's noted as the session registers) gets pinned to it.
+            pick = lead_to_pin(space, cwd)
+            if pick:
+                entry["agent"] = pick
+                save_config()
+        if folder == cwd or how == "set" or entry.get("how") == "none":
             continue
         moved = any(is_live(r) and r.get("cwd") == folder for r in sessions.values())
         if folder and not moved and now - folder_seen.get(folder, DAEMON_START) < LEAD_GRACE_S:
             continue
+        # Pinned to its agent too, as a lead you pick is, so another agent opened in the same folder can't pass for it.
         config.setdefault("space_leads", {})[space] = {"cwd": cwd, "how": "only", "ts": time.time()}
+        pick = lead_to_pin(space, cwd)
+        if pick:
+            config["space_leads"][space]["agent"] = pick
         save_config()
         # Told, as a lead you pick is: else it learns it leads only when it's told it no longer does.
         task_message(None, cwd, f"You now lead the {space} space, as the only agent in it. Work sent to the space comes to you: decide which agent owns it, delegate with send_message, and report the outcome to whoever asked.")
@@ -4035,6 +4056,23 @@ def save_agents():
         log("could not save agents:", err)
 
 
+def pid_alive(pid):
+    """Whether process `pid` is still running; True when that can't be told (no pid, Windows)."""
+    try:
+        pid = int(pid or 0)
+    except (TypeError, ValueError):
+        return True
+    if pid <= 0 or os.name == "nt":
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
 def agent_session(aid):
     """The live session an agent is running in now, or None."""
     live = [r for r in sessions.values() if aid and r.get("agent") == aid and is_live(r)]
@@ -4047,10 +4085,30 @@ def agent_for(rec, old=None):
     and the session it last ran in (None when it's new or the same). Called with the lock held."""
     now = time.time()
     aid = rec.get("agent") or agent_of.get(old or "") or agent_of.get(rec["id"])
+    claim = str(rec.pop("_claim", "") or "").lower()
     if aid not in agents:
+        cwd, term = rec.get("cwd", ""), rec.get("terminal") or ""
+        # Still listed as live, but the process in its pane is gone and this one took its place: an unclean exit
+        # (SIGTERM, a crash) leaves its session live until it times out.
+        replaced = lambda r: bool(term) and r.get("terminal") == term and not pid_alive(r.get("pid"))
+        others = [r for r in sessions.values() if r["id"] != rec["id"] and is_live(r) and r.get("cwd") == cwd and not replaced(r)]
+        free = [a for a in agents.values() if a.get("cwd") == cwd
+                and not ((s := agent_session(a["id"])) and s["id"] != rec["id"] and not replaced(s))]
         names = {display_name(rec).lower(), str(rec.get("name") or "").lower()} - {""}
-        known = [a for a in agents.values() if a.get("cwd") == rec.get("cwd") and {a["name"].lower(), str(a.get("reg") or "").lower()} & names
-                 and not (agent_session(a["id"]) and agent_session(a["id"])["id"] != rec["id"])]
+        named = lambda want: [a for a in free if {a["name"].lower(), str(a.get("reg") or "").lower()} & want]
+        # The terminal it runs in (a herdr terminal, a tmux pane, a tty, with the pane's shell) says best which agent
+        # a new process is: a restart in the same pane is the same agent. One the daemon started for an agent (a
+        # schedule's, a standing agent's restart) is that agent. A name says less: a fresh session takes its folder's
+        # name, or name-2 when another live agent here has it, whichever agent it is. So that stand-in claims nothing,
+        # and while another agent runs in the folder neither does the folder's own name: two sessions starting
+        # together there would each take the other's agent. A name of its own still finds its agent, and with no
+        # terminal to go by (Windows) names count as they always did.
+        known = [a for a in free if term and a.get("terminal") == term] or (named({claim}) if claim else [])
+        if not known:
+            live = {display_name(r).lower() for r in others}
+            stand_ins = {n for n in names if (m := re.fullmatch(r"(.+)-\d+", n)) and m.group(1) in live}
+            default = {folder_name(cwd).lower(), os.path.basename(cwd.rstrip("/\\")).lower()} - {""}
+            known = named(names - stand_ins - (default if term and others else set()))
         if known:
             aid = max(known, key=lambda a: a.get("seen", 0))["id"]
         else:
@@ -4059,6 +4117,8 @@ def agent_for(rec, old=None):
     a = agents[aid]
     before = a.get("sid") if a.get("sid") != rec["id"] else None
     a.update(name=display_name(rec), reg=rec.get("name") or "", cwd=rec.get("cwd", ""), sid=rec["id"], seen=now)
+    if rec.get("terminal"):
+        a["terminal"] = rec["terminal"]
     rec["agent"] = agent_of[rec["id"]] = aid
     # The spawn that started it knows its agent for good: agent_of forgets old sessions.
     for sp in spawns.values():
@@ -6899,6 +6959,8 @@ class Handler(BaseHTTPRequestHandler):
                     save_config()
                 if spawn and spawn.get("name") and not rec.get("name"):
                     rec["name"] = unique_name(spawn["name"], sid)
+                    if not spawn.get("worker"):  # a standing agent started again by name; a worker is new each time
+                        rec["_claim"] = spawn["name"]
                 if b.get("name") and not rec.get("name"):
                     # A folder keeps the name it was given: a new session there (a restart, a resume) is still "notes".
                     # One registering again after a daemon restart keeps the name it had, not whichever is free first;
@@ -6910,7 +6972,7 @@ class Handler(BaseHTTPRequestHandler):
                     # One the daemon started for a schedule comes up as the agent the schedule is for.
                     claims = name_claims.get(b.get("cwd") or "")
                     if claims and not b.get("succeeds"):
-                        given = claims.pop(0)
+                        given = rec["_claim"] = claims.pop(0)
                     rec["name"] = unique_name(given or b["name"], sid)
                 if b.get("summary") is not None and b["summary"] != rec.get("summary"):
                     # The same summary its folder had before (a daemon restart, a resume) keeps its age.
@@ -6918,7 +6980,11 @@ class Handler(BaseHTTPRequestHandler):
                     rec["summary_ts"] = known["ts"] if known.get("summary") == b["summary"] and known.get("ts") else time.time()
                 if b.get("plugin") and rec.get("plugin") and b["plugin"] != rec["plugin"]:
                     tool_changes_notice(rec, rec["plugin"], b["plugin"])
-                for k in ("cwd", "repo", "branch", "summary", "model", "plugin", "pid"):
+                if not isinstance(b.get("terminal"), str):
+                    b.pop("terminal", None)
+                elif len(b["terminal"]) > 200:
+                    b["terminal"] = b["terminal"][:200]
+                for k in ("cwd", "repo", "branch", "summary", "model", "plugin", "pid", "terminal"):
                     if b.get(k) is not None:
                         rec[k] = b[k]
                 # A plugin just reloaded comes back with no summary: the one this agent last had in its folder stays.

@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.9.78'
+const DAEMON_VERSION = '0.9.79'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -158,6 +158,27 @@ async function processId($: EngineInterface) {
     pid = Number(run?.stdout.trim()) || 0
   }
   return pid || undefined
+}
+// The terminal this session runs in, so a restart in the same pane is known as the same agent where several share a
+// folder: tmux's pane (a herdr terminal's id reaches every tmux pane inside it), else herdr's terminal id, else the
+// tty of the Claude Code process; '' when none can be told (no tty prints ? on Linux, ?? on macOS). Each of those is
+// handed out again (a closed tab's tty, tmux's pane ids after its server restarts), so the key ends in the pid of the
+// shell the pane started with, the topmost process on its tty: a restart in the same pane keeps it, a new tab doesn't.
+export const TERMINAL_SH = [
+  'y=$(ps -o tty= -p $PPID 2>/dev/null | tr -d " "); case "$y" in ""|"?"|"??") exit 0;; esac',
+  'if [ -n "$TMUX_PANE" ]; then t="tmux:$TMUX_PANE"; elif [ -n "$HC_TERMINAL_ID" ]; then t="hc:$HC_TERMINAL_ID"; else t="tty:$y"; fi',
+  'p=$PPID; i=0',
+  'while [ $i -lt 30 ]; do q=$(ps -o ppid= -p $p 2>/dev/null | tr -d " "); [ -n "$q" ] && [ "$q" -gt 1 ] || break; [ "$(ps -o tty= -p $q 2>/dev/null | tr -d " ")" = "$y" ] || break; p=$q; i=$((i+1)); done',
+  'echo "$t@$p"',
+].join('\n')
+let terminal: string | undefined
+async function terminalOf($: EngineInterface) {
+  if (terminal === undefined && onWindows($)) terminal = ''
+  if (terminal === undefined) {
+    const run = await $.process.run(['sh', '-c', TERMINAL_SH], { timeoutMs: 3000 }).catch(() => undefined)
+    terminal = run?.stdout.trim() || ''
+  }
+  return terminal || undefined
 }
 let cancelPoll: (() => void) | undefined
 let lastRoster = ''
@@ -419,6 +440,7 @@ async function announce($: EngineInterface, succeeds?: string) {
     summary: summary || undefined,
     plugin: DAEMON_VERSION,
     pid: await processId($),
+    terminal: await terminalOf($),
   })
   if (res.ok) {
     myName = res.data.name
