@@ -305,102 +305,256 @@ class PairingRules(unittest.TestCase):
         self.assertIsNone(reason)
 
 
-class TouchIdHelper(unittest.TestCase):
-    """The daemon trusts the helper's answer only with its nonce and HMAC back, and stops using a helper that changed
-    while its source didn't."""
-
-    def helper(self, body):
-        path = os.path.join(tempfile.mkdtemp(prefix="touchid-"), "peerlink-touchid")
-        with open(path, "w") as f:
-            f.write(f"#!{sys.executable}\nimport hashlib, hmac, json, sys\nreq = json.load(sys.stdin)\n{body}\n")
-        os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR)
-        return path
-
-    def run_helper(self, body):
-        alerts = []
-        with unittest.mock.patch.object(d, "TOUCHID_BIN", self.helper(body)), unittest.mock.patch.object(d, "owner_alert", alerts.append):
-            return d.touch_id("test"), alerts
-
-    def test_a_signed_yes_counts(self):
-        yes, alerts = self.run_helper(
-            "mac = hmac.new(bytes.fromhex(req['key']), (req['nonce'] + ':yes').encode(), hashlib.sha256).hexdigest()\n"
-            "print(json.dumps({'result': 'yes', 'nonce': req['nonce'], 'hmac': mac}))")
-        self.assertEqual((yes, alerts), (True, []))
-
-    def test_an_unsigned_yes_counts_for_nothing_and_alerts(self):
-        yes, alerts = self.run_helper("print(json.dumps({'result': 'yes', 'nonce': req['nonce'], 'hmac': 'x'}))")
-        self.assertFalse(yes)
-        self.assertEqual(len(alerts), 1)
-
-    def test_a_helper_changed_behind_its_source_is_not_used(self):
-        home = tempfile.mkdtemp(prefix="integrity-")
-        src, binary = os.path.join(home, "main.swift"), os.path.join(home, "peerlink-touchid")
-        for p, text in ((src, "source"), (binary, "built")):
-            with open(p, "w") as f:
-                f.write(text)
-        alerts = []
-        with unittest.mock.patch.multiple(d, TOUCHID_SRC=src, TOUCHID_BIN=binary, INTEGRITY_PATH=os.path.join(home, "i.json"),
-                                          owner_alert=alerts.append):
-            self.assertTrue(d.integrity_ok("helper"))
-            with open(binary, "w") as f:
-                f.write("swapped")
-            self.assertFalse(d.integrity_ok("helper"))
-            self.assertFalse(d.integrity_ok("helper"))  # still suspect: the swapped file isn't taken as normal
-            with open(src, "w") as f:
-                f.write("new source")
-            self.assertTrue(d.integrity_ok("helper"))  # an update rebuilt it
-        self.assertEqual(len(alerts), 2)
+SIGNED = ("mac = hmac.new(bytes.fromhex(req['key']), (req['nonce'] + ':' + result).encode(), hashlib.sha256).hexdigest()\n"
+          "print(json.dumps({'result': result, 'nonce': req['nonce'], 'hmac': mac}))")
 
 
-class TouchIdBuild(unittest.TestCase):
-    """The daemon builds the helper when it's missing or its source changed, records the build, and never rebuilds
-    over a helper that changed behind its source's back (that would hide the swap from integrity_ok)."""
+class TouchIdSetup(unittest.TestCase):
+    """A scratch helper, its source and integrity.json, with alerts collected and the platform taken as macOS."""
 
     def setUp(self):
-        self.home = tempfile.mkdtemp(prefix="touchid-build-")
+        self.home = tempfile.mkdtemp(prefix="touchid-")
         self.src, self.bin = os.path.join(self.home, "main.swift"), os.path.join(self.home, "bin", "peerlink-touchid")
+        self.integrity = os.path.join(self.home, "integrity.json")
         with open(self.src, "w") as f:
             f.write("source 1")
-        self.builds = []
+        self.alerts = []
+        for target, value in (("TOUCHID_SRC", self.src), ("TOUCHID_BIN", self.bin), ("INTEGRITY_PATH", self.integrity),
+                              ("owner_alert", self.alerts.append), ("_helper_alerted", set()),
+                              ("_touch_id_ready", [0.0, False])):
+            p = unittest.mock.patch.object(d, target, value)
+            p.start()
+            self.addCleanup(p.stop)
+        p = unittest.mock.patch.object(d.sys, "platform", "darwin")
+        p.start()
+        self.addCleanup(p.stop)
 
-    def fake_swiftc(self, cmd, **kw):
-        self.builds.append(cmd)
-        with open(cmd[cmd.index("-o") + 1], "w") as f:
-            f.write("built from " + open(cmd[-1]).read())
-        return subprocess.CompletedProcess(cmd, 0, "", "")
+    def write_helper(self, body):
+        os.makedirs(os.path.dirname(self.bin), exist_ok=True)
+        with open(self.bin, "w") as f:
+            f.write(f"#!{sys.executable}\nimport hashlib, hmac, json, sys\nreq = json.load(sys.stdin)\n{body}\n")
+        os.chmod(self.bin, 0o700)
 
-    def build(self):
-        alerts = []
-        with unittest.mock.patch.multiple(d, TOUCHID_SRC=self.src, TOUCHID_BIN=self.bin,
-                                          INTEGRITY_PATH=os.path.join(self.home, "i.json"), owner_alert=alerts.append), \
-                unittest.mock.patch.object(d.sys, "platform", "darwin"), \
-                unittest.mock.patch.object(d.shutil, "which", lambda name: "/usr/bin/" + name), \
-                unittest.mock.patch.object(d.subprocess, "run", self.fake_swiftc):
-            built = d.build_touch_id()
-            return built, d.integrity_ok("helper"), alerts
+    def record(self, **extra):
+        """As build_touch_id leaves it after building what's at the helper's path now."""
+        with open(self.integrity, "w") as f:
+            json.dump({"helper": d.file_sha(self.bin), "helper_src": d.file_sha(self.src), "helper_version": d.VERSION,
+                       **extra}, f)
 
-    def test_builds_once_then_again_only_when_the_source_changes(self):
-        self.assertEqual(self.build(), (True, True, []))
-        self.assertTrue(os.access(self.bin, os.X_OK))
-        self.assertEqual(self.build(), (False, True, []))
+
+class TouchIdHelper(TouchIdSetup):
+    """The daemon trusts the helper's answer only with its nonce and HMAC back, from a zero exit, as an object."""
+
+    def test_a_signed_yes_counts(self):
+        self.write_helper("result = 'yes'\n" + SIGNED)
+        self.assertEqual((d.touch_id("test"), self.alerts), (True, []))
+
+    def test_an_unsigned_yes_counts_for_nothing_and_alerts(self):
+        self.write_helper("print(json.dumps({'result': 'yes', 'nonce': req['nonce'], 'hmac': 'x'}))")
+        self.assertFalse(d.touch_id("test"))
+        self.assertEqual(len(self.alerts), 1)
+
+    def test_a_reply_that_isnt_an_object_counts_for_nothing_and_alerts(self):
+        for out in ("[]", "null", '"yes"', "{\"result\": [\"yes\"]}"):
+            self.write_helper(f"print({out!r})")
+            self.assertFalse(d.touch_id("test"), out)
+        self.assertEqual(len(self.alerts), 4)
+
+    def test_a_signed_yes_with_a_failing_exit_counts_for_nothing(self):
+        self.write_helper("result = 'yes'\n" + SIGNED + "\nsys.exit(1)")
+        self.assertFalse(d.touch_id("test"))
+
+    def test_a_helper_that_cant_ask_is_not_usable_so_a_pairing_nobody_can_approve_is_refused(self):
+        self.write_helper("result = 'unavailable'\n" + SIGNED)
+        self.record()
+        self.assertTrue(d.helper_trusted())
+        self.assertFalse(d.touch_id_usable())
+        with unittest.mock.patch.object(d, "owner_channel", lambda: ""):
+            code, out = d.pair_start("herdr")
+        self.assertEqual(code, 409)
+
+    def test_a_helper_that_can_ask_is_usable_and_the_probe_shows_no_dialog(self):
+        self.write_helper("result = 'ready' if req.get('probe') else 'yes'\nassert req.get('probe') or req.get('reason')\n" + SIGNED)
+        self.record()
+        self.assertTrue(d.touch_id_usable())
+
+    def test_an_unavailable_answer_marks_the_helper_unusable(self):
+        self.write_helper("result = 'ready' if req.get('probe') else 'unavailable'\n" + SIGNED)
+        self.record()
+        self.assertTrue(d.touch_id_usable())
+        self.assertFalse(d.touch_id("test"))
+        self.assertFalse(d.touch_id_usable())
+
+
+class TouchIdTrust(TouchIdSetup):
+    """Only a helper build_touch_id recorded is trusted; nothing else adopts one, and each alert is sent once."""
+
+    def test_an_unrecorded_helper_is_not_trusted_or_adopted(self):
+        self.write_helper("result = 'yes'\n" + SIGNED)
+        self.assertFalse(d.integrity_ok("helper"))
+        d.integrity_ok()  # the daemon's own check records the daemon, never the helper
+        self.assertFalse(d.integrity_ok("helper"))
+        self.assertNotIn("helper", d.read_integrity())
+        self.assertEqual(len(self.alerts), 1)
+        self.assertIn("Delete it and restart", self.alerts[0])
+
+    def test_a_helper_and_source_that_both_change_while_running_are_not_trusted(self):
+        self.write_helper("result = 'yes'\n" + SIGNED)
+        self.record()
+        self.assertTrue(d.integrity_ok("helper"))
+        self.write_helper("result = 'yes'  # swapped\n" + SIGNED)
         with open(self.src, "w") as f:
             f.write("source 2")
-        self.assertEqual(self.build(), (True, True, []))
-        self.assertEqual(open(self.bin).read(), "built from source 2")
-        self.assertEqual(len(self.builds), 2)
+        self.assertFalse(d.integrity_ok("helper"))
+        d.integrity_ok()
+        self.assertFalse(d.integrity_ok("helper"))
+        self.assertEqual(len(self.alerts), 1)  # said once, not on every check
 
-    def test_a_swapped_helper_is_not_rebuilt_over_and_is_not_used(self):
+    def test_a_source_changed_at_the_same_version_is_said_and_the_helper_isnt_used(self):
+        self.write_helper("result = 'yes'\n" + SIGNED)
+        self.record()
+        with open(self.src, "w") as f:
+            f.write("edited in place")
+        self.assertFalse(d.integrity_ok("helper"))
+        self.assertIn("source", self.alerts[0])
+
+    def test_a_source_changed_by_an_update_keeps_the_built_helper_until_it_rebuilds(self):
+        self.write_helper("result = 'yes'\n" + SIGNED)
+        self.record(helper_version="0.0.1")
+        with open(self.src, "w") as f:
+            f.write("the update's source")
+        self.assertTrue(d.integrity_ok("helper"))
+        self.assertEqual(self.alerts, [])
+
+
+class TouchIdBuild(TouchIdSetup):
+    """The daemon builds the helper with the real swiftc when there's no recorded build of this source, and never
+    rebuilds over a swap or builds a source changed in place."""
+
+    def setUp(self):
+        super().setUp()
+        self.builds, self.fail = [], False
+        self.swiftc = os.path.join(self.home, "swiftc")
+
+    def fake_run(self, cmd, **kw):
+        if cmd[0] == "/usr/bin/xcode-select":
+            return subprocess.CompletedProcess(cmd, 0, "/Library/Developer/CommandLineTools\n", "")
+        if cmd[0] == "/usr/bin/xcrun":
+            self.assertNotIn("DEVELOPER_DIR", kw["env"])
+            return subprocess.CompletedProcess(cmd, 0, (self.home if "--show-sdk-path" in cmd else sys.executable) + "\n", "")
+        self.builds.append(cmd)
+        if self.fail:
+            return subprocess.CompletedProcess(cmd, 1, "", "error: no toolchain")
+        with open(cmd[-1]) as src, open(cmd[cmd.index("-o") + 1], "w") as f:
+            f.write("built from " + src.read())
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    def build(self, version=None):
+        with unittest.mock.patch.object(d.subprocess, "run", self.fake_run), \
+                unittest.mock.patch.dict(d.os.environ, {"DEVELOPER_DIR": "/tmp/evil"}), \
+                unittest.mock.patch.object(d, "VERSION", version or d.VERSION):
+            return d.build_touch_id(), d.integrity_ok("helper")
+
+    def built(self):
+        with open(self.bin) as f:
+            return f.read()
+
+    def test_builds_once_with_swiftc_by_absolute_path(self):
+        self.assertEqual(self.build(), (True, True))
+        self.assertEqual(self.builds[0][:3], [sys.executable, "-sdk", self.home])  # what xcrun answered, never PATH
+        self.assertTrue(os.access(self.bin, os.X_OK))
+        self.assertEqual(self.build(), (False, True))
+        self.assertEqual((len(self.builds), self.alerts), (1, []))
+
+    def test_no_command_line_tools_means_no_build_and_no_swiftc_run(self):
+        def no_tools(cmd, **kw):
+            self.builds.append(cmd)
+            return subprocess.CompletedProcess(cmd, 2, "", "xcode-select: error: no developer tools")
+        with unittest.mock.patch.object(d.subprocess, "run", no_tools):
+            self.assertFalse(d.build_touch_id())
+        self.assertEqual([c[0] for c in self.builds], ["/usr/bin/xcode-select"])
+
+    def test_an_update_that_changes_the_source_rebuilds_and_says_so(self):
+        self.build("0.0.1")
+        with open(self.src, "w") as f:
+            f.write("source 2")
+        self.assertEqual(self.build(), (True, True))
+        self.assertEqual(self.built(), "built from source 2")
+        self.assertEqual(len(self.alerts), 1)
+        self.assertIn("rebuilt", self.alerts[0])
+
+    def test_a_source_changed_in_place_is_not_built(self):
+        self.build()
+        with open(self.src, "w") as f:
+            f.write("edited in place")
+        self.assertEqual(self.build(), (False, False))
+        self.assertEqual(self.built(), "built from source 1")
+        self.assertEqual(len(self.builds), 1)
+        self.assertEqual(len(self.alerts), 1)
+
+    def test_a_failed_build_keeps_the_old_helper_and_the_next_start_tries_again(self):
+        self.build("0.0.1")
+        with open(self.src, "w") as f:
+            f.write("source 2")
+        self.fail = True
+        self.assertEqual(self.build(), (False, True))  # the old build stays usable meanwhile
+        d.integrity_ok()  # nothing marks the new source as built
+        self.fail = False
+        self.assertEqual(self.build(), (True, True))
+        self.assertEqual(self.built(), "built from source 2")
+
+    def test_a_swapped_helper_is_not_rebuilt_over_and_deleting_it_rebuilds(self):
         self.build()
         with open(self.bin, "w") as f:
             f.write("swapped")
-        built, ok, alerts = self.build()
-        self.assertEqual((built, ok, len(alerts)), (False, False, 1))
-        self.assertEqual(open(self.bin).read(), "swapped")
+        self.assertEqual(self.build(), (False, False))
+        self.assertEqual(self.built(), "swapped")
+        self.assertIn("Delete it and restart", self.alerts[0])
+        os.remove(self.bin)  # what the alert says to do
+        self.assertEqual(self.build(), (True, True))
+        self.assertEqual(self.built(), "built from source 1")
 
-    def test_a_deleted_helper_is_rebuilt(self):
+    def test_an_unrecorded_helper_is_replaced_by_a_build(self):
+        self.write_helper("result = 'yes'\n" + SIGNED)
+        self.assertEqual(self.build(), (True, True))
+        self.assertEqual(self.built(), "built from source 1")
+
+    def test_a_build_keeps_what_the_daemon_recorded_meanwhile(self):
+        with open(self.integrity, "w") as f:
+            json.dump({"version": d.VERSION, "daemon": "abc"}, f)
         self.build()
-        os.remove(self.bin)
-        self.assertEqual(self.build(), (True, True, []))
+        rec = d.read_integrity()
+        self.assertEqual((rec["version"], rec["daemon"], rec["helper_version"]), (d.VERSION, "abc", d.VERSION))
+
+
+class PromptText(unittest.TestCase):
+    """Blank-looking characters can pad a prompt, so they're shown as \\uXXXX, in step-ups and pairings alike."""
+
+    BLANKS = "\u3164\u2800\u115f\u034f" + "".join(chr(c) for c in range(0x2000, 0x200B))
+
+    def test_plain_shows_each_blank_looking_character(self):
+        for ch in self.BLANKS:
+            self.assertEqual(d.plain(f"a{ch}b"), f"a\\u{ord(ch):04x}b")
+        self.assertEqual(d.plain("a b\nc"), "a b\nc")
+
+    def test_the_pairing_reason_and_name_carry_no_blanks(self):
+        for x in (d.owner_pairings, d.pair_starts):
+            x.clear()
+        asked = []
+        with unittest.mock.patch.object(d, "owner_ask", lambda rid, text, reason: asked.append((text, reason))), \
+                unittest.mock.patch.object(d, "owner_channel", lambda: "123"):
+            d.pair_start("herdr" + self.BLANKS + "x")
+        text, reason = asked[0]
+        self.assertIn("herdrx asks", reason)
+        for ch in self.BLANKS:
+            self.assertNotIn(ch, reason + text)
+        with unittest.mock.patch.object(d, "plain", lambda t: "PLAIN"), \
+                unittest.mock.patch.object(d, "owner_ask", lambda rid, text, reason: asked.append((text, reason))), \
+                unittest.mock.patch.object(d, "owner_channel", lambda: "123"):
+            d.owner_pairings.clear()
+            d.pair_starts.clear()
+            d.pair_start("herdr")
+        self.assertEqual(asked[-1][1], "PLAIN")  # the pairing reason goes through plain()
 
 
 if __name__ == "__main__":

@@ -3,15 +3,19 @@
 // stdin:  {"reason": "...", "nonce": "<hex>", "key": "<hex>"}
 // stdout: {"result": "yes" | "no" | "unavailable", "nonce": "<same>", "hmac": HMAC-SHA256(key, nonce + ":" + result)}
 //
-// The daemon builds this file with swiftc when it starts and its source has changed. It is never shipped as a
-// binary. The key is used once and never stored, so an answer that some other program prints can't be signed.
+// With {"probe": true} in place of a reason, it shows no dialog and answers "ready" or "unavailable": whether it
+// could ask in this session at all.
+//
+// The daemon builds this file with swiftc when it starts and has no recorded build of this source. It is never
+// shipped as a binary. The key is used once and never stored, so an answer that some other program prints can't be signed.
 
 import CryptoKit
 import Foundation
 import LocalAuthentication
 
 struct Request: Decodable {
-    let reason: String
+    let reason: String?
+    let probe: Bool?
     let nonce: String
     let key: String
 }
@@ -41,7 +45,7 @@ func answer(_ result: String, _ req: Request, _ key: Data) -> Never {
 
 let input = FileHandle.standardInput.readDataToEndOfFile()
 guard let req = try? JSONDecoder().decode(Request.self, from: input), let key = hexBytes(req.key), key.count >= 16,
-      !req.nonce.isEmpty, !req.reason.isEmpty else {
+      !req.nonce.isEmpty, req.probe == true || !(req.reason ?? "").isEmpty else {
     FileHandle.standardError.write(Data("peerlink-touchid: expected {reason, nonce, key} on stdin\n".utf8))
     exit(2)
 }
@@ -49,14 +53,18 @@ guard let req = try? JSONDecoder().decode(Request.self, from: input), let key = 
 let context = LAContext()
 var err: NSError?
 // deviceOwnerAuthentication: Touch ID, or your password when there's no sensor or it isn't enrolled.
-guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &err) else {
+let canAsk = context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &err)
+if req.probe == true {
+    answer(canAsk ? "ready" : "unavailable", req, key)
+}
+guard canAsk else {
     FileHandle.standardError.write(Data("peerlink-touchid: \(err?.localizedDescription ?? "can't ask")\n".utf8))
     answer("unavailable", req, key)
 }
 
 let done = DispatchSemaphore(value: 0)
 var yes = false
-context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: req.reason) { ok, _ in
+context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: req.reason ?? "") { ok, _ in
     yes = ok
     done.signal()
 }

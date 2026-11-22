@@ -6367,6 +6367,10 @@ TOUCHID_SRC = os.path.join(_here, "touchid", "main.swift")
 TOUCHID_BIN = os.path.join(HOME, "bin", "peerlink-touchid")
 INTEGRITY_PATH = os.path.join(HOME, "integrity.json")
 _touch_id = threading.Lock()
+_integrity = threading.Lock()
+_helper_alerted = set()        # what an alert about the helper or daemon was already sent for
+_touch_id_ready = [0.0, False]  # when the helper was last probed, and whether it can ask
+TOUCHID_READY_S = 300
 
 
 def sha256_hex(text):
@@ -6500,7 +6504,7 @@ def pair_start(device):
     """A client asks to pair: (code, body). Anyone may ask, an agent too; only you approve, and only when the client
     shows the code the prompt names. One pending at a time: a second start cancels both, since one of them may be an
     agent racing you. At most PAIR_STARTS_PER_HOUR an hour."""
-    device = re.sub(r"[^\w .-]", "", str(device or ""))[:40].strip() or "a client"
+    device = "".join(c for c in re.sub(r"[^\w .-]", "", str(device or "")) if not blankish(c))[:40].strip() or "a client"
     # Nobody could approve it: no Discord channel to ask in and no Touch ID helper. Say so now, rather than leave
     # the client waiting on a code nobody is asked about.
     canned = SCRATCH_HOME and os.environ.get("PEERLINK_TEST_PRESENCE") in ("yes", "no")
@@ -6537,7 +6541,7 @@ def pair_start(device):
     log("owner", "pairing", pid, "started by", device)
     owner_ask(pid, f"🔐 **{device} asks to manage peerlink as you.**\nApprove only if {device} is showing the code "
               f"**{shown}** right now. If it isn't, press Deny: something else may be trying to pair as you.",
-              f"{device} asks to manage peerlink (code {shown})")
+              plain(f"{device} asks to manage peerlink (code {shown})"))
     return 200, {"pair": pid, "code": code, "secret": secret, "expires_in_s": PAIR_TTL_S}
 
 
@@ -6615,10 +6619,20 @@ def show(value):
 
 def plain(text):
     """Text for an approval prompt, read as it acts: control and format characters (bidi overrides, zero-width
-    ones, line and paragraph separators) shown as \\uXXXX instead of reordering or hiding what's around them.
-    Newlines stay."""
-    return "".join(ch if ch == "\n" or unicodedata.category(ch) not in ("Cc", "Cf", "Zl", "Zp", "Cs", "Co", "Cn")
+    ones, line and paragraph separators) and blank-looking ones (fillers, odd-width spaces) shown as \\uXXXX instead
+    of reordering, hiding or padding what's around them. Newlines and plain spaces stay."""
+    return "".join(ch if ch == "\n" or not (unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp", "Cs", "Co", "Cn")
+                                             or blankish(ch))
                    else f"\\u{ord(ch):04x}" for ch in str(text))
+
+
+# Characters that draw as nothing, or as a blank, without being a format character: fillers and the blank braille
+# cell can pad a prompt so the part that matters scrolls out of view.
+BLANKISH = {0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x2800, 0x3164, 0xFFA0}
+
+
+def blankish(ch):
+    return ord(ch) in BLANKISH or (unicodedata.category(ch) == "Zs" and ch != " ")
 
 
 def exact_call(method, rest, body):
@@ -6738,90 +6752,182 @@ def step_up_status(tok, sid):
 
 
 def touch_id_usable():
-    """The helper is there, built from the source beside this file, and hasn't changed behind its source's back."""
-    if sys.platform != "darwin" or not os.access(TOUCHID_BIN, os.X_OK):
+    """The helper is the one build_touch_id built and recorded, and it can ask here (LocalAuthentication works in
+    this session). One that only ever answers "unavailable" doesn't count, so a pairing nobody can approve is
+    refused up front."""
+    if sys.platform != "darwin" or not os.access(TOUCHID_BIN, os.X_OK) or not helper_trusted():
         return False
-    return integrity_ok("helper")
+    return touch_id_ready()
+
+
+def touch_id_ready():
+    """Whether the helper can ask, from a probe that shows no dialog. Kept for TOUCHID_READY_S."""
+    when, ready = _touch_id_ready
+    if time.time() - when < TOUCHID_READY_S:
+        return ready
+    ready = ask_helper({"probe": True}, 15) == "ready"
+    _touch_id_ready[:] = [time.time(), ready]
+    return ready
+
+
+def ask_helper(req, timeout):
+    """Run the helper with `req` plus a fresh nonce and one-time HMAC key on stdin: its result, or None. It answers
+    {"result", "nonce", "hmac"}, where hmac is HMAC-SHA256(key, nonce + ":" + result). A non-zero exit, or a reply
+    that isn't an object with the right nonce and HMAC, counts for nothing."""
+    nonce, key = secrets.token_hex(16), secrets.token_bytes(32)
+    try:
+        r = subprocess.run([TOUCHID_BIN], input=json.dumps({**req, "nonce": nonce, "key": key.hex()}),
+                           capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as err:
+        log("owner", "Touch ID helper failed:", err)
+        return None
+    if r.returncode != 0:
+        log("owner", "Touch ID helper exited with", r.returncode, (r.stderr or "").strip()[:200])
+        return None
+    try:
+        out = json.loads(r.stdout or "")
+    except ValueError:
+        out = None
+    result = out.get("result") if isinstance(out, dict) else None
+    if isinstance(result, str):
+        want = hmac.new(key, f"{nonce}:{result}".encode(), hashlib.sha256).hexdigest()
+        if out.get("nonce") == nonce and hmac.compare_digest(str(out.get("hmac", "")), want):
+            return result
+    owner_alert("The Touch ID helper answered without the right nonce or HMAC, so its answer was ignored. "
+                f"Something may have replaced {tilde_path(TOUCHID_BIN)}.")
+    return None
 
 
 def touch_id(reason):
-    """Ask for Touch ID (or your password) through the helper: True on a press, False otherwise. The helper gets a
-    nonce and a one-time HMAC key on stdin and answers {"result", "nonce", "hmac"}: hmac is HMAC-SHA256(key,
-    nonce + ":" + result). A reply without the right nonce and HMAC counts for nothing."""
+    """Ask for Touch ID (or your password) through the helper: True on a press, False otherwise."""
     if not _touch_id.acquire(blocking=False):
         return False
     try:
-        nonce, key = secrets.token_hex(16), secrets.token_bytes(32)
-        try:
-            r = subprocess.run([TOUCHID_BIN], input=json.dumps({"reason": reason, "nonce": nonce, "key": key.hex()}),
-                               capture_output=True, text=True, timeout=90)
-            out = json.loads(r.stdout or "{}")
-        except (OSError, subprocess.SubprocessError, ValueError) as err:
-            log("owner", "Touch ID helper failed:", err)
-            return False
-        result = str(out.get("result", ""))
-        want = hmac.new(key, f"{nonce}:{result}".encode(), hashlib.sha256).hexdigest()
-        if out.get("nonce") != nonce or not hmac.compare_digest(str(out.get("hmac", "")), want):
-            owner_alert("The Touch ID helper answered without the right nonce or HMAC, so its answer was ignored. "
-                        f"Something may have replaced {tilde_path(TOUCHID_BIN)}.")
-            return False
+        result = ask_helper({"reason": reason}, 90)
+        if result == "unavailable":
+            _touch_id_ready[:] = [time.time(), False]
         return result == "yes"
     finally:
         _touch_id.release()
 
 
-def integrity_now():
-    return {"version": VERSION, "daemon": file_sha(os.path.abspath(__file__)), "helper": file_sha(TOUCHID_BIN),
-            "helper_src": file_sha(TOUCHID_SRC)}
+def read_integrity():
+    try:
+        with open(INTEGRITY_PATH) as f:
+            rec = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return rec if isinstance(rec, dict) else {}
+
+
+def record_integrity(**changes):
+    """Update some keys of integrity.json, re-read under a lock so two writers don't put back each other's old values."""
+    with _integrity:
+        try:
+            write_json(INTEGRITY_PATH, {**read_integrity(), **changes}, backup=False)
+        except OSError as err:
+            log("could not record integrity:", err)
+
+
+def helper_alert(key, text):
+    """An alert about the helper, once per thing it's about, rather than on every check."""
+    if key not in _helper_alerted:
+        _helper_alerted.add(key)
+        owner_alert(text)
+
+
+def helper_trusted():
+    """Only a helper that build_touch_id built and recorded counts, and only while it's that same file. A source that
+    changed while peerlink's version didn't means someone edited it in place, so the helper isn't used then either.
+    A source that changed with the version is an update whose build hasn't happened yet: the recorded helper stays."""
+    have, rec = file_sha(TOUCHID_BIN), read_integrity()
+    if not have:
+        return False
+    path = tilde_path(TOUCHID_BIN)
+    if not rec.get("helper"):
+        helper_alert(("unrecorded", have), f"There's a Touch ID helper at {path} that peerlink has no record of building, "
+                     "so it isn't used. Delete it and restart peerlink to build it from source.")
+        return False
+    if have != rec["helper"]:
+        helper_alert(("swapped", have), f"The Touch ID helper ({path}) isn't the one peerlink built, so it isn't used. "
+                     "If you didn't replace it, something may have. Delete it and restart peerlink to build it from source.")
+        return False
+    src = file_sha(TOUCHID_SRC)
+    if src != rec.get("helper_src") and rec.get("helper_version") == VERSION:
+        helper_alert(("source", src), f"The Touch ID helper's source ({tilde_path(TOUCHID_SRC)}) changed but peerlink's "
+                     f"version ({VERSION}) didn't, so the helper isn't used or rebuilt. If you didn't edit it, something may have.")
+        return False
+    return True
 
 
 def integrity_ok(part=None):
-    """Compare this daemon's file and the Touch ID helper with what was recorded, alert on Discord about a change that
-    no update explains, and record the rest. The daemon changing while VERSION didn't, or the helper changing while
-    its source didn't, is what someone editing them in place looks like. False when `part` is one of those."""
-    now = integrity_now()
+    """Check this daemon's file and the Touch ID helper, alerting on Discord about a change no update explains. The
+    daemon changing while VERSION didn't is what someone editing it in place looks like; the helper is checked by
+    helper_trusted. Only build_touch_id records the helper. False when `part` is the one that's suspect."""
+    if part == "helper":
+        return helper_trusted()
+    daemon, rec = file_sha(os.path.abspath(__file__)), read_integrity()
+    if rec.get("daemon") and rec.get("version") == VERSION and daemon != rec["daemon"]:
+        helper_alert(("daemon", daemon), f"peerlinkd.py changed but its version ({VERSION}) didn't. If you didn't edit it, "
+                     "something may have.")
+        return part != "daemon"
+    if (rec.get("version"), rec.get("daemon")) != (VERSION, daemon):
+        record_integrity(version=VERSION, daemon=daemon)
+    if part is None and os.path.exists(TOUCHID_BIN):
+        helper_trusted()
+    return True
+
+
+def find_swiftc():
+    """The real swiftc by absolute path and the macOS SDK it builds against, or None without the Xcode command-line
+    tools. /usr/bin/swiftc is a shim on every Mac that pops the install dialog when the tools are missing;
+    xcode-select -p and xcrun --find stay quiet. The environment variables that point xcrun elsewhere are left out,
+    so the toolchain is the one xcode-select names, like PATH isn't used."""
+    env = {k: v for k, v in os.environ.items() if k not in ("DEVELOPER_DIR", "SDKROOT", "TOOLCHAINS")}
     try:
-        with open(INTEGRITY_PATH) as f:
-            old = json.load(f)
-    except (OSError, ValueError):
-        old = {}
-    bad = []
-    if old.get("daemon") and old.get("version") == VERSION and now["daemon"] != old["daemon"]:
-        bad.append("daemon")
-        owner_alert(f"peerlinkd.py changed but its version ({VERSION}) didn't. If you didn't edit it, something may have.")
-    if old.get("helper") and now["helper"] and now["helper"] != old["helper"] and now["helper_src"] == old.get("helper_src"):
-        bad.append("helper")
-        owner_alert(f"The Touch ID helper ({tilde_path(TOUCHID_BIN)}) changed but its source didn't, so it isn't used. "
-                    "Reinstall peerlink to rebuild it.")
-    keep = {**now, **{k: old[k] for k in bad if k in old}}  # a suspect file isn't recorded as the new normal
-    if keep != old:
-        try:
-            write_json(INTEGRITY_PATH, keep, backup=False)
-        except OSError as err:
-            log("could not record integrity:", err)
-    return part not in bad
+        if subprocess.run(["/usr/bin/xcode-select", "-p"], capture_output=True, timeout=10, env=env).returncode != 0:
+            return None
+        r = subprocess.run(["/usr/bin/xcrun", "--find", "swiftc"], capture_output=True, text=True, timeout=30, env=env)
+        sdk = subprocess.run(["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path"], capture_output=True, text=True,
+                             timeout=30, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    path, sdk_path = r.stdout.strip(), sdk.stdout.strip()
+    if r.returncode != 0 or sdk.returncode != 0 or not os.path.isabs(path) or not os.access(path, os.X_OK) \
+            or not os.path.isdir(sdk_path):
+        return None
+    return path, sdk_path, env
 
 
 def build_touch_id():
-    """Build the Touch ID helper from the source beside this file, when it's missing or its source changed since the
-    last build (an install or update). It's built here, never shipped as a binary. The new build is recorded in
-    integrity.json with its source, so integrity_ok takes it as the new normal rather than a swap."""
-    if sys.platform != "darwin" or not os.path.exists(TOUCHID_SRC) or not shutil.which("swiftc"):
+    """Build the Touch ID helper from the source beside this file when there's no recorded build of this source: a
+    first install, an update that changed the source, a failed build earlier, or a helper you deleted. It's built
+    here, never shipped as a binary, and only this records a helper as trusted.
+    - A recorded helper of this source is left alone, swapped or not: rebuilding over a swap would hide it.
+    - A source that changed while peerlink's version didn't isn't built: helper_trusted alerts on it.
+    - A rebuild because an update changed the source is said on Discord, so a changed source never goes quiet."""
+    if sys.platform != "darwin" or not os.path.exists(TOUCHID_SRC):
         return False
-    src = file_sha(TOUCHID_SRC)
-    old = read_json(INTEGRITY_PATH, {}) or {}
-    # A helper that changed while its source didn't is left alone: integrity_ok alerts on it and stops using it.
-    # Rebuilding over it here would hide the swap.
-    if os.access(TOUCHID_BIN, os.X_OK) and old.get("helper_src") == src:
+    src, rec = file_sha(TOUCHID_SRC), read_integrity()
+    if os.access(TOUCHID_BIN, os.X_OK) and rec.get("helper") and rec.get("helper_src") == src:
         return False
-    os.makedirs(os.path.dirname(TOUCHID_BIN), exist_ok=True)
+    if rec.get("helper_src") and rec["helper_src"] != src and rec.get("helper_version") == VERSION:
+        helper_trusted()
+        return False
+    found = find_swiftc()
+    if not found:
+        log("owner", "no Xcode command-line tools, so no Touch ID helper: Discord is how you approve")
+        return False
     tmp = f"{TOUCHID_BIN}.build-{os.getpid()}"
     try:
-        r = subprocess.run(["swiftc", "-O", "-o", tmp, TOUCHID_SRC], capture_output=True, text=True, timeout=300)
+        os.makedirs(os.path.dirname(TOUCHID_BIN), exist_ok=True)
+        swiftc, sdk, env = found
+        r = subprocess.run([swiftc, "-sdk", sdk, "-O", "-o", tmp, TOUCHID_SRC], capture_output=True, text=True,
+                           timeout=300, env=env)
         if r.returncode != 0:
             log("owner", "Touch ID helper didn't build:", (r.stderr or r.stdout).strip()[:500])
             return False
-        if file_sha(TOUCHID_SRC) != src:  # the source changed while it built: build again next start
+        if file_sha(TOUCHID_SRC) != src:  # the source changed while it built: nothing recorded, so the next start retries
             return False
         os.chmod(tmp, 0o700)
         os.replace(tmp, TOUCHID_BIN)
@@ -6829,19 +6935,26 @@ def build_touch_id():
         log("owner", "Touch ID helper didn't build:", err)
         return False
     finally:
-        if os.path.exists(tmp):
+        try:
             os.remove(tmp)
-    try:
-        write_json(INTEGRITY_PATH, {**old, "helper": file_sha(TOUCHID_BIN), "helper_src": src}, backup=False)
-    except OSError as err:
-        log("could not record integrity:", err)
+        except OSError:
+            pass
+    record_integrity(helper=file_sha(TOUCHID_BIN), helper_src=src, helper_version=VERSION)
+    _touch_id_ready[:] = [0.0, False]
+    _helper_alerted.clear()
+    if rec.get("helper_src") and rec["helper_src"] != src:
+        owner_alert(f"peerlink {VERSION} rebuilt the Touch ID helper, because this update changed its source. If you "
+                    "didn't just update peerlink, something may have changed it.")
     log("owner", "built the Touch ID helper at", tilde_path(TOUCHID_BIN))
     return True
 
 
 def start_integrity():
     if not SCRATCH_HOME:  # a test's daemon doesn't build: its tests stub the helper
-        build_touch_id()
+        try:
+            build_touch_id()
+        except Exception as err:  # the daemon's own check below must still run
+            log("owner", "Touch ID helper build failed:", err)
     time.sleep(20)  # once the bot is up, so an alert reaches Discord
     integrity_ok()
 
