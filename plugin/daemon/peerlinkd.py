@@ -5684,15 +5684,19 @@ def herdr_nest(smap, parents):
             src = f.read()
     except OSError:
         return  # no herdr app here
-    stamp = hashlib.sha256(src.encode() + json.dumps(herdr_mod.PATCHES).encode()).hexdigest()[:16]
+    stamp = hashlib.sha256(src.encode() + json.dumps([herdr_mod.PATCHES, path]).encode()).hexdigest()[:16]
     try:
         with open(os.path.join(dst_dir, ".peerlink")) as f:
-            if f.read().strip() == stamp:
-                return
+            made = f.read().strip()
     except OSError:
-        pass
-    patched, missing = herdr_mod.patch(src)
+        made = ""
+    if made == stamp:
+        herdr_point_layouts(app_home, herdr_mod.MOD)
+        return
+    patched, missing = herdr_mod.patch(src, path)
     if patched is None:
+        if not made:  # no copy to show: the layouts show herdr's own
+            herdr_point_layouts(app_home, "spaces")
         if herdr_nest_warned[0] != stamp:
             herdr_nest_warned[0] = stamp
             log(f"herdr nest: the herdr app's spaces mod changed and peerlink's patch no longer fits ({missing}); its sidebar stays flat")
@@ -5709,6 +5713,30 @@ def herdr_nest(smap, parents):
         log(f"herdr nest: made the {herdr_mod.MOD} mod from the herdr app's spaces mod")
     except OSError as err:
         log("herdr nest: couldn't make the mod:", err)
+        return
+    herdr_point_layouts(app_home, herdr_mod.MOD)
+
+
+def herdr_point_layouts(app_home, mod):
+    """Every herdr layout's spaces sidebar shows `mod`: peerlink's nested copy, or herdr's own when there's no copy."""
+    folder = os.path.join(app_home, "layouts")
+    try:
+        names = [n for n in os.listdir(folder) if n.endswith(".json")]
+    except OSError:
+        return
+    for name in names:
+        p = os.path.join(folder, name)
+        try:
+            with open(p) as f:
+                text = f.read()
+            new = herdr_mod.point_layout(text, mod)
+            if new != text:
+                with open(p + ".tmp", "w") as f:
+                    f.write(new)
+                os.replace(p + ".tmp", p)
+                log(f"herdr nest: the {name[:-5]} layout's spaces sidebar now shows {mod}")
+        except OSError as err:
+            log("herdr nest: couldn't change a layout:", err)
 
 
 herdr_nest_warned = [""]

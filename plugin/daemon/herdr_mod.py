@@ -1,12 +1,15 @@
 """The herdr app's spaces sidebar, nested like peerlink's spaces.
 
 herdr's own `spaces` mod nests a worktree's space under its repo's and keeps the order it shows by moving spaces.
-peerlink makes a copy of it, `peerlink-spaces` (herdr's mod.clone, never a copy of its code in this repo), and patches
-the copy so it also reads peerlink's space tree, a file the daemon writes, and nests each space under its parent.
-herdr's sync of that order (space.move) does the rest. When herdr ships a new spaces mod the copy is made again.
+The daemon copies it, from the herdr app's own folder on this machine (none of herdr's code is in this repo), to
+`peerlink-spaces`, and patches the copy so it also reads peerlink's space tree, a file the daemon writes, and nests
+each space under its parent. herdr's sync of that order (space.move) does the rest. When herdr ships a new spaces mod
+the copy is made again. A layout shows a mod by name, so the daemon points the layouts' spaces block at the copy
+(and back at herdr's own if it ever can't make one); herdr's own spaces mod stays installed and unused.
 """
 
 import json
+import re
 
 MOD = "peerlink-spaces"
 TREE_FILE = "herdr-tree.json"  # in peerlink's home: {"parents": {herdr space id: parent herdr space id}}
@@ -14,12 +17,12 @@ TREE_FILE = "herdr-tree.json"  # in peerlink's home: {"parents": {herdr space id
 # The nesting, added to the cloned mod. `out` holds rows {w, i, g, tree} in order; a row with `tree` is a worktree
 # under the row before it, and moves with it.
 NEST_JS = r'''
-// peerlink: nest spaces as peerlink nests its spaces (the tree comes from ~/.peerlink/herdr-tree.json).
+// peerlink: nest spaces as peerlink nests its spaces (the tree comes from the file the peerlink daemon writes).
 let peerlinkTree = { parents: {} }, peerlinkRead = 0;
 function peerlinkLoad() {
   if (Date.now() - peerlinkRead < 3000) return;
   peerlinkRead = Date.now();
-  readTextFile(home() + "/.peerlink/herdr-tree.json").then((t) => {
+  readTextFile(PEERLINK_TREE).then((t) => {
     try { const got = JSON.parse(t || "{}"); if (got && typeof got.parents === "object") peerlinkTree = got; } catch (e) {}
   }, () => {});
 }
@@ -52,7 +55,7 @@ function peerlinkNest(out) {
 # (what to find in herdr's spaces mod, what it becomes). Each must be found exactly once, or the copy isn't made.
 PATCHES = [
     ('import { spaces, machines, panes, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window, layout } from "herdr";',
-     'import { spaces, machines, panes, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window, layout, readTextFile, home } from "herdr";'
+     'import { spaces, machines, panes, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window, layout, readTextFile } from "herdr";'
      + NEST_JS),
     ("    const out = [];\n    const placed = new Set();", "    let out = [];\n    const placed = new Set();"),
     ("    // Simulate the batch so later indexes include earlier moves.", "    out = peerlinkNest(out);\n    // Simulate the batch so later indexes include earlier moves."),
@@ -62,13 +65,22 @@ PATCHES = [
 ]
 
 
-def patch(src):
-    """herdr's spaces mod made into peerlink's: (patched source, None), or (None, the first piece it couldn't find)."""
+def patch(src, tree_path):
+    """herdr's spaces mod made into peerlink's, reading the tree at tree_path: (patched source, None), or (None, the
+    first piece it couldn't find)."""
     for old, new in PATCHES:
         if src.count(old) != 1:
             return None, old.strip().splitlines()[0][:80]
         src = src.replace(old, new)
-    return src, None
+    return src.replace("readTextFile(PEERLINK_TREE)", "readTextFile(" + json.dumps(tree_path) + ")"), None
+
+
+SPACES_BLOCK = re.compile(r'("mod"\s*:\s*")(spaces|peerlink-spaces)(")')
+
+
+def point_layout(text, to):
+    """A layout file's text with its spaces sidebar block showing mod `to` ('peerlink-spaces' or 'spaces')."""
+    return SPACES_BLOCK.sub(lambda m: m.group(1) + to + m.group(3), text)
 
 
 def tree(smap, parents):
