@@ -141,5 +141,25 @@ class SharedFolder(unittest.TestCase):
         self.assertEqual(self.name(a2)["agent"], agent_a)
 
 
+    def test_a_second_process_in_a_running_agents_pane_doesnt_take_the_pane_from_it(self):
+        a = self.start("hc:t1@100", pid=os.getpid())
+        self.rename(a, "lead")
+        agent_a = self.name(a)["agent"]
+        nested = self.start("hc:t1@100", pid=os.getpid())  # a second claude in the same shell (ctrl-Z)
+        self.assertNotEqual(self.name(nested)["agent"], agent_a)
+        self.stop(nested)
+        self.stop(a)
+        again = self.start("hc:t1@100", pid=os.getpid())
+        self.assertEqual(self.name(again)["agent"], agent_a)
+
+    def test_without_a_terminal_a_numbered_name_beside_its_base_still_finds_its_agent(self):
+        a, b = self.start(), self.start()  # the folder's name, and name-2
+        agent_b = self.name(b)["agent"]
+        self.stop(b)
+        again = self.start()  # name-2 again, while the first still runs
+        self.assertEqual(self.name(again)["agent"], agent_b)
+        self.assertNotEqual(self.name(again)["agent"], self.name(a)["agent"])
+
+
 if __name__ == "__main__":
     unittest.main()

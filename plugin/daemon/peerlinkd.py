@@ -34,7 +34,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.80"
+VERSION = "0.9.81"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -4070,7 +4070,7 @@ def pid_alive(pid):
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    except OSError:
+    except (OSError, OverflowError):
         return True
     return True
 
@@ -4111,6 +4111,10 @@ def agent_for(rec, old=None):
             stand_ins = {n for n in names if (m := re.fullmatch(r"(.+)-\d+", n)) and m.group(1) in live}
             default = {folder_name(cwd).lower(), os.path.basename(cwd.rstrip("/\\")).lower()} - {""}
             known = named(names - stand_ins - (default if term and others else set()))
+            # With no terminal (Windows) a name is all there is: name-2 still finds the agent going by name-2 now, but
+            # never one renamed since, whose name-2 was only the stand-in it registered under.
+            if not known and not term:
+                known = [a for a in free if a["name"].lower() in stand_ins]
         if known:
             aid = max(known, key=lambda a: a.get("seen", 0))["id"]
         else:
@@ -4119,7 +4123,11 @@ def agent_for(rec, old=None):
     a = agents[aid]
     before = a.get("sid") if a.get("sid") != rec["id"] else None
     a.update(name=display_name(rec), reg=rec.get("name") or "", cwd=rec.get("cwd", ""), sid=rec["id"], seen=now)
-    if rec.get("terminal"):
+    # A key another agent's running session holds (a second claude in the same shell, after ctrl-Z) isn't this one's
+    # to keep: the pane is that agent's, and a restart there should come back as it.
+    held = any(r["id"] != rec["id"] and r.get("agent") != aid and r.get("terminal") == rec.get("terminal")
+               and is_live(r) and pid_alive(r.get("pid")) for r in sessions.values())
+    if rec.get("terminal") and not held:
         a["terminal"] = rec["terminal"]
     rec["agent"] = agent_of[rec["id"]] = aid
     # The spawn that started it knows its agent for good: agent_of forgets old sessions.
