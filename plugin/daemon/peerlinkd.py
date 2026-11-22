@@ -47,10 +47,11 @@ import agentslink  # noqa: E402
 from cronlib import cron_next, parse_cron  # noqa: E402,F401
 from webui import UI_HTML  # noqa: E402
 import herdr_sync  # noqa: E402
+import herdr_mod  # noqa: E402
 
 # A fingerprint of the daemon's code: this file and the modules beside it together.
 _h = hashlib.sha256()
-for _name in ("peerlinkd.py", "chatlink.py", "discordlink.py", "telegramlink.py", "slacklink.py", "teamslink.py", "cronlib.py", "webui.py", "herdr_sync.py"):
+for _name in ("peerlinkd.py", "chatlink.py", "discordlink.py", "telegramlink.py", "slacklink.py", "teamslink.py", "cronlib.py", "webui.py", "herdr_sync.py", "herdr_mod.py"):
     with open(os.path.join(_here, _name), "rb") as _f:
         _h.update(_f.read())
 CODE = _h.hexdigest()[:16]
@@ -5605,6 +5606,10 @@ def herdr_sync_once(apply):
             at[addr]["space"] = space
     actions, smap, notes = herdr_sync.plan(placed, terms, layout, config.get("herdr_spaces") or {},
                                            lambda prefix: prefix + secrets.token_hex(16))
+    if apply:
+        with lock:
+            parents = {x: space_parent(x) for x in smap}
+        herdr_nest(smap, parents)
     who = {a["address"]: a["name"] for a in placed}
     lines = name_lines + join_lines + [herdr_sync.describe(a, who, smap) for a in actions]
     if layout is None:
@@ -5650,6 +5655,63 @@ def herdr_sync_once(apply):
     return {"actions": lines, "notes": notes, "failed": failed}
 
 
+def herdr_app_home():
+    return os.environ.get("HERDR_APP_HOME") or os.path.expanduser("~/.config/herdr-app")
+
+
+def herdr_nest(smap, parents):
+    """The herdr app's spaces sidebar nests like peerlink's spaces: write the tree the peerlink-spaces mod reads, and
+    keep that mod a patched copy of the herdr app's own spaces mod (made again when herdr ships a new one). Best
+    effort: the app is optional, and without the copy its sidebar just stays flat."""
+    path = os.path.join(HOME, herdr_mod.TREE_FILE)
+    text = herdr_mod.tree_text(smap, parents)
+    try:
+        with open(path) as f:
+            same = f.read() == text
+    except OSError:
+        same = False
+    if not same:
+        try:
+            with open(path + ".tmp", "w") as f:
+                f.write(text)
+            os.replace(path + ".tmp", path)
+        except OSError as err:
+            log("herdr nest: couldn't write the tree:", err)
+    app_home = herdr_app_home()
+    src_dir, dst_dir = os.path.join(app_home, "mods", "spaces"), os.path.join(app_home, "mods", herdr_mod.MOD)
+    try:
+        with open(os.path.join(src_dir, "main.js")) as f:
+            src = f.read()
+    except OSError:
+        return  # no herdr app here
+    stamp = hashlib.sha256(src.encode() + json.dumps(herdr_mod.PATCHES).encode()).hexdigest()[:16]
+    try:
+        with open(os.path.join(dst_dir, ".peerlink")) as f:
+            if f.read().strip() == stamp:
+                return
+    except OSError:
+        pass
+    patched, missing = herdr_mod.patch(src)
+    if patched is None:
+        if herdr_nest_warned[0] != stamp:
+            herdr_nest_warned[0] = stamp
+            log(f"herdr nest: the herdr app's spaces mod changed and peerlink's patch no longer fits ({missing}); its sidebar stays flat")
+        return
+    try:
+        os.makedirs(dst_dir, exist_ok=True)
+        for name in os.listdir(src_dir):
+            if name != "main.js" and os.path.isfile(os.path.join(src_dir, name)):
+                shutil.copyfile(os.path.join(src_dir, name), os.path.join(dst_dir, name))
+        with open(os.path.join(dst_dir, "main.js"), "w") as f:
+            f.write(patched)
+        with open(os.path.join(dst_dir, ".peerlink"), "w") as f:
+            f.write(stamp + "\n")
+        log(f"herdr nest: made the {herdr_mod.MOD} mod from the herdr app's spaces mod")
+    except OSError as err:
+        log("herdr nest: couldn't make the mod:", err)
+
+
+herdr_nest_warned = [""]
 HERDR_SYNC_EVERY_S = 30
 
 
