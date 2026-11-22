@@ -200,7 +200,8 @@ def tab_names(agents, terms, layout, now, known=None, fresh_s=JOIN_FRESH_S):
     shown alone in a tab with a name of its own (not its number, not the agent's name already) was opened there by
     you, under that name. Same gate as joins: not seen before, made in the last fresh_s, not started by peerlink.
 
-    After that, known ({tab id: the name the tab was last left showing}) tells a rename apart: a tab whose name
+    After that, known ({tab id: the name the tab was last left showing}) tells a rename apart (never for a space's
+    lead, whose name stays as it is): a tab whose name
     changed since is one you renamed, and its agent takes the name; an agent that renamed itself leaves its tab's
     name as it was, and the plan renames the tab instead.
     """
@@ -218,7 +219,8 @@ def tab_names(agents, terms, layout, now, known=None, fresh_s=JOIN_FRESH_S):
             a, t = by_addr[addrs[0]], terms.get(addrs[0]) or {}
             if name.lower() == a["name"].lower():
                 continue
-            renamed = tb.get("id") in known and known[tb["id"]] != name
+            # A space's lead keeps its name: other agents and people reach the space through it.
+            renamed = tb.get("id") in known and known[tb["id"]] != name and not a.get("lead")
             first = not (a.get("seen") or t.get("spawned") or now - (a.get("created") or 0) > fresh_s)
             if renamed or first:
                 out.append((a["address"], name))

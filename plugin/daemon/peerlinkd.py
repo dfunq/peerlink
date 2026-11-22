@@ -4403,9 +4403,13 @@ def set_member_role(sid, to, role):
     return 200, {"agent": display_name(target), "role": role or folder_role(target)}
 
 
-def rename_self(sid, name):
+NAME_HOLD_S = 24 * 3600
+
+
+def rename_self(sid, name, hold=False):
     """An agent names itself: this agent only, kept across /clear and resume. Its folder's name, which the next
-    agent there takes, stays as it is; you change that in the web UI."""
+    agent there takes, stays as it is; you change that in the web UI. hold: the name it gives up stays its own for
+    NAME_HOLD_S, so no other agent can rename itself to it meanwhile (a rename from its herdr tab)."""
     name = re.sub(r"[^A-Za-z0-9_.-]", "-", str(name or "").strip())[:40].strip("-")
     if not name:
         return 400, {"error": "name is letters, digits, dots, dashes or underscores"}
@@ -4415,7 +4419,16 @@ def rename_self(sid, name):
             return 404, {"error": "unknown agent; register again"}
         if any(r["id"] != sid and is_live(r) and display_name(r).lower() == name.lower() for r in sessions.values()):
             return 409, {"error": f"another running agent is called {name}"}
+        now, holds = time.time(), config.setdefault("name_holds", {})
+        for k in [k for k, v in holds.items() if v.get("until", 0) < now]:
+            holds.pop(k)
+        held = holds.get(name.lower())
+        if held and held.get("agent") != rec.get("agent"):
+            return 409, {"error": f"{name} was given up less than a day ago and is still kept for the agent that had it"}
         was = display_name(rec)
+        if hold and was.lower() != name.lower():
+            holds[was.lower()] = {"agent": rec.get("agent") or sid, "until": now + NAME_HOLD_S}
+        holds.pop(name.lower(), None)
         rec["name"] = name
         config["sessions"].setdefault(sid, {})["nickname"] = name
         save_config()
@@ -5571,7 +5584,7 @@ def herdr_sync_once(apply):
     for addr, name in [] if apply else named:  # a preview shows the plan as it will be once renamed
         at[addr]["name"] = name
     for addr, name in named if apply else []:
-        code, out = rename_self(at[addr]["sid"], name)
+        code, out = rename_self(at[addr]["sid"], name, hold=True)
         if code == 200:
             at[addr]["name"] = out["name"]
             with lock:

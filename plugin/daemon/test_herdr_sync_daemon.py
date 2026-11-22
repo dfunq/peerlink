@@ -229,9 +229,33 @@ class Pass(unittest.TestCase):
         self.assertEqual(d.sessions["s1"]["name"], "reviewer")
         self.assertEqual(tab_name["tb8"], "reviewer")
         self.assertTrue(any("takes its tab's name, reviewer" in x for x in r["actions"]))
+        # The name it gave up is kept for it for a day: another agent can't take it, it can take it back.
+        self.assertEqual(d.rename_self("s2", "peerlink")[0], 409)
+        self.assertEqual(d.config["name_holds"]["peerlink"]["agent"], "a-peerlink")
         d.rename_self("s1", "critic")  # the agent renames itself: the tab follows, the agent keeps its new name
         self.run_pass()
         self.assertEqual((d.sessions["s1"]["name"], tab_name["tb8"]), ("critic", "critic"))
+
+    def test_a_tab_rename_never_renames_a_spaces_lead(self):
+        d.config["herdr_spaces"] = {"tools": "spmac", "ops": "spops"}
+        d.config["space_leads"] = {"tools": {"cwd": self.tools, "how": "set"}}
+        d.config["herdr_tab_names"] = {"tb8": "peerlink"}
+        real = self.fake_run
+
+        def app(argv, **kw):  # some process renamed the lead's tab to "impostor"
+            r = real(argv, **kw)
+            if os.path.basename(argv[0]) == "herdr-app" and argv[1:] == ["ls"] and r.stdout:
+                out = json.loads(r.stdout)
+                for sp in out["spaces"]:
+                    for tb in sp["tabs"]:
+                        if tb["id"] == "tb8":
+                            tb["name"] = "impostor"
+                r = subprocess.CompletedProcess(argv, 0, json.dumps(out), "")
+            return r
+        self.fake_run = app
+        self.run_pass()
+        self.assertEqual(d.sessions["s1"]["name"], "peerlink")  # the lead keeps its name
+        self.assertIn(["do", "tab.rename", "--id", "tb8", "--name", "peerlink"], self.ran)  # and its tab gets it back
 
     def test_a_join_that_fails_is_said(self):
         self.opened_in_ops()

@@ -68,6 +68,8 @@ class TabNames(unittest.TestCase):
         self.assertEqual(hs.tab_names([old], {}, self.layout("reviewer"), 9999, {"tb1": "peerlink-2"}), [("t8", "reviewer")])
         # The agent renamed itself to reviewer, so its tab still shows what it was left with: the tab follows instead.
         self.assertEqual(hs.tab_names([{**old, "name": "reviewer"}], {}, self.layout("peerlink-2"), 9999, {"tb1": "peerlink-2"}), [])
+        # A space's lead keeps its name.
+        self.assertEqual(hs.tab_names([{**old, "lead": True}], {}, self.layout("reviewer"), 9999, {"tb1": "peerlink-2"}), [])
         # Nothing remembered yet (the first pass after an upgrade): nobody is renamed.
         self.assertEqual(hs.tab_names([old], {}, self.layout("reviewer"), 9999, {}), [])
 
