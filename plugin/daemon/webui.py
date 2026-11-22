@@ -366,6 +366,9 @@ th{font-size:12px;color:var(--mut);font-weight:500}.msgtext{white-space:pre-wrap
 <div class="mut small">You're still told on Discord when one does. To allow only some agents, leave this off and turn it on in an agent's Controls tab.</div>
 <div class="row" style="margin-top:10px"><div><label for="mls">Workers running at once (0 for no cap)</label><input type="number" name="max_live_spawns" id="mls" min="0"></div><div><label for="ngd">No workers start in these hours, like 22-8 (empty for never)</label><input type="text" name="night_guard" id="ngd" placeholder="22-8" pattern="\s*\d{1,2}\s*-\s*\d{1,2}\s*"></div></div>
 <div class="check" style="margin-top:10px"><input type="checkbox" name="use_herdr" id="uhd"><label for="uhd" style="margin:0">Start agents in the herdr app when herdr is installed (otherwise tmux, or a Terminal window)</label></div>
+<div class="check" style="margin-top:6px"><input type="checkbox" name="herdr_sync" id="hsy"><label for="hsy" style="margin:0">Keep the herdr app's spaces in step with peerlink: one herdr space per peerlink space, one tab per agent</label></div>
+<div class="mut small">peerlink decides; herdr follows. Moving a tab in herdr doesn't change an agent's space, the next pass puts it back: change spaces here. <button type="button" class="ghost" id="hsyprev">Preview</button></div>
+<pre class="small" id="hsyout" style="display:none;white-space:pre-wrap;margin:6px 0 0"></pre>
 <div class="mut small">A worker is an agent another agent hires for one piece of work; it retires itself when done. Past the cap, new hires wait in a queue and start as others retire. Only you change these, here.</div>
 <div class="check" style="margin-top:10px"><input type="checkbox" name="ask_defaults" id="adf"><label for="adf" style="margin:0">Let an agent's question name a default it goes with when I don't answer in time</label></div>
 <div class="row"><div><label for="adm">The shortest wait an agent may give me (minutes)</label><input type="number" name="ask_default_min_m" id="adm" min="0" step="5"></div><div></div></div>
@@ -853,6 +856,8 @@ document.addEventListener('click',async e=>{const b=e.target.closest('[data-make
     const r=await post(`/api/agents/${encodeURIComponent(gone.id)}/delete`);if(r.error)tell(r.error);refresh(true);return}
   if(b.dataset.clearlead&&!await ask(b.dataset.off?`Remove ${b.dataset.off}, offline, as the lead of ${space}? The space has no lead until you pick one.`:`Clear the lead of ${space}? Work sent to the space won't reach anyone until you pick a new lead.`,{ok:b.dataset.off?'Remove':'Clear'}))return;
   const r=await post(`/api/spaces/${encodeURIComponent(space)}/lead`,{cwd:b.dataset.cwd||'',id:b.dataset.makelead?b.dataset.id||'':''});if(r.error)tell(r.error);refresh(true)});
+document.addEventListener('click',async e=>{if(!e.target.closest('#hsyprev'))return;const o=$('#hsyout');o.style.display='block';o.textContent='Looking…';
+  try{const r=await api('/api/herdr-sync');o.textContent=r.error?r.error:[...(r.actions.length?r.actions:['Nothing to change: herdr already matches.']),...r.notes.map(n=>'· '+n)].join('\n')}catch(err){o.textContent=String(err)}});
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-clearctx]');if(!b)return;
   const x=livePeers.find(p=>p.id===b.dataset.clearctx);if(!await ask(`Clear ${x?x.name:'this agent'}'s context? It starts a fresh conversation after the turn it's in.`))return;
   const r=await post(`/api/sessions/${encodeURIComponent(b.dataset.clearctx)}/clear`);if(r.error)tell(r.error);else{const m=$('#clearmsg');if(m)m.textContent='Asked: it clears after its current turn.'}});

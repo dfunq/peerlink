@@ -34,7 +34,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.81"
+VERSION = "0.9.82"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -46,10 +46,11 @@ import slacklink  # noqa: E402
 import agentslink  # noqa: E402
 from cronlib import cron_next, parse_cron  # noqa: E402,F401
 from webui import UI_HTML  # noqa: E402
+import herdr_sync  # noqa: E402
 
 # A fingerprint of the daemon's code: this file and the modules beside it together.
 _h = hashlib.sha256()
-for _name in ("peerlinkd.py", "chatlink.py", "discordlink.py", "telegramlink.py", "slacklink.py", "teamslink.py", "cronlib.py", "webui.py"):
+for _name in ("peerlinkd.py", "chatlink.py", "discordlink.py", "telegramlink.py", "slacklink.py", "teamslink.py", "cronlib.py", "webui.py", "herdr_sync.py"):
     with open(os.path.join(_here, _name), "rb") as _f:
         _h.update(_f.read())
 CODE = _h.hexdigest()[:16]
@@ -189,6 +190,8 @@ DEFAULT_CONFIG = {
     "auto_approve_folders": [],  # the folders whose agents' requests do; set only from the web UI
     "max_live_spawns": 0,  # at most this many workers (agents started with worker: true) run at once, the rest queue; 0 is no cap; set only from the web UI
     "night_guard": "",
+    "herdr_sync": False,  # the herdr app's spaces mirror peerlink spaces, one tab per agent (peerlink -> herdr only)
+    "herdr_spaces": {},  # peerlink space -> the herdr space id herdr sync shows it in
     "use_herdr": True,  # start agents in herdr's terminals when herdr (hc) is installed; off, or without herdr, tmux or Terminal as before  # hours no worker is started, like "22-8"; empty is off; set only from the web UI
     "task_nudge_h": 24,  # an open task with no update for this many hours is raised with its owner, then with whoever asked; 0 is off
     "ask_defaults": True,  # a question to you may name a default the agent goes with when you haven't answered in time
@@ -5453,6 +5456,117 @@ def name_herdr_tab(tab, name):
             return
 
 
+def herdr_app():
+    """The herdr app's command line tool, '' when it isn't installed."""
+    return shutil.which("herdr-app") or next((p for p in (os.path.expanduser("~/.local/bin/herdr-app"), "/opt/homebrew/bin/herdr-app",
+                                                         "/usr/local/bin/herdr-app") if os.access(p, os.X_OK)), "")
+
+
+def herdr_sync_inputs(hc):
+    """What herdr_sync.plan needs: (agents, terms, layout). Reads hc and the herdr app outside the lock."""
+    with lock:
+        live = sorted((r for r in sessions.values() if is_live(r) and herdr_sync.hc_address(r.get("terminal"))),
+                      key=lambda r: r["last_seen"])
+        found = {}
+        for r in live:  # the newest session in a terminal is the one running there
+            found[herdr_sync.hc_address(r["terminal"])] = {"agent": r.get("agent") or r["id"], "name": display_name(r),
+                                                           "space": space_of(r)[0], "lead": bool(leads(r)),
+                                                           "pid": herdr_sync.key_pid(r["terminal"])}
+    try:
+        out = subprocess.run([hc, "ls", "--json"], timeout=10, capture_output=True, text=True)
+        listed = json.loads(out.stdout).get("terminals") or [] if out.returncode == 0 else []
+    except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
+        return None
+    terms = {}
+    for t in listed:
+        addr = t.get("address") or ""
+        if not addr or t.get("state") != "live":
+            continue
+        info = hc_terminal(addr)
+        labels = info.get("labels") or {}
+        # hc hands an ended terminal's address to a new one: an agent is only placed by a terminal still running its shell.
+        if addr in found and found[addr]["pid"] and info.get("pid") and int(info["pid"]) != found[addr]["pid"]:
+            found.pop(addr)
+        terms[addr] = {"space": labels.get("herdr.space") or "", "tab": labels.get("herdr.tab") or "",
+                       "agent": labels.get("peerlink.agent") or "", "pspace": labels.get("peerlink.space") or ""}
+    agents = [{"address": a, **{k: v[k] for k in ("agent", "name", "space", "lead")}} for a, v in found.items() if a in terms]
+    layout = None
+    app = herdr_app()
+    if app:
+        try:
+            out = subprocess.run([app, "ls"], timeout=10, capture_output=True, text=True)
+            spaces = json.loads(out.stdout).get("spaces") if out.returncode == 0 else None
+            if isinstance(spaces, list):
+                layout = [{"id": s.get("id") or "", "name": s.get("name") or "",
+                           "tabs": [{"id": tb.get("id") or "", "name": tb.get("name") or "",
+                                     "terminals": [x.get("terminal") for x in tb.get("terminals") or [] if x.get("terminal")]}
+                                    for tb in s.get("tabs") or []]}
+                          for s in spaces if not s.get("machine")]
+        except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
+            layout = None
+    return agents, terms, layout
+
+
+def herdr_sync_pass(apply=True):
+    """One herdr sync pass: {"actions": [lines], "notes": [lines]} of what it changed (or, apply=False, would change).
+    {"error": why} when it can't run. peerlink -> herdr only; see herdr_sync.py."""
+    hc = find_hc() if config.get("use_herdr", True) else ""
+    if not hc:
+        return {"error": "herdr isn't installed, or starting agents in herdr is off"}
+    got = herdr_sync_inputs(hc)
+    if got is None:
+        return {"error": "hc couldn't list its terminals"}
+    agents, terms, layout = got
+    actions, smap, notes = herdr_sync.plan(agents, terms, layout, config.get("herdr_spaces") or {},
+                                           lambda prefix: prefix + secrets.token_hex(16))
+    who = {a["address"]: a["name"] for a in agents}
+    lines = [herdr_sync.describe(a, who, smap) for a in actions]
+    if layout is None:
+        notes.append("the herdr app isn't open: spaces and tabs keep herdr's names until it is")
+    if not apply:
+        return {"actions": lines, "notes": notes}
+    app = herdr_app()
+    failed = []
+    for act in actions:
+        if act[0] == "label":
+            argv = [hc, "label", act[1]] + [f"{k}={v}" for k, v in act[2].items()]
+        elif act[0] == "rename_space":
+            argv = [app, "do", "space.rename", "--id", act[1], "--name", act[2]]
+        elif act[0] == "rename_tab":
+            argv = [app, "do", "tab.rename", "--id", act[1], "--name", act[2]]
+        else:
+            argv = [app, "do", "tab.move", "--id", act[1], "--index", "1"]
+        try:
+            r = subprocess.run(argv, timeout=10, capture_output=True, text=True)
+            ok = r.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            ok = False
+        if not ok:
+            failed.append(herdr_sync.describe(act, who, smap))
+    with lock:
+        if smap != (config.get("herdr_spaces") or {}):
+            config["herdr_spaces"] = smap
+            save_config()
+    if actions:
+        log(f"herdr sync: {len(actions) - len(failed)} change(s)" + (f", {len(failed)} failed: {failed[0]}" if failed else ""))
+    return {"actions": lines, "notes": notes, "failed": failed}
+
+
+HERDR_SYNC_EVERY_S = 30
+
+
+def herdr_syncer():
+    """Runs herdr sync every HERDR_SYNC_EVERY_S while it's on."""
+    while True:
+        time.sleep(HERDR_SYNC_EVERY_S)
+        if not config.get("herdr_sync"):
+            continue
+        try:
+            herdr_sync_pass()
+        except Exception as err:  # one bad pass must not stop the next
+            log("herdr sync failed:", repr(err))
+
+
 def launch_hc(hc, claude, sp):
     """Start the agent in a herdr terminal: (how, "") or ("", why not). No parent, so it outlives the terminal the
     daemon was started from; removed once it exits, so a retired agent's terminal doesn't linger."""
@@ -6953,6 +7067,10 @@ class Handler(BaseHTTPRequestHandler):
                 "browsers": browsers, "home": HOME, "launcher": LAUNCHER_PATH,
             })
 
+        if rest == ["herdr-sync"] and method in ("GET", "POST"):
+            # GET: what a pass would change (the web UI's preview); POST: run one now.
+            return self.reply(200, herdr_sync_pass(apply=method == "POST"))
+
         if rest == ["config"]:
             if method == "GET":
                 return self.reply(200, {**config, "default_guidance": default_guidance()})
@@ -7599,6 +7717,7 @@ def serve():
         f.write(str(os.getpid()))
     signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=server.shutdown).start())
     threading.Thread(target=reaper, daemon=True).start()
+    threading.Thread(target=herdr_syncer, name="herdr-sync", daemon=True).start()
     named = publish_name()
     log(f"peerlink {VERSION} on http://{config['listen_host']}:{PORT} (pid {os.getpid()})")
     try:
