@@ -195,6 +195,9 @@ class Pass(unittest.TestCase):
                 r = subprocess.CompletedProcess(argv, 0, json.dumps(out), "")
             return r
         self.fake_run = named
+        preview = self.run_pass(apply=False)
+        self.assertFalse([x for x in preview["actions"] if "rename tab tb8" in x])
+        self.assertEqual(d.sessions["s1"]["name"], "peerlink")
         r = self.run_pass()
         self.assertEqual(d.sessions["s1"]["name"], "reviewer")
         self.assertTrue(any("takes its tab's name, reviewer" in x for x in r["actions"]))

@@ -5566,6 +5566,8 @@ def herdr_sync_once(apply):
     # A new agent opened in a tab you named takes that name, before the plan would name the tab after it.
     named = herdr_sync.tab_names(placed, terms, layout, time.time())
     name_lines = [f"{at[addr]['name']} ({addr}) takes its tab's name, {name}" for addr, name in named]
+    for addr, name in [] if apply else named:  # a preview shows the plan as it will be once renamed
+        at[addr]["name"] = name
     for addr, name in named if apply else []:
         code, out = rename_self(at[addr]["sid"], name)
         if code == 200:
