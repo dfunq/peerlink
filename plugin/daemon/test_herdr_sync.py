@@ -52,6 +52,30 @@ class Joins(unittest.TestCase):
         self.assertEqual(hs.joins([self.new()], {"t8": term("spops", "tb1")}, [], {"ops": "spops"}, 1100), ([], []))
 
 
+class TabNames(unittest.TestCase):
+    def layout(self, name, terminals=("t8",)):
+        return [{"id": "sp", "name": "tools", "tabs": [{"id": "tb1", "name": name, "terminals": list(terminals)}]}]
+
+    def new(self, **kw):
+        return {**agent("t8", "peerlink-2", "tools"), "created": 1000, **kw}
+
+    def test_a_new_agent_takes_the_name_you_gave_its_tab(self):
+        self.assertEqual(hs.tab_names([self.new()], {}, self.layout("reviewer"), 1100), [("t8", "reviewer")])
+
+    def test_when_it_keeps_its_own(self):
+        cases = {"no name": ([self.new()], {}, self.layout(""), 1100),
+                 "a number": ([self.new()], {}, self.layout("3"), 1100),
+                 "its name already": ([self.new()], {}, self.layout("Peerlink-2"), 1100),
+                 "shared tab": ([self.new()], {}, self.layout("reviewer", ("t8", "t9")), 1100),
+                 "seen": ([self.new(seen=True)], {}, self.layout("reviewer"), 1100),
+                 "old": ([self.new()], {}, self.layout("reviewer"), 1000 + hs.JOIN_FRESH_S + 1),
+                 "hired": ([self.new()], {"t8": {"spawned": True}}, self.layout("reviewer"), 1100),
+                 "app closed": ([self.new()], {}, None, 1100)}
+        for why, (agents, terms, layout, now) in cases.items():
+            with self.subTest(why):
+                self.assertEqual(hs.tab_names(agents, terms, layout, now), [])
+
+
 class Plan(unittest.TestCase):
     def test_a_worker_nested_under_its_lead_is_never_moved(self):
         agents = [agent("t8", "peerlink", "tools", lead=True), agent("t9", "worker", "tools")]
