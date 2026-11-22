@@ -850,6 +850,9 @@ async function poll($: EngineInterface) {
     lastRoster = ''
     sentGuidance = ''
     sentThreads = false
+    // What a refused wake left in the old conversation's transcript is gone with it: put it to the new one.
+    pending = [...stuckHeld, ...pending.filter(p => !stuckHeld.some(m => m.id === p.id))]
+    stuckHeld = []
     await announce($, old)
     return
   }

@@ -65,6 +65,12 @@ class Stuck(unittest.TestCase):
         self.assertEqual(m["status"], "delivered")
         self.assertIsNone(d.public_peer(self.me)["stuck"])
 
+    def test_an_ack_after_its_message_is_no_longer_tracked_still_ends_its_wait(self):
+        m = {"id": "m7", "ts": time.time(), "from": "asker", "to": "me", "text": "x", "status": "waiting", "v": 2}
+        with unittest.mock.patch.object(d, "messages", [m]):
+            d.ack("me", ["m7"])
+        self.assertEqual(m["status"], "delivered")
+
     def test_a_stuck_lead_is_reported_above_it_or_to_nobody(self):
         d.config["space_leads"]["crew"] = {"cwd": self.dir, "how": "set"}
         with d.lock:

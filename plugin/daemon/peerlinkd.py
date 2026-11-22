@@ -6208,6 +6208,12 @@ def ack(sid, ids, holding=None):
                 if got[0].get("status") == "waiting":  # it waited out a spell of no turns, and a turn has it now
                     got[0]["status"] = entry["status"] = "delivered"
                 append_log(entry)
+            else:
+                # Handed so long ago (or before a restart) that it's no longer tracked: still, it waits no more.
+                late = next((m for m in reversed(messages) if m.get("id") == str(mid) and m.get("status") == "waiting"), None)
+                if late:
+                    late["status"] = "delivered"
+                    append_log({"id": str(mid), "acked": True, "status": "delivered"})
         now = time.time()
         for mid in holding if isinstance(holding, list) else []:
             if str(mid) in mine:

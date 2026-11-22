@@ -989,6 +989,29 @@ test('a message whose prompt starts no turn goes into the transcript unread: hel
   expect(beat().stuck).toBe(0)
 })
 
+test('a message a refused wake left in the transcript is put to the new conversation after a /clear, not acked unseen', async ($, on) => {
+  const { clock, submits, woke, ids } = engine(on)
+  mock.session(on)
+  on('turn.start', (_: any, e: any) => ({ turnId: e.turnId }))
+  submits.drop = 'not now'
+  const inbox: any[] = []
+  fakeDaemon(on, 1, null, inbox, { wake_delay_s: 0 })
+  await $.session.start(START)
+  await settle()
+  inbox.push({ id: 'm9', from: 'discord:123', from_name: 'alex on Discord', from_host: 'discord', text: 'Status?', expects_reply: true, reply_to: null, hops: 0 })
+  await clock.advance(600000)
+  for (let i = 0; i < 10; i++) await settle()
+  expect(woke.length).toBe(0)
+  // Someone runs /clear: a new conversation, which never saw the old transcript. Turns start again.
+  submits.drop = ''
+  ids.current = 'new-session'
+  for (let k = 0; k < 2; k++) {
+    await clock.advance(600000)
+    for (let i = 0; i < 10; i++) await settle()
+  }
+  expect(woke.some(w => w.includes('Status?'))).toBe(true)
+})
+
 test('a reload Claude Code refuses is tried again after 30s, 5m, then every 30m, and the agent shows stuck', async ($, on) => {
   const { clock } = engine(on, { installed: '99.0.0' })
   const daemon = fakeDaemon(on, 1, null, [], { poll_interval_ms: 60_000 })
