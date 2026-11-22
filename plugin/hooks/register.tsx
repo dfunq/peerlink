@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.9.75'
+const DAEMON_VERSION = '0.9.76'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -790,10 +790,14 @@ async function clearNow($: EngineInterface) {
   await $.command.run({ command: 'clear' }).catch(() => undefined)
   // Cleared by its own choice between tasks: start the fresh context on its notes rather than leave it idle until
   // someone writes, since the notes usually name what's next. Not while the usage limit holds, nor with wake off.
-  if (own && !limit && cfg?.auto_wake_idle !== false)
+  // The notes go in the prompt itself: the prompt hooks that carry them don't run for a submitted prompt, and taking
+  // them here means a host that does run those hooks doesn't show them twice.
+  if (own && !limit && cfg?.auto_wake_idle !== false) {
+    const notes = handoffBlock() || 'You cleared your context after your last task.'
     await $.prompt
-      .submit({ text: "You cleared your context after your last task. Carry on from the notes you left yourself: start what they name as next, or, if nothing is, end the turn in one line." })
+      .submit({ text: `${notes}\n\nCarry on from the notes you left yourself: start what they name as next, or, if nothing is, end the turn in one line.` })
       .catch(() => undefined)
+  }
 }
 
 async function poll($: EngineInterface) {
