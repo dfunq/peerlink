@@ -335,6 +335,11 @@ class TouchIdSetup(unittest.TestCase):
             f.write(f"#!{sys.executable}\nimport hashlib, hmac, json, sys\nreq = json.load(sys.stdin)\n{body}\n")
         os.chmod(self.bin, 0o700)
 
+    def probe(self):
+        """What the start thread does once the helper is built: probe, and keep the answer."""
+        d._probing.acquire()
+        d.probe_touch_id()
+
     def record(self, **extra):
         """As build_touch_id leaves it after building what's at the helper's path now."""
         with open(self.integrity, "w") as f:
@@ -368,6 +373,7 @@ class TouchIdHelper(TouchIdSetup):
         self.write_helper("result = 'unavailable'\n" + SIGNED)
         self.record()
         self.assertTrue(d.helper_trusted())
+        self.probe()
         self.assertFalse(d.touch_id_usable())
         with unittest.mock.patch.object(d, "owner_channel", lambda: ""):
             code, out = d.pair_start("herdr")
@@ -376,11 +382,25 @@ class TouchIdHelper(TouchIdSetup):
     def test_a_helper_that_can_ask_is_usable_and_the_probe_shows_no_dialog(self):
         self.write_helper("result = 'ready' if req.get('probe') else 'yes'\nassert req.get('probe') or req.get('reason')\n" + SIGNED)
         self.record()
+        self.probe()
+        self.assertTrue(d.touch_id_usable())
+
+    def test_checking_usable_never_waits_on_the_helper(self):
+        self.write_helper("import time\ntime.sleep(3)\nresult = 'ready'\n" + SIGNED)
+        self.record()
+        began = time.time()
+        self.assertFalse(d.touch_id_usable())  # nothing probed yet: the last answer (none) counts, a probe starts
+        self.assertLess(time.time() - began, 1)
+        for _ in range(100):
+            if d._touch_id_ready[1]:
+                break
+            time.sleep(0.1)
         self.assertTrue(d.touch_id_usable())
 
     def test_an_unavailable_answer_marks_the_helper_unusable(self):
         self.write_helper("result = 'ready' if req.get('probe') else 'unavailable'\n" + SIGNED)
         self.record()
+        self.probe()
         self.assertTrue(d.touch_id_usable())
         self.assertFalse(d.touch_id("test"))
         self.assertFalse(d.touch_id_usable())
@@ -397,6 +417,20 @@ class TouchIdTrust(TouchIdSetup):
         self.assertNotIn("helper", d.read_integrity())
         self.assertEqual(len(self.alerts), 1)
         self.assertIn("Delete it and restart", self.alerts[0])
+
+    def test_a_helper_recorded_before_builds_were_versioned_is_not_trusted(self):
+        self.write_helper("result = 'yes'\n" + SIGNED)
+        with open(self.integrity, "w") as f:  # what 0.9.71's integrity_ok wrote: no helper_version
+            json.dump({"helper": d.file_sha(self.bin), "helper_src": d.file_sha(self.src)}, f)
+        self.assertFalse(d.integrity_ok("helper"))
+        self.assertEqual(len(self.alerts), 1)
+
+    def test_the_bad_reply_alert_is_sent_once(self):
+        self.write_helper("print('{}')")
+        self.record()
+        self.assertFalse(d.touch_id("a"))
+        self.assertFalse(d.touch_id("b"))
+        self.assertEqual(len(self.alerts), 1)
 
     def test_a_helper_and_source_that_both_change_while_running_are_not_trusted(self):
         self.write_helper("result = 'yes'\n" + SIGNED)
@@ -513,6 +547,32 @@ class TouchIdBuild(TouchIdSetup):
         os.remove(self.bin)  # what the alert says to do
         self.assertEqual(self.build(), (True, True))
         self.assertEqual(self.built(), "built from source 1")
+
+    def test_a_release_that_leaves_the_source_alone_makes_the_helper_this_versions(self):
+        self.build("0.0.1")
+        self.assertEqual(self.build(), (False, True))  # this version starts: same source, nothing to build
+        self.assertEqual(d.read_integrity()["helper_version"], d.VERSION)
+        with open(self.src, "w") as f:
+            f.write("edited in place")
+        self.assertEqual(self.build(), (False, False))  # so an edit now is caught, not taken for an update
+        self.assertEqual(len(self.builds), 1)
+        self.assertIn("source", self.alerts[0])
+
+    def test_a_pre_versioned_record_is_rebuilt(self):
+        self.write_helper("result = 'yes'\n" + SIGNED)
+        with open(self.integrity, "w") as f:
+            json.dump({"helper": d.file_sha(self.bin), "helper_src": d.file_sha(self.src)}, f)
+        self.assertEqual(self.build(), (True, True))
+        self.assertEqual(self.built(), "built from source 1")
+
+    def test_a_source_edited_in_place_with_the_helper_deleted_is_said_and_not_built(self):
+        self.build()
+        os.remove(self.bin)
+        with open(self.src, "w") as f:
+            f.write("edited in place")
+        self.assertEqual(self.build(), (False, False))
+        self.assertEqual(len(self.builds), 1)
+        self.assertEqual(len(self.alerts), 1)
 
     def test_an_unrecorded_helper_is_replaced_by_a_build(self):
         self.write_helper("result = 'yes'\n" + SIGNED)

@@ -1,4 +1,4 @@
-// peerlink-touchid: asks you to be present with Touch ID, or your Mac password, for the peerlink daemon.
+// peerlink-touchid: asks you to be present with Touch ID (a finger, nothing else) for the peerlink daemon.
 //
 // stdin:  {"reason": "...", "nonce": "<hex>", "key": "<hex>"}
 // stdout: {"result": "yes" | "no" | "unavailable", "nonce": "<same>", "hmac": HMAC-SHA256(key, nonce + ":" + result)}
@@ -50,10 +50,13 @@ guard let req = try? JSONDecoder().decode(Request.self, from: input), let key = 
     exit(2)
 }
 
+// A finger on this Mac's Touch ID only: no password, no Apple Watch, no reuse of an earlier press. Without an
+// enrolled sensor it can't ask, and approval goes to Discord alone.
 let context = LAContext()
+context.localizedFallbackTitle = ""
+context.touchIDAuthenticationAllowableReuseDuration = 0
 var err: NSError?
-// deviceOwnerAuthentication: Touch ID, or your password when there's no sensor or it isn't enrolled.
-let canAsk = context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &err)
+let canAsk = context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &err)
 if req.probe == true {
     answer(canAsk ? "ready" : "unavailable", req, key)
 }
@@ -64,7 +67,7 @@ guard canAsk else {
 
 let done = DispatchSemaphore(value: 0)
 var yes = false
-context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: req.reason ?? "") { ok, _ in
+context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: req.reason ?? "") { ok, _ in
     yes = ok
     done.signal()
 }

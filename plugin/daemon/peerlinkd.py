@@ -6370,6 +6370,7 @@ _touch_id = threading.Lock()
 _integrity = threading.Lock()
 _helper_alerted = set()        # what an alert about the helper or daemon was already sent for
 _touch_id_ready = [0.0, False]  # when the helper was last probed, and whether it can ask
+_probing = threading.Lock()
 TOUCHID_READY_S = 300
 
 
@@ -6755,19 +6756,28 @@ def touch_id_usable():
     """The helper is the one build_touch_id built and recorded, and it can ask here (LocalAuthentication works in
     this session). One that only ever answers "unavailable" doesn't count, so a pairing nobody can approve is
     refused up front."""
-    if sys.platform != "darwin" or not os.access(TOUCHID_BIN, os.X_OK) or not helper_trusted():
-        return False
-    return touch_id_ready()
+    return touch_id_usable_now() and touch_id_ready()
+
+
+def touch_id_usable_now():
+    return sys.platform == "darwin" and os.access(TOUCHID_BIN, os.X_OK) and helper_trusted()
 
 
 def touch_id_ready():
-    """Whether the helper can ask, from a probe that shows no dialog. Kept for TOUCHID_READY_S."""
+    """Whether the helper can ask, from the last probe (it shows no dialog). Never waits on the helper: a stale answer
+    starts a probe in the background and the last one counts meanwhile. The first is run at start."""
     when, ready = _touch_id_ready
-    if time.time() - when < TOUCHID_READY_S:
-        return ready
-    ready = ask_helper({"probe": True}, 15) == "ready"
-    _touch_id_ready[:] = [time.time(), ready]
+    if time.time() - when >= TOUCHID_READY_S and _probing.acquire(blocking=False):
+        threading.Thread(target=probe_touch_id, name="touchid-probe", daemon=True).start()
     return ready
+
+
+def probe_touch_id():
+    """Ask the helper whether it can ask here, and keep the answer. Call with _probing held; releases it."""
+    try:
+        _touch_id_ready[:] = [time.time(), ask_helper({"probe": True}, 15) == "ready"]
+    finally:
+        _probing.release()
 
 
 def ask_helper(req, timeout):
@@ -6793,8 +6803,8 @@ def ask_helper(req, timeout):
         want = hmac.new(key, f"{nonce}:{result}".encode(), hashlib.sha256).hexdigest()
         if out.get("nonce") == nonce and hmac.compare_digest(str(out.get("hmac", "")), want):
             return result
-    owner_alert("The Touch ID helper answered without the right nonce or HMAC, so its answer was ignored. "
-                f"Something may have replaced {tilde_path(TOUCHID_BIN)}.")
+    helper_alert(("reply", file_sha(TOUCHID_BIN)), "The Touch ID helper answered without the right nonce or HMAC, so its "
+                 f"answer was ignored. Something may have replaced {tilde_path(TOUCHID_BIN)}.")
     return None
 
 
@@ -6844,7 +6854,7 @@ def helper_trusted():
     if not have:
         return False
     path = tilde_path(TOUCHID_BIN)
-    if not rec.get("helper"):
+    if not rec.get("helper") or not rec.get("helper_version"):  # one recorded before 0.9.73 wasn't built by this
         helper_alert(("unrecorded", have), f"There's a Touch ID helper at {path} that peerlink has no record of building, "
                      "so it isn't used. Delete it and restart peerlink to build it from source.")
         return False
@@ -6909,10 +6919,15 @@ def build_touch_id():
     if sys.platform != "darwin" or not os.path.exists(TOUCHID_SRC):
         return False
     src, rec = file_sha(TOUCHID_SRC), read_integrity()
-    if os.access(TOUCHID_BIN, os.X_OK) and rec.get("helper") and rec.get("helper_src") == src:
+    if os.access(TOUCHID_BIN, os.X_OK) and rec.get("helper") and rec.get("helper_version") and rec.get("helper_src") == src:
+        # A release that left the source alone: it's this version's helper now, so an edit in place before the next
+        # release is caught as one rather than taken for an update.
+        if rec["helper_version"] != VERSION and file_sha(TOUCHID_BIN) == rec["helper"]:
+            record_integrity(helper_version=VERSION)
         return False
     if rec.get("helper_src") and rec["helper_src"] != src and rec.get("helper_version") == VERSION:
-        helper_trusted()
+        helper_alert(("source", src), f"The Touch ID helper's source ({tilde_path(TOUCHID_SRC)}) changed but peerlink's "
+                     f"version ({VERSION}) didn't, so the helper isn't used or rebuilt. If you didn't edit it, something may have.")
         return False
     found = find_swiftc()
     if not found:
@@ -6930,6 +6945,7 @@ def build_touch_id():
         if file_sha(TOUCHID_SRC) != src:  # the source changed while it built: nothing recorded, so the next start retries
             return False
         os.chmod(tmp, 0o700)
+        built = file_sha(tmp)  # what this build made, not whatever is at the path a moment later
         os.replace(tmp, TOUCHID_BIN)
     except (OSError, subprocess.SubprocessError) as err:
         log("owner", "Touch ID helper didn't build:", err)
@@ -6939,7 +6955,7 @@ def build_touch_id():
             os.remove(tmp)
         except OSError:
             pass
-    record_integrity(helper=file_sha(TOUCHID_BIN), helper_src=src, helper_version=VERSION)
+    record_integrity(helper=built, helper_src=src, helper_version=VERSION)
     _touch_id_ready[:] = [0.0, False]
     _helper_alerted.clear()
     if rec.get("helper_src") and rec["helper_src"] != src:
@@ -6953,6 +6969,9 @@ def start_integrity():
     if not SCRATCH_HOME:  # a test's daemon doesn't build: its tests stub the helper
         try:
             build_touch_id()
+            if touch_id_usable_now():
+                _probing.acquire()
+                probe_touch_id()
         except Exception as err:  # the daemon's own check below must still run
             log("owner", "Touch ID helper build failed:", err)
     time.sleep(20)  # once the bot is up, so an alert reaches Discord
