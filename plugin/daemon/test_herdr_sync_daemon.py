@@ -112,6 +112,11 @@ class Pass(unittest.TestCase):
         self.assertIn("error", r)
         self.assertEqual(self.ran, [])
 
+    def test_deleting_a_space_forgets_its_herdr_space(self):
+        d.config["herdr_spaces"] = {"gone": "sp1", "ops": "sp2"}
+        d.delete_space("gone")
+        self.assertEqual(d.config["herdr_spaces"], {"ops": "sp2"})
+
     def test_off_when_herdr_is_off(self):
         with unittest.mock.patch.dict(d.config, {"use_herdr": False}):
             self.assertIn("error", d.herdr_sync_pass())

@@ -873,7 +873,7 @@ def delete_space(space):
     if not space or space == DEFAULT_SPACE:
         return 400, {"error": "pick a named space; the default space can't be deleted"}
     with lock:
-        for k in ("space_leads", "space_parents"):
+        for k in ("space_leads", "space_parents", "herdr_spaces"):
             (config.get(k) or {}).pop(space, None)
         for k in ("space_parents", "folder_spaces", "agent_spaces"):
             d = config.get(k) or {}
