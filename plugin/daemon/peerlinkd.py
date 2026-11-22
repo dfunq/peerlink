@@ -34,7 +34,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.91"
+VERSION = "0.9.92"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -4081,6 +4081,43 @@ def pid_alive(pid):
     return True
 
 
+def running_elsewhere(other, rec):
+    """Whether session `other` is still running somewhere `rec` isn't: live, its process alive, in another terminal
+    (or, with no terminals to go by, another process). A restart in the same pane, or a /clear, is the same place."""
+    if other["id"] == rec["id"] or not is_live(other) or not pid_alive(other.get("pid")):
+        return False
+    mine, theirs = rec.get("terminal") or "", other.get("terminal") or ""
+    if mine or theirs:
+        return mine != theirs
+    return bool(rec.get("pid")) and bool(other.get("pid")) and str(rec["pid"]) != str(other["pid"])
+
+
+split_warned = set()
+
+
+def split_warning(aid, holder, rec):
+    """Say once, to your Inbox and to the space's lead, that a session tried to be an agent another session runs as.
+    Called with the lock held."""
+    key = (aid, holder["id"], rec["id"])
+    if key in split_warned:
+        return
+    split_warned.add(key)
+    where = lambda r: r.get("terminal") or f"pid {r.get('pid') or '?'}"
+    name = (agents.get(aid) or {}).get("name") or display_name(holder)
+    text = (f"Two Claude sessions tried to be {name}: it's running in {where(holder)}, and another session in "
+            f"{where(rec)} ({tilde_path(rec.get('cwd', ''))}) came up as it too, likely resuming the same conversation. "
+            f"The one in {where(rec)} is a separate agent now. If one of them is a leftover, end it.")
+    log("agent split:", text)
+    msg = {"id": f"m{next_msg[0]}", "ts": time.time(), "from": "peerlink", "from_name": "peerlink", "from_host": HOSTNAME,
+           "to": "user", "to_name": USER_NAME, "from_cwd": "", "to_cwd": "", "from_space": "", "to_space": "",
+           "text": text, "expects_reply": False, "reply_to": None, "hops": 0, "status": "delivered", "v": 2}
+    next_msg[0] += 1
+    record(msg)
+    lead = lead_rec(space_of(holder)[0])
+    if lead and lead.get("id") not in (holder["id"], rec["id"]):
+        task_message(None, lead.get("cwd", ""), text, prefer=lead)
+
+
 def agent_session(aid):
     """The live session an agent is running in now, or None."""
     live = [r for r in sessions.values() if aid and r.get("agent") == aid and is_live(r)]
@@ -4094,6 +4131,12 @@ def agent_for(rec, old=None):
     now = time.time()
     aid = rec.get("agent") or agent_of.get(old or "") or agent_of.get(rec["id"])
     claim = str(rec.pop("_claim", "") or "").lower()
+    # An agent runs in one session. One still running in another terminal keeps it, and this session is another agent:
+    # two sessions sharing one would take turns as it (its name, its lead badge) on every heartbeat.
+    holder = next((r for r in sessions.values() if aid and r.get("agent") == aid and running_elsewhere(r, rec)), None)
+    if holder:
+        split_warning(aid, holder, rec)
+        aid = None
     if aid not in agents:
         cwd, term = rec.get("cwd", ""), rec.get("terminal") or ""
         # Still listed as live, but the process in its pane is gone and this one took its place: an unclean exit
@@ -7422,6 +7465,10 @@ class Handler(BaseHTTPRequestHandler):
                 sessions[sid] = rec
                 note_lone_leads()
                 old = b.get("succeeds")
+                # A session resumed while the one it continues still runs in another terminal doesn't take its place.
+                if old and sessions.get(old) and running_elsewhere(sessions[old], rec):
+                    split_warning(sessions[old].get("agent") or agent_of.get(old) or "", sessions[old], rec)
+                    old = None
                 if old and old != sid:
                     # The same conversation after a /clear or resume: keep its name, settings and messages.
                     prev = sessions.pop(old, None)
