@@ -39,6 +39,7 @@ class Pass(unittest.TestCase):
         self.ran = []
         self.broken = set()
         self.label_fails = set()
+        self.parents = {}
 
     def session(self, sid, name, cwd, terminal):
         d.sessions[sid] = {"id": sid, "name": name, "cwd": cwd, "terminal": terminal, "agent": "a-" + name,
@@ -52,7 +53,8 @@ class Pass(unittest.TestCase):
         elif tool == "hc" and args[:1] == ["get"]:
             if args[1] in self.broken:
                 return subprocess.CompletedProcess(argv, 1, "", "gone")
-            out = json.dumps({"address": args[1], "state": "live", "pid": self.pids[args[1]], "labels": self.labels[args[1]]})
+            out = json.dumps({"address": args[1], "state": "live", "pid": self.pids[args[1]], "labels": self.labels[args[1]],
+                              "parent": self.parents.get(args[1])})
         elif tool == "hc" and args[:1] == ["label"]:
             self.ran.append(args)
             if args[1] in self.label_fails:
@@ -133,6 +135,44 @@ class Pass(unittest.TestCase):
         r = self.run_pass()
         self.assertIn(["do", "terminal.keep", "--terminal", "t8", "--place", "tab"], self.ran)
         self.assertTrue(any("t8" in f and "pane is back" in f for f in r["failed"]))
+
+    def opened_in_ops(self):
+        """peerlink (a tools folder) was just opened, in a tab of the herdr space that mirrors ops."""
+        d.config["herdr_spaces"] = {"ops": "spmac"}
+        d.agents["a-peerlink"] = {"id": "a-peerlink", "created": time.time() - 60}
+
+    def test_a_new_tab_opened_in_a_herdr_space_joins_its_peerlink_space(self):
+        self.opened_in_ops()
+        r = self.run_pass(apply=False)
+        self.assertTrue(any("peerlink (t8) joins the ops space" in x for x in r["actions"]))
+        self.assertNotIn("a-peerlink", d.config.get("agent_spaces") or {})
+        self.run_pass()
+        self.assertEqual(d.config["agent_spaces"]["a-peerlink"], "ops")
+        self.assertTrue(d.agents["a-peerlink"]["herdr_seen"])
+        self.assertEqual(self.labels["t8"]["herdr.space"], "spmac")  # it stays where you opened it
+        self.assertEqual(self.labels["t8"]["peerlink.space"], "ops")
+        self.assertFalse([a for a in self.ran if a[:3] == ["do", "terminal.park", "--terminal"]])
+
+    def test_only_the_first_sighting_counts(self):
+        self.opened_in_ops()
+        d.agents["a-peerlink"]["herdr_seen"] = 1
+        self.run_pass()
+        self.assertNotIn("a-peerlink", d.config.get("agent_spaces") or {})
+        self.assertNotEqual(self.labels["t8"]["herdr.space"], "spmac")  # moved to tools' herdr space as before
+
+    def test_an_agent_you_placed_or_another_terminal_started_stays(self):
+        for setup in (lambda: d.config.setdefault("agent_spaces", {}).update({"a-peerlink": "tools"}),
+                      lambda: self.parents.update({"t8": "t9"}),
+                      lambda: self.labels["t8"].update({"peerlink.spawn": "s4"}),
+                      lambda: d.agents["a-peerlink"].update({"created": time.time() - 3600}),
+                      lambda: setattr(self, "app_open", False)):
+            with self.subTest(setup=setup):
+                self.setUp()
+                d.config["agent_spaces"] = {}
+                self.opened_in_ops()
+                setup()
+                self.run_pass()
+                self.assertNotEqual((d.config.get("agent_spaces") or {}).get("a-peerlink"), "ops")
 
     def test_off_when_herdr_is_off(self):
         with unittest.mock.patch.dict(d.config, {"use_herdr": False}):

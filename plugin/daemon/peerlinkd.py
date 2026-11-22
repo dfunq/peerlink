@@ -34,7 +34,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.84"
+VERSION = "0.9.85"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -993,10 +993,10 @@ def set_members(cwd, spaces, sid=""):
     return 200, {"cwd": cwd, "spaces": spaces}
 
 
-def set_agent_space(sid, space):
+def set_agent_space(sid, space, why="Your user moved you"):
     """You put one agent in a space (or clear it, back to its folder's), in the web UI. Only that agent moves, and is
     told; it keeps the space through /clear and restarts, since it's kept for the agent, not the session. Unassigned
-    (the default space) is a space you can put it in, whatever its folder's is."""
+    (the default space) is a space you can put it in, whatever its folder's is. why starts what the agent is told."""
     space = clean_space(space)
     if space in ("unassigned", "none"):
         space = DEFAULT_SPACE
@@ -1015,7 +1015,7 @@ def set_agent_space(sid, space):
     with lock:
         now = space_of(rec)[0]
         where = "out of every space: you're unassigned, with the other agents in no space" if now == DEFAULT_SPACE else f"to the {now} space"
-        task_message(None, rec.get("cwd", ""), f"Your user moved you {where}. You now see and message its agents, and they see you. Other agents in your folder stay where they are.", prefer=rec)
+        task_message(None, rec.get("cwd", ""), f"{why} {where}. You now see and message its agents, and they see you. Other agents in your folder stay where they are.", prefer=rec)
         note_lone_leads()
         log("agent space", display_name(rec), "->", space or "(its folder's)")
     return 200, {"id": sid, "space": now}
@@ -5472,9 +5472,12 @@ def herdr_sync_inputs(hc):
                       key=lambda r: r["last_seen"])
         found = {}
         for r in live:  # the newest session in a terminal is the one running there
+            a = agents.get(r.get("agent") or "") or {}
             found[herdr_sync.hc_address(term_of(r))] = {"agent": r.get("agent") or r["id"], "name": display_name(r),
                                                         "space": space_of(r)[0], "lead": bool(leads(r)),
-                                                        "pid": herdr_sync.key_pid(term_of(r))}
+                                                        "pid": herdr_sync.key_pid(term_of(r)), "sid": r["id"],
+                                                        "created": a.get("created") or 0, "seen": bool(a.get("herdr_seen")),
+                                                        "explicit": space_of(r)[1] in ("agent", "started")}
     try:
         out = subprocess.run([hc, "ls", "--json"], timeout=10, capture_output=True, text=True)
         listed = json.loads(out.stdout).get("terminals") or [] if out.returncode == 0 else []
@@ -5493,8 +5496,9 @@ def herdr_sync_inputs(hc):
         if addr in found and found[addr]["pid"] and info.get("pid") and int(info["pid"]) != found[addr]["pid"]:
             found.pop(addr)
         terms[addr] = {"space": labels.get("herdr.space") or "", "tab": labels.get("herdr.tab") or "",
-                       "agent": labels.get("peerlink.agent") or "", "pspace": labels.get("peerlink.space") or ""}
-    placed = [{"address": a, **{k: v[k] for k in ("agent", "name", "space", "lead")}} for a, v in found.items() if a in terms]
+                       "agent": labels.get("peerlink.agent") or "", "pspace": labels.get("peerlink.space") or "",
+                       "parent": bool(info.get("parent")), "spawned": bool(labels.get("peerlink.spawn"))}
+    placed = [{"address": a, **{k: v for k, v in v.items() if k != "pid"}} for a, v in found.items() if a in terms]
     layout = None
     app = herdr_app()
     if app:
@@ -5530,11 +5534,29 @@ def herdr_sync_once(apply):
     got = herdr_sync_inputs(hc)
     if got is None:
         return {"error": "hc couldn't say what's in every terminal; nothing changed"}
-    agents, terms, layout = got
-    actions, smap, notes = herdr_sync.plan(agents, terms, layout, config.get("herdr_spaces") or {},
+    placed, terms, layout = got
+    # A Claude Code tab you opened in a herdr space that mirrors a peerlink space joins it, on its first sighting.
+    joined, seen = herdr_sync.joins(placed, terms, layout, config.get("herdr_spaces") or {}, time.time())
+    at = {p["address"]: p for p in placed}
+    join_lines = [f"{at[addr]['name']} ({addr}) joins the {space} space: you opened it in that herdr space" for addr, space in joined]
+    if apply:
+        for addr, space in joined:
+            code, out = set_agent_space(at[addr]["sid"], space, "Your user opened you in the herdr space that mirrors a peerlink space, so you moved")
+            if code == 200:
+                at[addr]["space"] = out["space"]
+        if seen:
+            with lock:
+                for aid in seen:
+                    if aid in agents:
+                        agents[aid]["herdr_seen"] = int(time.time())
+                save_agents()
+    else:
+        for addr, space in joined:
+            at[addr]["space"] = space
+    actions, smap, notes = herdr_sync.plan(placed, terms, layout, config.get("herdr_spaces") or {},
                                            lambda prefix: prefix + secrets.token_hex(16))
-    who = {a["address"]: a["name"] for a in agents}
-    lines = [herdr_sync.describe(a, who, smap) for a in actions]
+    who = {a["address"]: a["name"] for a in placed}
+    lines = join_lines + [herdr_sync.describe(a, who, smap) for a in actions]
     if layout is None:
         notes.append("the herdr app isn't open: spaces and tabs keep herdr's names until it is")
     if not apply:
@@ -5573,8 +5595,8 @@ def herdr_sync_once(apply):
         if smap != (config.get("herdr_spaces") or {}):
             config["herdr_spaces"] = smap
             save_config()
-    if actions:
-        log(f"herdr sync: {len(actions) - len(failed)} change(s)" + (f", {len(failed)} failed: {failed[0]}" if failed else ""))
+    if actions or joined:
+        log(f"herdr sync: {len(joined) + len(actions) - len(failed)} change(s)" + (f", {len(failed)} failed: {failed[0]}" if failed else ""))
     return {"actions": lines, "notes": notes, "failed": failed}
 
 
