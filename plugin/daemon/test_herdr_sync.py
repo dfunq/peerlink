@@ -62,6 +62,21 @@ class TabNames(unittest.TestCase):
     def test_a_new_agent_takes_the_name_you_gave_its_tab(self):
         self.assertEqual(hs.tab_names([self.new()], {}, self.layout("reviewer"), 1100), [("t8", "reviewer")])
 
+    def test_later_a_tab_you_rename_renames_its_agent(self):
+        old = self.new(seen=True, name="peerlink-2")
+        # The tab was left showing peerlink-2 and now says reviewer: you renamed it.
+        self.assertEqual(hs.tab_names([old], {}, self.layout("reviewer"), 9999, {"tb1": "peerlink-2"}), [("t8", "reviewer")])
+        # The agent renamed itself to reviewer, so its tab still shows what it was left with: the tab follows instead.
+        self.assertEqual(hs.tab_names([{**old, "name": "reviewer"}], {}, self.layout("peerlink-2"), 9999, {"tb1": "peerlink-2"}), [])
+        # Nothing remembered yet (the first pass after an upgrade): nobody is renamed.
+        self.assertEqual(hs.tab_names([old], {}, self.layout("reviewer"), 9999, {}), [])
+
+    def test_what_a_tab_is_left_showing(self):
+        layout = [{"id": "sp", "tabs": [{"id": "tb1", "name": "x", "terminals": ["t8"]}, {"id": "tb2", "name": "y", "terminals": ["t9"]},
+                                        {"id": "tb3", "name": "z", "terminals": ["t8", "t9"]}]}]
+        agents = [agent("t8", "peerlink", "tools"), agent("t9", "services", "ops")]
+        self.assertEqual(hs.tab_memory(agents, layout, {"tb2"}), {"tb1": "peerlink", "tb2": "y"})
+
     def test_when_it_keeps_its_own(self):
         cases = {"no name": ([self.new()], {}, self.layout(""), 1100),
                  "a number": ([self.new()], {}, self.layout("3"), 1100),

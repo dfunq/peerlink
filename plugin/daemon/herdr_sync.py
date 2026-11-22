@@ -193,13 +193,18 @@ def joins(agents, terms, layout, smap, now, fresh_s=JOIN_FRESH_S, closed=()):
     return out, seen
 
 
-def tab_names(agents, terms, layout, now, fresh_s=JOIN_FRESH_S):
-    """New agents that take the name you gave their tab, on their first sighting: [(address, name)].
+def tab_names(agents, terms, layout, now, known=None, fresh_s=JOIN_FRESH_S):
+    """Agents that take the name you gave their tab: [(address, name)].
 
     herdr tabs have no name until someone gives one, and the plan later names a tab after its agent. So a new agent
     shown alone in a tab with a name of its own (not its number, not the agent's name already) was opened there by
     you, under that name. Same gate as joins: not seen before, made in the last fresh_s, not started by peerlink.
+
+    After that, known ({tab id: the name the tab was last left showing}) tells a rename apart: a tab whose name
+    changed since is one you renamed, and its agent takes the name; an agent that renamed itself leaves its tab's
+    name as it was, and the plan renames the tab instead.
     """
+    known = known or {}
     if layout is None:
         return []
     out = []
@@ -211,10 +216,26 @@ def tab_names(agents, terms, layout, now, fresh_s=JOIN_FRESH_S):
             if len(addrs) != 1 or addrs[0] not in by_addr or not name or name.isdigit():
                 continue
             a, t = by_addr[addrs[0]], terms.get(addrs[0]) or {}
-            if a.get("seen") or t.get("spawned") or now - (a.get("created") or 0) > fresh_s or name.lower() == a["name"].lower():
+            if name.lower() == a["name"].lower():
                 continue
-            out.append((a["address"], name))
+            renamed = tb.get("id") in known and known[tb["id"]] != name
+            first = not (a.get("seen") or t.get("spawned") or now - (a.get("created") or 0) > fresh_s)
+            if renamed or first:
+                out.append((a["address"], name))
     return sorted(out)
+
+
+def tab_memory(agents, layout, failed_renames=()):
+    """What each single-agent tab is left showing after a pass: its agent's name (the plan renames the tab to it),
+    or, where that rename failed, the name it still has. {tab id: name}."""
+    names = {a["address"]: a["name"] for a in agents}
+    out = {}
+    for s in layout or []:
+        for tb in s.get("tabs") or []:
+            addrs = tb.get("terminals") or []
+            if len(addrs) == 1 and addrs[0] in names and tb.get("id"):
+                out[tb["id"]] = (tb.get("name") or "") if tb["id"] in failed_renames else names[addrs[0]]
+    return out
 
 
 def describe(action, who=None, smap=None):

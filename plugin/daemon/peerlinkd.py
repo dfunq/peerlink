@@ -34,7 +34,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.89"
+VERSION = "0.9.90"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -193,6 +193,7 @@ DEFAULT_CONFIG = {
     "night_guard": "",
     "herdr_sync": False,  # the herdr app's spaces mirror peerlink spaces, one tab per agent (peerlink -> herdr only)
     "herdr_spaces": {},  # peerlink space -> the herdr space id herdr sync shows it in
+    "herdr_tab_names": {},  # herdr tab id -> the name herdr sync last left it showing: a tab renamed since renames its agent
     "herdr_join_never": "",  # spaces a tab you open in herdr never joins on its own, comma separated (a space others nest in never does either); agents can add to it, only the web UI removes
     "use_herdr": True,  # start agents in herdr's terminals when herdr (hc) is installed; off, or without herdr, tmux or Terminal as before  # hours no worker is started, like "22-8"; empty is off; set only from the web UI
     "task_nudge_h": 24,  # an open task with no update for this many hours is raised with its owner, then with whoever asked; 0 is off
@@ -5565,7 +5566,7 @@ def herdr_sync_once(apply):
     joined, seen = herdr_sync.joins(placed, terms, layout, config.get("herdr_spaces") or {}, time.time(), closed=closed)
     at = {p["address"]: p for p in placed}
     # A new agent opened in a tab you named takes that name, before the plan would name the tab after it.
-    named = herdr_sync.tab_names(placed, terms, layout, time.time())
+    named = herdr_sync.tab_names(placed, terms, layout, time.time(), config.get("herdr_tab_names") or {})
     name_lines = [f"{at[addr]['name']} ({addr}) takes its tab's name, {name}" for addr, name in named]
     for addr, name in [] if apply else named:  # a preview shows the plan as it will be once renamed
         at[addr]["name"] = name
@@ -5576,7 +5577,7 @@ def herdr_sync_once(apply):
             with lock:
                 rec = sessions.get(at[addr]["sid"])
                 if rec:
-                    task_message(None, rec.get("cwd", ""), f"Your user opened you in a herdr tab named {out['name']}, so that's your name now.", prefer=rec)
+                    task_message(None, rec.get("cwd", ""), f"Your user named your herdr tab {out['name']}, so that's your name now.", prefer=rec)
         else:
             name_lines.append(f"{at[addr]['name']} ({addr}) couldn't take its tab's name {name}: {out.get('error', code)}")
     join_lines = [f"{at[addr]['name']} ({addr}) joins the {space} space: you opened it in that herdr space" for addr, space in joined]
@@ -5618,6 +5619,7 @@ def herdr_sync_once(apply):
         return {"actions": lines, "notes": notes}
     app = herdr_app()
     failed = list(join_failed)
+    failed_tabs = set()
     shown = {x for s in layout or [] for tb in s["tabs"] for x in tb["terminals"]}
 
     def do(argv):
@@ -5646,9 +5648,13 @@ def herdr_sync_once(apply):
                 back = do([app, "do", "terminal.keep", "--terminal", act[1], "--place", "tab"])
                 line += " (its pane is back in a new tab)" if back else " (parked, not shown: hc attach " + act[1] + ")"
             failed.append(line)
+            if act[0] == "rename_tab":
+                failed_tabs.add(act[1])
+    memory = herdr_sync.tab_memory(placed, layout, failed_tabs) if layout is not None else config.get("herdr_tab_names") or {}
     with lock:
-        if smap != (config.get("herdr_spaces") or {}):
+        if smap != (config.get("herdr_spaces") or {}) or memory != (config.get("herdr_tab_names") or {}):
             config["herdr_spaces"] = smap
+            config["herdr_tab_names"] = memory
             save_config()
     if actions or joined or named:
         log(f"herdr sync: {len(named) + len(joined) + len(actions) - len(failed)} change(s)" + (f", {len(failed)} failed: {failed[0]}" if failed else ""))
