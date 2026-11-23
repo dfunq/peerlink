@@ -100,7 +100,7 @@ function engine(on: any, { turns = 0, percent = 85, readme = '', claudeMd = '', 
     return { value: undefined }
   })
   const ran: string[][] = []
-  // This Claude Code process's id, as `sh -c 'echo $PPID'` gives it; 0 for none.
+  // This Claude Code process's id, as `sh -c 'echo $PPID'` (or PowerShell, on Windows) gives it; 0 for none.
   // And the terminal it runs in, as the terminal probe gives it ('hc:…', 'tmux:…' or 'tty:…'); '' for none.
   const proc = { pid: 0, terminal: '' }
   on('process.run', (_: any, e: any) => {
@@ -110,6 +110,8 @@ function engine(on: any, { turns = 0, percent = 85, readme = '', claudeMd = '', 
     let exitCode = 0
     if (cmd === 'sh' && String(args[1] ?? '').includes('HC_TERMINAL_ID')) stdout = proc.terminal ? `${proc.terminal}\n` : ''
     else if (cmd === 'sh' && proc.pid) stdout = `${proc.pid}\n`
+    // On Windows the id comes from PowerShell instead.
+    else if (cmd === 'powershell' && proc.pid) stdout = `${proc.pid}\r\n`
     if (cmd === 'git') {
       if (!git.dirs) exitCode = 128
       else if (args.includes('--git-dir')) stdout = git.dirs.join('\n') + '\n'

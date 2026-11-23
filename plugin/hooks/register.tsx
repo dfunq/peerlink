@@ -154,10 +154,19 @@ let stuckHeld: PeerMessage[] = []
 // Whether this runs on Windows, as the plugin's own path says: C:\\… or C:/….
 const onWindows = ($: EngineInterface) => /^[A-Za-z]:[\\/]/.test($.plugin.root)
 
-// This Claude Code process, so the daemon can end it if a requested exit doesn't happen. Not on Windows, where
-// Git Bash's sh would give its own process numbers, not Windows'.
+// On Windows, Claude Code's own process id: the nearest claude or node process above this PowerShell. Git Bash's sh
+// would give its own process numbers, not Windows'.
+export const WINDOWS_PID_PS = [
+  '$p = Get-CimInstance Win32_Process -Filter "ProcessId=$PID"',
+  'for ($i = 0; $i -lt 8 -and $p; $i++) { $p = Get-CimInstance Win32_Process -Filter "ProcessId=$($p.ParentProcessId)"; if ($p.Name -match "^(claude|node)(\\.exe)?$") { $p.ProcessId; break } }',
+].join('; ')
+// This Claude Code process, so the daemon can end it if a requested exit doesn't happen, and can tell which of the
+// agents it started this is.
 async function processId($: EngineInterface) {
-  if (pid === undefined && onWindows($)) pid = 0
+  if (pid === undefined && onWindows($)) {
+    const run = await $.process.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', WINDOWS_PID_PS], { timeoutMs: 10000 }).catch(() => undefined)
+    pid = Number(run?.stdout.trim()) || 0
+  }
   if (pid === undefined) {
     const run = await $.process.run(['sh', '-c', 'echo $PPID'], { timeoutMs: 3000 }).catch(() => undefined)
     pid = Number(run?.stdout.trim()) || 0
@@ -414,7 +423,7 @@ const FOLDERS_KEPT = 50
 // directory (it can follow a shell cd), and an agent that re-registers from ~/Repos must not become "Repos".
 // The pin holds only within the Claude Code process that set it: a new process resuming the same session id from
 // another folder (claude --resume there) is that folder's agent. A pin from before 0.9.49 has no process: it's kept and
-// this process stamped on it. Where there's no process id (Windows), a pin is kept as it was.
+// this process stamped on it. Where there's no process id, a pin is kept as it was.
 // `succeeds`: the session this one continues after a /clear or resume, whose folder it keeps.
 type Pin = { cwd: string; pid?: number }
 async function agentFolder($: EngineInterface, succeeds?: string) {

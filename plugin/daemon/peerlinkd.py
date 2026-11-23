@@ -4407,16 +4407,54 @@ def tmux_pane_pid(name):
         return 0
 
 
+def windows_parents():
+    """Each running process's parent on Windows, {pid: parent pid}, from one process snapshot; {} when it can't be
+    taken. ps there is Git Bash's, which has no -o and numbers processes its own way."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class Entry(ctypes.Structure):  # PROCESSENTRY32
+            _fields_ = [("size", wintypes.DWORD), ("usage", wintypes.DWORD), ("pid", wintypes.DWORD),
+                        ("heap", ctypes.c_size_t), ("module", wintypes.DWORD), ("threads", wintypes.DWORD),
+                        ("ppid", wintypes.DWORD), ("priority", ctypes.c_long), ("flags", wintypes.DWORD),
+                        ("exe", ctypes.c_char * 260)]
+        k32 = ctypes.WinDLL("kernel32")
+        k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        k32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        k32.Process32First.argtypes = k32.Process32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(Entry)]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        snap = k32.CreateToolhelp32Snapshot(2, 0)  # TH32CS_SNAPPROCESS
+        if not snap or snap == ctypes.c_void_p(-1).value:
+            return {}
+        parents, entry = {}, Entry()
+        entry.size = ctypes.sizeof(Entry)
+        try:
+            ok = k32.Process32First(snap, ctypes.byref(entry))
+            while ok:
+                parents[entry.pid] = entry.ppid
+                ok = k32.Process32Next(snap, ctypes.byref(entry))
+        finally:
+            k32.CloseHandle(snap)
+        return parents
+    except (OSError, AttributeError):
+        return {}
+
+
 def descends_from(pid, ancestor):
     """Whether process `pid` is `ancestor` or runs under it."""
     try:
         pid = int(pid or 0)
+        parents = windows_parents() if os.name == "nt" else None
         for _ in range(12):
             if pid == ancestor:
                 return True
             if pid <= 1:
                 return False
-            pid = int(subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)], timeout=5, capture_output=True, text=True).stdout.strip() or 0)
+            if parents is not None:
+                pid = parents.get(pid, 0)
+            else:
+                pid = int(subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)], timeout=5, capture_output=True, text=True).stdout.strip() or 0)
     except (OSError, subprocess.SubprocessError, ValueError):
         pass
     return False
