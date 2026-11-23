@@ -8,7 +8,7 @@ import unittest
 import unittest.mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-os.environ.setdefault("PEERLINK_HOME", tempfile.mkdtemp(prefix="peerlink-herdr-mods-test-"))
+os.environ["PEERLINK_HOME"] = tempfile.mkdtemp(prefix="peerlink-herdr-mods-test-")
 
 import peerlinkd as d  # noqa: E402
 from rig import Rig  # noqa: E402
