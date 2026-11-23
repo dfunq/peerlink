@@ -72,6 +72,21 @@ class InstallHerdrMods(unittest.TestCase):
         self.assertEqual(sorted(out["home_skipped"]), sorted([".zshrc", os.path.join(".config", "x.json"), os.path.join(".herdr-", "y.py")]))
         self.assertEqual(read(os.path.join(self.home, ".herdr-jira", "oauth.py")), "print(1)")
 
+    def test_a_herdr_folder_that_is_a_symlink_carries_nothing_elsewhere(self):
+        elsewhere = os.path.join(os.path.dirname(self.home), "elsewhere")
+        os.makedirs(elsewhere)
+        os.symlink(elsewhere, os.path.join(self.home, ".herdr-x"))
+        write(os.path.join(self.src, "_home", ".herdr-x", "authorized_keys"), "theirs")
+        os.makedirs(os.path.join(self.home, ".herdr-y"))
+        os.symlink(elsewhere, os.path.join(self.home, ".herdr-y", "sub"))
+        write(os.path.join(self.src, "_home", ".herdr-y", "sub", "f"), "theirs")
+        code, out = d.install_herdr_mods(self.src)
+        self.assertEqual(code, 200)
+        self.assertEqual(os.listdir(elsewhere), [])
+        self.assertIn(os.path.join(".herdr-x", "authorized_keys"), out["home_skipped"])
+        self.assertIn(os.path.join(".herdr-y", "sub", "f"), out["home_skipped"])
+        self.assertEqual(read(os.path.join(self.home, ".herdr-jira", "oauth.py")), "print(1)")
+
     def test_never_copies_secrets_logs_herdrs_own_files_or_over_peerlinks_panel(self):
         write(os.path.join(self.app, "mods", "peerlink", "main.js"), "the real panel")
         d.install_herdr_mods(self.src)

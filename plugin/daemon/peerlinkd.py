@@ -595,8 +595,12 @@ def install_herdr_mods(source=None):
     home_skipped = []
     for rel, full in herdr_mods_files(os.path.join(src, "_home")) if os.path.isdir(os.path.join(src, "_home")) else []:
         top = rel.split(os.sep, 1)
-        if len(top) == 2 and top[0].startswith(".herdr-") and top[0] != ".herdr-":
-            plan.append((os.path.join(home, rel), full))
+        dest = os.path.join(home, rel)
+        # Where it really lands: a ~/.herdr-x that is a symlink, or one inside it, must not carry the write elsewhere.
+        base = os.path.join(os.path.realpath(home), top[0])
+        inside = os.path.realpath(base) == base and os.path.commonpath([os.path.realpath(dest), base]) == base
+        if len(top) == 2 and top[0].startswith(".herdr-") and top[0] != ".herdr-" and inside:
+            plan.append((dest, full))
         else:
             home_skipped.append(rel)
     if not plan and not layouts_kept:
