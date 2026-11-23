@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.9.99'
+const DAEMON_VERSION = '0.9.100'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -914,11 +914,13 @@ async function poll($: EngineInterface) {
   // The daemon hands a message out again until it's acked: skip one already here or already in the session.
   const held = new Set([...pending, ...notices, ...stuckHeld, ...(submitted?.batch ?? [])].map(m => m.id))
   const inbox = (res.data.inbox as PeerMessage[]).filter(m => !held.has(m.id) && !placed.has(m.id))
-  for (const m of inbox.filter(m => m.kind === 'announcement')) {
+  // An announcement sent with wake starts a turn like a message; any other waits for the next turn.
+  const quiet = (m: PeerMessage) => m.kind === 'announcement' && !m.wake
+  for (const m of inbox.filter(quiet)) {
     notices.push(m)
     $.ui.log(`${logLine(m)}  (read at the next turn)`)
   }
-  pending.push(...inbox.filter(m => m.kind !== 'announcement'))
+  pending.push(...inbox.filter(m => !quiet(m)))
   await resubmitLost($)
   await verifyLanded($).catch(() => undefined)
   if (cfg && before !== cfg.poll_interval_ms) startPolling($)
@@ -1634,6 +1636,11 @@ export const register: Register = (on, options) => {
             description:
               'message (the default); task: work you hand to that agent, tracked until its owner marks it done or failed with update_task, and you get its note then (a task to a space lead is the lead\'s to delegate); announcement: to "space" (or "space:<name>"), read by every agent there at its next turn, no replies. Announce only what everyone needs, such as a shared API change',
           },
+          wake: {
+            type: 'boolean',
+            description:
+              'For an announcement: true starts a turn on every idle agent in the space instead of waiting for its next one, such as "everyone resume" after a restart. Each woken agent spends tokens, so only when they must act now',
+          },
           parent_task: { type: 'string', description: 'When delegating part of a task you own: its id (t…), so the subtask shows under it' },
           task: {
             type: 'string',
@@ -2011,6 +2018,7 @@ export const register: Register = (on, options) => {
       expects_reply: !!input.expects_reply,
       reply_to: input.reply_to,
       kind: input.kind === 'task' || input.kind === 'announcement' ? input.kind : undefined,
+      wake: input.kind === 'announcement' && input.wake === true ? true : undefined,
       parent_task: typeof input.parent_task === 'string' && input.parent_task ? input.parent_task : undefined,
       task: typeof input.task === 'string' && input.task ? input.task : undefined,
       default: typeof input.default === 'string' && input.default ? input.default : undefined,
