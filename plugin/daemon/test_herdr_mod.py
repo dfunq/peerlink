@@ -30,7 +30,9 @@ class Patch(unittest.TestCase):
         self.assertIsNone(missing)
         self.assertIn("peerlinkParent(k) === addr", out)
         self.assertIn("if (lead.length > 6) return [];", out)
-        self.assertIn("(peerlinkTree.names || {})[k.address] || k.name", out)  # a nested row goes by its agent's name  # a loop in the tree can't recurse forever
+        self.assertIn("(peerlinkTree.names || {})[k.address] || k.name", out)
+        self.assertIn(".pl(15)", out)  # a sub-agent's line drops from the lead's icon
+        self.assertIn("when(j > 0, el => el.ml(7))", out)  # and a deeper one's from the icon above it  # a nested row goes by its agent's name  # a loop in the tree can't recurse forever
         self.assertIn('readTextFile("/x/tree.json")', out)
         self.assertEqual(hm.point_layout('{"mod": "agents"}', "peerlink-agents", "agents"), '{"mod": "peerlink-agents"}')
         self.assertEqual(hm.point_layout('{"mod": "agents"}', "peerlink-spaces", "spaces"), '{"mod": "agents"}')
