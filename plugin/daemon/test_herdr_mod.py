@@ -63,7 +63,19 @@ console.log(JSON.stringify([peerlinkParent({ address: "t9", parent: null }), pee
     def test_the_tree_names_each_herdr_spaces_parent(self):
         smap = {"skyforge": "sp1", "ops": "sp2", "login": "sp3", "games": "sp4", "deep": "sp5"}
         parents = {"ops": "skyforge", "login": "skyforge", "deep": "ops", "games": "gone"}
-        self.assertEqual(hm.tree(smap, parents), {"parents": {"sp2": "sp1", "sp3": "sp1", "sp5": "sp2"}, "agents": {}, "names": {}})
+        self.assertEqual(hm.tree(smap, parents), {"parents": {"sp2": "sp1", "sp3": "sp1", "sp5": "sp2"}, "agents": {}, "names": {}, "models": {}})
+
+    def test_a_model_tag_is_short(self):
+        self.assertEqual(hm.model_tag("claude-sonnet-5-5", "medium"), ["Sonnet 5.5", "med"])
+        self.assertEqual(hm.model_tag("claude-opus-5-5[1m]", "xhigh"), ["Opus 5.5", "xhigh"])
+        self.assertEqual(hm.model_tag("Haiku 5.5", None), ["Haiku 5.5", ""])
+        self.assertEqual(hm.model_tag("opus", "turbo"), ["Opus", ""])
+        self.assertIsNone(hm.model_tag("gpt-9", "high"))
+        self.assertIsNone(hm.model_tag(None, "high"))
+
+    def test_the_tree_carries_each_terminals_model_tag(self):
+        got = hm.tree({}, {}, models={"t1": ["Opus 5.5", "med"], "t2": None})
+        self.assertEqual(got["models"], {"t1": ["Opus 5.5", "med"]})
 
     @unittest.skipUnless(shutil.which("node"), "node isn't installed")
     def test_the_nesting_orders_depth_first_and_keeps_worktrees_with_their_repo(self):
@@ -106,7 +118,7 @@ class Daemon(unittest.TestCase):
     def test_it_writes_the_tree_and_makes_the_mod_once(self):
         self.d.herdr_nest({"skyforge": "sp1", "ops": "sp2"}, {"ops": "skyforge"})
         with open(os.path.join(self.d.HOME, "herdr-tree.json")) as f:
-            self.assertEqual(json.load(f), {"parents": {"sp2": "sp1"}, "agents": {}, "names": {}})
+            self.assertEqual(json.load(f), {"parents": {"sp2": "sp1"}, "agents": {}, "names": {}, "models": {}})
         mod = os.path.join(self.app, "mods", "peerlink-spaces")
         with open(os.path.join(mod, "main.js")) as f:
             self.assertIn(json.dumps(os.path.join(self.d.HOME, "herdr-tree.json")), f.read())
