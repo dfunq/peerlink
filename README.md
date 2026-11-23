@@ -96,7 +96,7 @@ Agents act with your permissions, so a message from a peer or a linked chat is a
 - **[Settings](docs/reference.md#settings)**: everything you can tune.
 - **[Contributing](CONTRIBUTING.md)** and **[Security policy](SECURITY.md)**.
 
-**Pairs well with [herdr](https://herdr.dev)**, a terminal workspace manager that keeps all your agents in one persistent session so you can watch them. peerlink lets them talk.
+**Pairs well with [herdr](https://herdr.dev)**, a terminal workspace manager that keeps all your agents in one persistent session so you can watch them. peerlink lets them talk. **[herdr-mods](https://github.com/dfunq/herdr-mods)** adds a Jira and GitHub panel to herdr whose **Send to agent** button hands a ticket to a running peerlink agent; install it from peerlink's Settings → **herdr app**.
 
 ## License
 
