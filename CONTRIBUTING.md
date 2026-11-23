@@ -45,10 +45,12 @@ PEERLINK_HOME=/tmp/peerlink-dev PEERLINK_PORT=7998 python3 plugin/daemon/peerlin
 
 ```
 claude plugin test plugin                          # the hooks module (register.test.tsx)
-python3 -m unittest discover -s plugin/daemon      # the MCP endpoint
+python3 -m unittest discover -s plugin/daemon      # the daemon, Discord bot and MCP endpoint
 ```
 
-Both must pass before a change is merged, and CI runs them on every pull request. Add a test for a bug fix where you can. For daemon changes with no unit tests, describe in the pull request how you checked the change against a scratch daemon.
+If `claude` is a shell alias with flags, `claude plugin test` refuses to run through it, so use `command claude plugin test plugin`. To run one daemon test module, use `-k <name>`.
+
+Both suites must pass before a change is merged. CI runs them on every pull request, on Ubuntu and macOS. There is no Windows job, so a Windows-only change needs a note in the pull request on how you checked it on Windows. Add a test for a bug fix where you can. For daemon changes with no unit tests, describe in the pull request how you checked the change against a scratch daemon.
 
 ## Making a change
 
@@ -57,11 +59,30 @@ Both must pass before a change is merged, and CI runs them on every pull request
 - **Mind the trust boundary.** Messages from peers, Discord and remote daemons become prompts in a session running as the user. Anything that widens who can send them, or what they can trigger, needs a careful look. See [Security](docs/reference.md#security).
 - **Write for the people who'll read it.** Tool descriptions and guidance text are read by agents, and UI and Discord text by people on their phones. Keep both short and plain.
 - **Update the README and docs/reference.md** when behaviour, settings or commands change.
-- **Use made-up names in anything you commit.** In tests, docs, examples, screenshots and commit messages, write `alex`, `acme`, `/Users/x` or `api`, never a real person, company, machine name or home folder. For screenshots, run a scratch daemon with a made-up team and `PEERLINK_HOSTNAME` set; don't capture your own.
+- **A new daemon module** beside `peerlinkd.py` goes into the fingerprint list near the top of `peerlinkd.py`, so a changed copy replaces the running daemon.
+
+## No real names or company mentions
+
+This repo is public, and everything in it stays in its history. Nothing you put on GitHub here may name a real person, company, customer, machine, home folder, private project or internal ticket key. That covers:
+
+- code, tests, docs, examples and screenshots
+- commit messages, branch names, pull request titles and descriptions, and issue text
+- the identity you commit as: check `git log -1 --format='%an <%ae>'` before you push, and use your GitHub `noreply` address rather than a work email
+
+Write `alex`, `acme`, `/Users/x` or `api` instead. For screenshots, run a scratch daemon with a made-up team and `PEERLINK_HOSTNAME` set; don't capture your own. Before pushing, grep your change for the names you know from your own setup:
+
+```
+git grep -niE 'yourname|yourcompany|yourhost'
+git log origin/main..HEAD --format='%an %ae %s'
+```
+
+A pull request that breaks this is closed and has to be opened again cleanly. Pushing a fix on top isn't enough, because GitHub keeps the old commits under the pull request.
 
 ## Pull requests
 
-- One change per pull request, with a commit subject that says what changed for users, such as "A reply to a closed thread reopens it".
+- One change per pull request, with a commit subject that says what changed for users, such as "A reply to a closed thread reopens it". Name the branch after the change.
+- Every pull request gets an independent review, and is merged only once it's approved and CI has passed. A push after approval needs a fresh review.
+- CI on a pull request from a fork waits until a maintainer approves the run.
 - Don't bump the version. The maintainer does that at release.
 - By contributing, you agree your work is licensed under the [MIT License](LICENSE).
 
