@@ -34,7 +34,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.99"
+VERSION = "0.9.100"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -2803,8 +2803,9 @@ def post_async(posts):
     threading.Thread(target=run, daemon=True).start()
 
 
-def announce(sender_rec, space, text, hops=0, from_discord=None):
-    """One message to every live agent in a space, read at the start of each one's next turn; nobody replies."""
+def announce(sender_rec, space, text, hops=0, from_discord=None, wake=False, stats=None):
+    """One message to every live agent in a space, read at the start of each one's next turn; nobody replies.
+    With wake, it starts a turn on each idle one instead of waiting for its next."""
     with lock:
         now = time.time()
         recipients = [r for r in sessions.values() if is_live(r, now) and r["id"] != (sender_rec or {}).get("id") and space in reach(r)]
@@ -2818,6 +2819,10 @@ def announce(sender_rec, space, text, hops=0, from_discord=None):
                "to_cwd": "", "to_space": space, "text": text[:20000], "expects_reply": False, "reply_to": None,
                "hops": hops, "status": "queued" if recipients else "delivered", "v": 2, "kind": "announcement",
                "recipients": [display_name(r) for r in recipients]}
+        if wake:
+            msg["wake"] = True
+        if stats is not None:
+            stats["idle"] = sum(1 for r in recipients if not r.get("busy"))
         next_msg[0] += 1
         for r in recipients:
             inboxes.setdefault(r["id"], []).append(msg)
@@ -3676,9 +3681,17 @@ def send(body):
             if len(sent) >= int(config.get("announce_per_hour") or 6):
                 return 429, {"error": f"you've sent {len(sent)} announcements this hour; the limit is {config.get('announce_per_hour')}. Message the agents who need it instead"}
             announce_times[sender] = sent + [now]
-        msg = announce(sender_rec, space, text, hops)
-        n = len(msg["recipients"])
-        return 200, {"id": msg["id"], "to": f"everyone in {space} ({n} agent{'' if n == 1 else 's'})", "status": "queued"}
+        wake = bool(body.get("wake"))
+        stats = {}
+        msg = announce(sender_rec, space, text, hops, wake=wake, stats=stats)
+        n, idle = len(msg["recipients"]), stats.get("idle", 0)
+        out = {"id": msg["id"], "to": f"everyone in {space} ({n} agent{'' if n == 1 else 's'})", "status": "queued"}
+        if idle and wake:
+            out["note"] = f"{idle} idle agent{'' if idle == 1 else 's'} start{'s' if idle == 1 else ''} a turn on it"
+        elif idle:
+            out["note"] = (f"{idle} of them {'is' if idle == 1 else 'are'} idle and won't read it until something starts "
+                           f"{'its' if idle == 1 else 'their'} next turn; send with wake: true to start one now")
+        return 200, out
     # A reply to something you sent from the web UI comes back to you.
     if parent and parent.get("from") == "user":
         to = "user"

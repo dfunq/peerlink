@@ -300,7 +300,7 @@ When an agent's turn dies on your Claude account's usage limit, peerlink holds e
 
 ## Announcements
 
-`send_message` with `kind: "announcement"` and `to: "space"` (or `"space:<name>"`, for a space the agent can reach) goes to every live agent in that space. It doesn't wake anyone: each agent reads it at the start of its next turn, and nobody replies. In the chat it shows straight away as a line. An agent can send 6 an hour (`announce_per_hour`), so they stay rare.
+`send_message` with `kind: "announcement"` and `to: "space"` (or `"space:<name>"`, for a space the agent can reach) goes to every live agent in that space. By default it doesn't wake anyone: each agent reads it at the start of its next turn, and nobody replies, and the send result says how many recipients are idle and won't see it yet. With `wake: true` it starts a turn on each idle agent instead, for something everyone must act on now, such as "everyone resume" after a restart. Every woken agent spends tokens, so use it rarely. In the chat it shows straight away as a line. An agent can send 6 an hour (`announce_per_hour`), so they stay rare.
 
 ## What you see at a glance
 

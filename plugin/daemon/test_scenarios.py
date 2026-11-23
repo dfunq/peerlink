@@ -35,6 +35,17 @@ class ScenarioTest(unittest.TestCase):
         rig.crash()  # acked this time: nothing comes back
         self.assertEqual(core.poll(), [])
 
+    def test_an_announcement_says_who_is_idle_and_wakes_them_only_when_asked(self):
+        rig = self.rig()
+        _, core, loop = self.team(rig)
+        loop.poll()  # idle, what it's told on joining read
+        out = core.send(to="space", text="Freeze on main.", kind="announcement")
+        self.assertIn("1 of them is idle and won't read it until", out["note"])
+        self.assertNotIn("wake", loop.expect("Freeze on main."))  # waits for its next turn
+        out = core.send(to="space", text="Everyone resume.", kind="announcement", wake=True)
+        self.assertEqual(out["note"], "1 idle agent starts a turn on it")
+        self.assertTrue(loop.expect("Everyone resume.")["wake"])
+
     def test_setting_a_summary_never_takes_messages_a_new_agent_has_waiting(self):
         # A hired worker sets its first summary a second after starting: that heartbeat once took its first prompt
         # and dropped it.
