@@ -47,11 +47,14 @@ NEST_JS = LOAD_JS + r'''function peerlinkNest(out) {
     else tops.push(g);
   }
   const res = [], seen = new Set();
-  const walk = (g, depth) => {
+  // lines: the tree lines in front of a nested space, as in the agents list ("├", "└", "│" or "" per level).
+  const walk = (g, depth, lines = []) => {
     if (seen.has(g[0].w.id)) return;
     seen.add(g[0].w.id);
-    res.push({ ...g[0], depth }, ...g.slice(1).map((r) => ({ ...r, depth })));
-    for (const k of kids.get(g[0].w.id) || []) walk(k, depth + 1);
+    res.push({ ...g[0], depth, lines }, ...g.slice(1).map((r) => ({ ...r, depth })));
+    const ks = (kids.get(g[0].w.id) || []).filter((k) => !seen.has(k[0].w.id));
+    const lead = lines.map((l, j) => (j < lines.length - 1 ? l : l === "├" ? "│" : ""));
+    ks.forEach((k, j) => walk(k, depth + 1, [...lead, j === ks.length - 1 ? "└" : "├"]));
   };
   tops.forEach((g) => walk(g, 0));
   groups.forEach((g) => walk(g, 0));  // a loop in the tree: whatever wasn't reached
@@ -66,9 +69,19 @@ PATCHES = [
      + NEST_JS),
     ("    const out = [];\n    const placed = new Set();", "    let out = [];\n    const placed = new Set();"),
     ("    // Simulate the batch so later indexes include earlier moves.", "    out = peerlinkNest(out);\n    // Simulate the batch so later indexes include earlier moves."),
-    ("  row({ w, i, g, tree }, t) {", "  row({ w, i, g, tree, depth }, t) {"),
+    ("  row({ w, i, g, tree }, t) {", "  row({ w, i, g, tree, lines }, t) {"),
+    # A nested space's line drops from its parent's icon, as in the agents list. The 18px icon's middle is 9 in; the
+    # first column's line sits there, and each deeper one 17 further in, under the icon of the row above it (a column
+    # is 9 wide, then the row's gap of 9). Rows are 30px with the 18px middle 6 down, so each piece spans exactly 30px,
+    # from the bottom of the icon above (-12) to where the next row's piece starts (18): no two pieces overlap, as a
+    # translucent line would show. "├" and "└" are straight lines with a tick off them; "└" stops at its tick.
     ("          .when(!tree, el => el.child(h_flex().size(18)",
-     "          .when(!tree && Boolean(depth), el => el.pl(18 * depth))\n          .when(!tree, el => el.child(h_flex().size(18)"),
+     "          .when(!tree && Boolean(lines?.length), el => el.child(h_flex().flex_none().h(18).children(lines.map((l, j) =>"
+     " div().relative().flex_none().w(9).h(18).ml(j ? 17 : 8)"
+     ".when(l === \"│\" || l === \"├\", c => c.child(div().absolute().left(0).top(-12).h(30).border_l(1.5).border_color(t.input)))"
+          ".when(l === \"└\", c => c.child(div().absolute().left(0).top(-12).h(21).border_l(1.5).border_color(t.input)))"
+     ".when(l === \"├\" || l === \"└\", c => c.child(div().absolute().left(1).top(8.5).w(8).h(1).bg(t.input)))))))\n"
+     "          .when(!tree, el => el.child(h_flex().size(18)"),
 ]
 
 
