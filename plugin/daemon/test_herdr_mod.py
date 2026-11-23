@@ -71,6 +71,7 @@ console.log(JSON.stringify([peerlinkParent({ address: "t9", parent: null }), pee
         self.assertEqual(hm.model_tag("Haiku 5.5", None), ["Haiku 5.5", ""])
         self.assertEqual(hm.model_tag("opus", "turbo"), ["Opus", ""])
         self.assertIsNone(hm.model_tag("gpt-9", "high"))
+        self.assertEqual(hm.model_tag("claude-3-5-sonnet-20241022", "low"), ["Sonnet", "low"])
         self.assertIsNone(hm.model_tag(None, "high"))
 
     def test_the_tree_carries_each_terminals_model_tag(self):

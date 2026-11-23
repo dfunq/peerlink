@@ -101,6 +101,54 @@ function peerlinkTag(t, m) {
     .child(div().text_color(hue(PEERLINK_FAMILY, String(m[0]).split(" ")[0])).child(String(m[0])))
     .when(Boolean(m[1]), (el) => el.child(div().text_color(hue(PEERLINK_EFFORT, m[1])).child(String(m[1]))));
 }
+// "Nested by space": spaces in peerlink's tree order, each header with the Spaces sidebar's tree lines, and the
+// lines carried on through the rows of the agents under it. A space with no agents shows only to hold its kids.
+const PEERLINK_COL = 16;
+function peerlinkNestedGroups(rest) {
+  peerlinkLoad();
+  const parents = peerlinkTree.parents || {};
+  const all = spaces();
+  const known = new Set(all.map((s) => s.id));
+  const members = new Map();
+  for (const a of rest) (members.get(a.space) || members.set(a.space, []).get(a.space)).push(a);
+  const kids = new Map(), tops = [];
+  for (const s of all) {
+    const p = parents[s.id];
+    if (p && p !== s.id && known.has(p)) (kids.get(p) || kids.set(p, []).get(p)).push(s);
+    else tops.push(s);
+  }
+  const busy = new Map();
+  const holds = (s, seen = new Set()) => {
+    if (busy.has(s.id)) return busy.get(s.id);
+    if (seen.has(s.id)) return false;
+    seen.add(s.id);
+    const v = members.has(s.id) || (kids.get(s.id) || []).some((k) => holds(k, seen));
+    busy.set(s.id, v);
+    return v;
+  };
+  const out = [], seen = new Set();
+  const walk = (s, lines, anc) => {
+    if (seen.has(s.id)) return;
+    seen.add(s.id);
+    const ks = (kids.get(s.id) || []).filter((k) => !seen.has(k.id) && holds(k));
+    const lead = lines.map((l, j) => (j < lines.length - 1 ? l : l === "├" ? "│" : ""));
+    const id = `sp-${s.id}`;
+    out.push({ id, label: s.name || "", status: null, members: members.get(s.id) || [], lines, anc,
+               cont: [...lead, ks.length ? "│" : ""], kids: ks.length > 0 });
+    ks.forEach((k, j) => walk(k, [...lead, j === ks.length - 1 ? "└" : "├"], [...anc, id]));
+  };
+  tops.filter((s) => holds(s)).forEach((s) => walk(s, [], []));
+  // An agent whose space isn't listed keeps a plain group of its own.
+  for (const a of rest) if (!seen.has(a.space)) { seen.add(a.space); out.push({ id: `sp-${a.space}`, label: a.space_name || "", status: null, members: members.get(a.space) || [a], lines: [], anc: [], cont: [] }); }
+  return out;
+}
+// One column of tree line per level, h high, its middle at mid; pieces never overlap, so a translucent line reads even.
+function peerlinkCols(t, lines, h, mid) {
+  return h_flex().flex_none().h(h).mr(-6).children(lines.map((l) => div().relative().flex_none().w(PEERLINK_COL).h(h)
+    .when(l === "│" || l === "├", (c) => c.child(div().absolute().left(4).top(0).h(h).border_l(1.5).border_color(t.input)))
+    .when(l === "└", (c) => c.child(div().absolute().left(4).top(0).h(mid).border_l(1.5).border_color(t.input)))
+    .when(l === "├" || l === "└", (c) => c.child(div().absolute().left(5).top(mid - 0.5).w(PEERLINK_COL - 7).h(1).bg(t.input)))));
+}
 function peerlinkParent(k) {
   peerlinkLoad();
   const p = (peerlinkTree.agents || {})[k.address];
@@ -124,6 +172,23 @@ AGENTS_PATCHES = [
     # 16px icon (row padding 8, so its middle is at 16), and each deeper column under the 14px icon of the row
     # above it (7 in from where that row's icon starts).
     ("      .pl(39)\n", "      .pl(15)\n"),
+    # "Nested by space", a third sort.
+    ('  { id: "grouped", label: "Grouped by space", icon: "layers" },\n',
+     '  { id: "grouped", label: "Grouped by space", icon: "layers" },\n  { id: "nested", label: "Nested by space", icon: "folder" },\n'),
+    ('openOverlay({ mod: "agents", kind: "popup", width: 200, height: 140, props: { sortMenu: true } })',
+     'openOverlay({ mod: "agents", kind: "popup", width: 200, height: 171, props: { sortMenu: true } })'),
+    ("    // A group's header; it folds the group.",
+     '    const nestedSort = sort.id === "nested";\n'
+     "    if (nestedSort) groups.splice(pinned.length ? 1 : 0, groups.length, ...peerlinkNestedGroups(rest));\n"
+     "    // A group's header; it folds the group."),
+    ("        .id(g.id)\n        .px(8)\n        .pt(8)\n",
+     "        .id(g.id)\n        .relative()\n        .px(8)\n        .pt(8)\n"
+     "        .when(Boolean(g.lines?.length), (el) => el.child(peerlinkCols(t, g.lines, 22, 11)))\n"
+     "        .when(Boolean(g.kids) && open, (el) => el.child(div().absolute().left(8 + PEERLINK_COL * (g.lines?.length || 0) + 4).top(25).h(5).border_l(1.5).border_color(t.input)))\n"),
+    ("      : groups.flatMap((g) => [header(g), ...(this.folded.has(g.id) ? [] : g.members.flatMap(withKids))]);",
+     "      : groups.filter((g) => !(g.anc || []).some((x) => this.folded.has(x)))\n"
+     "        .flatMap((g) => [header(g), ...(this.folded.has(g.id) ? [] : g.members.flatMap(withKids)\n"
+     "          .map((r) => (g.cont?.length ? h_flex().w_full().overflow_hidden().child(peerlinkCols(t, g.cont, 30, 15)).child(div().flex_1().min_w(0).child(r)) : r)))]);"),
     ("      .children(s.lines.map(l => div().self_start().mt(-4).w(9).h(17).mr(4).flex_none()",
      "      .children(s.lines.map((l, j) => div().self_start().mt(-4).w(9).h(17).mr(4).flex_none().when(j > 0, el => el.ml(7))"),
     # The model and effort tag after a lead's name while the row is hovered (a sub-agent's is with its name, above).
@@ -167,7 +232,7 @@ EFFORT_TAGS = {"low": "low", "medium": "med", "high": "high", "xhigh": "xhigh", 
 def model_tag(model, effort=None):
     """[model, effort] as an agent's row shows them: "Sonnet 5.5", "med". A model peerlink can't name, or none,
     gives None; an effort it doesn't know is left off."""
-    m = re.search(r"(opus|sonnet|haiku|fable)(?:[-_ ]?(\d+)(?:[-.](\d+))?)?", str(model or "").lower())
+    m = re.search(r"(opus|sonnet|haiku|fable)(?:[-_ ]?(\d{1,2})(?:[-.](\d{1,2}))?(?!\d))?", str(model or "").lower())
     if not m:
         return None
     label = m.group(1).capitalize() + (" " + m.group(2) + ("." + m.group(3) if m.group(3) else "") if m.group(2) else "")
