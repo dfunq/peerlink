@@ -59,6 +59,19 @@ class InstallHerdrMods(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(self.app, "layouts", "herdr-jira.json")))
         self.assertEqual(read(os.path.join(self.home, ".herdr-jira", "oauth.py")), "print(1)")
 
+    def test_home_takes_only_herdr_folders_never_a_dotfile(self):
+        write(os.path.join(self.home, ".zshrc"), "mine")
+        write(os.path.join(self.src, "_home", ".zshrc"), "theirs")
+        write(os.path.join(self.src, "_home", ".config", "x.json"), "theirs")
+        write(os.path.join(self.src, "_home", ".herdr-", "y.py"), "theirs")
+        code, out = d.install_herdr_mods(self.src)
+        self.assertEqual(code, 200)
+        self.assertEqual(read(os.path.join(self.home, ".zshrc")), "mine")
+        self.assertFalse(os.path.exists(os.path.join(self.home, ".config")))
+        self.assertFalse(os.path.exists(os.path.join(self.home, ".herdr-")))
+        self.assertEqual(sorted(out["home_skipped"]), sorted([".zshrc", os.path.join(".config", "x.json"), os.path.join(".herdr-", "y.py")]))
+        self.assertEqual(read(os.path.join(self.home, ".herdr-jira", "oauth.py")), "print(1)")
+
     def test_never_copies_secrets_logs_herdrs_own_files_or_over_peerlinks_panel(self):
         write(os.path.join(self.app, "mods", "peerlink", "main.js"), "the real panel")
         d.install_herdr_mods(self.src)
