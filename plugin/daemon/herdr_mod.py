@@ -89,6 +89,12 @@ AGENTS_PATCHES = [
      '    const kids = all.filter((k) => peerlinkParent(k) === addr && k.state === "live");'),
     ("      .child(div().flex_1().truncate().text_color(on ? t.foreground : t.muted).child(k.name || k.template || k.program?.name || k.address))",
      "      .child(div().flex_1().truncate().text_color(on ? t.foreground : t.muted).child((peerlinkTree.names || {})[k.address] || k.name || k.template || k.program?.name || k.address))"),
+    # A sub-agent's line drops from its parent's icon, not from its name: the first column sits under the lead's
+    # 16px icon (row padding 8, so its middle is at 16), and each deeper column under the 14px icon of the row
+    # above it (7 in from where that row's icon starts).
+    ("      .pl(39)\n", "      .pl(15)\n"),
+    ("      .children(s.lines.map(l => div().self_start().mt(-4).w(9).h(17).mr(4).flex_none()",
+     "      .children(s.lines.map((l, j) => div().self_start().mt(-4).w(9).h(17).mr(4).flex_none().when(j > 0, el => el.ml(7))"),
 ]
 
 # herdr's mod -> (peerlink's copy, the patches that make it).
