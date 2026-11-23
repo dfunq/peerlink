@@ -86,7 +86,8 @@ PATCHES = [
 
 
 AGENTS_JS = LOAD_JS + r'''
-// An agent's model and effort, after its name: "Opus 5.5 med", colored by model family and by effort level.
+// An agent's model and effort, after its name while its row is hovered: "Opus 5.5 med", colored by model family and
+// by effort level.
 const PEERLINK_FAMILY = { Opus: "ansi5", Sonnet: "ansi4", Haiku: "ansi2", Fable: "ansi3" };
 const PEERLINK_EFFORT = { low: "ansi2", med: "ansi6", high: "ansi3", xhigh: "ansi1", max: "ansi1" };
 function peerlinkModel(addr) {
@@ -115,20 +116,29 @@ AGENTS_PATCHES = [
     ('    const kids = all.filter((k) => k.parent === addr && k.state === "live");',
      '    const kids = all.filter((k) => peerlinkParent(k) === addr && k.state === "live");'),
     ("      .child(div().flex_1().truncate().text_color(on ? t.foreground : t.muted).child(k.name || k.template || k.program?.name || k.address))",
-     "      .child(div().flex_1().truncate().text_color(on ? t.foreground : t.muted).child((peerlinkTree.names || {})[k.address] || k.name || k.template || k.program?.name || k.address))"),
+     # The name keeps its own width, so the model tag sits right after it, as on a lead's row.
+     "      .child(div().min_w(0).truncate().text_color(on ? t.foreground : t.muted).child((peerlinkTree.names || {})[k.address] || k.name || k.template || k.program?.name || k.address))\n"
+     "      .when(this.hovered === k.address && Boolean(peerlinkModel(k.address)), el => el.child(div().flex_none().ml(5).child(peerlinkTag(t, peerlinkModel(k.address)))))\n"
+     "      .child(div().flex_1())"),
     # A sub-agent's line drops from its parent's icon, not from its name: the first column sits under the lead's
     # 16px icon (row padding 8, so its middle is at 16), and each deeper column under the 14px icon of the row
     # above it (7 in from where that row's icon starts).
     ("      .pl(39)\n", "      .pl(15)\n"),
     ("      .children(s.lines.map(l => div().self_start().mt(-4).w(9).h(17).mr(4).flex_none()",
      "      .children(s.lines.map((l, j) => div().self_start().mt(-4).w(9).h(17).mr(4).flex_none().when(j > 0, el => el.ml(7))"),
-    # The model and effort tag: on a sub-agent's row before its status, on a lead's after its name.
-    ("      .child(this.status(t, { status: st }, compact));",
-     "      .when(Boolean(peerlinkModel(k.address)), el => el.child(div().mr(6).child(peerlinkTag(t, peerlinkModel(k.address)))))\n"
-     "      .child(this.status(t, { status: st }, compact));"),
+    # The model and effort tag after a lead's name while the row is hovered (a sub-agent's is with its name, above).
     ("          .when(full && Boolean(more), el => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`\\u00b7 ${more}`))))",
      "          .when(full && Boolean(more), el => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`\\u00b7 ${more}`)))\n"
-     "          .when(Boolean(peerlinkModel(a.address)), el => el.child(peerlinkTag(t, peerlinkModel(a.address)))))"),
+     "          .when(this.hovered === a.address && Boolean(peerlinkModel(a.address)), el => el.child(peerlinkTag(t, peerlinkModel(a.address)))))"),
+    # A sub-agent's row tracks the hover too, for its tag.
+    ("      .hover((s) => s.bg(t.hover))\n      .on_click(() => (this.listed.has(k.address)",
+     "      .hover((s) => s.bg(t.hover))\n"
+     "      .on_hover((on, cx) => {\n"
+     "        if (on) this.hovered = k.address;\n"
+     "        else if (this.hovered === k.address) this.hovered = null;\n"
+     "        cx.notify();\n"
+     "      })\n"
+     "      .on_click(() => (this.listed.has(k.address)"),
 ]
 
 # herdr's mod -> (peerlink's copy, the patches that make it).
