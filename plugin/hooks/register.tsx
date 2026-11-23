@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.9.96'
+const DAEMON_VERSION = '0.9.97'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -840,6 +840,9 @@ async function clearNow($: EngineInterface) {
   }
 }
 
+let stepModel = ''
+let stepEffort = ''
+
 async function poll($: EngineInterface) {
   if (!sessionId) return
   // After a /clear or resume the process runs under a new session id, and no session.start says so.
@@ -862,7 +865,7 @@ async function poll($: EngineInterface) {
     unacked = []
     // What's here on purpose, waiting for the next turn: the daemon needn't hand it out again while this says so.
     const holding = [...pending, ...notices, ...stuckHeld].map(m => m.id)
-    res = await call($, 'POST', `/api/sessions/${sessionId}/heartbeat`, { busy, activity: busy ? activity : undefined, context: await contextPercent($), branch: await freshBranch($), reload_queued: reloadQueued, ack, holding, stuck: stuckSince })
+    res = await call($, 'POST', `/api/sessions/${sessionId}/heartbeat`, { busy, activity: busy ? activity : undefined, context: await contextPercent($), branch: await freshBranch($), reload_queued: reloadQueued, ack, holding, stuck: stuckSince, model: stepModel || undefined, effort: stepEffort || undefined })
     if (!res.ok) unacked.push(...ack)
   } catch {
     await ensureDaemon($)
@@ -1900,6 +1903,16 @@ export const register: Register = (on, options) => {
       limitReached($, { kind: 'rate_limit' })
     }
     return next(e)
+  })
+
+  // The model and effort each request runs on, sent with the heartbeat for this agent's row in the herdr app.
+  on('turn.step', async function* ($, e, next) {
+    if ((e as any).agentId === undefined) {
+      stepModel = String((e as any).model ?? '') || stepModel
+      const effort = (e as any).effort
+      stepEffort = typeof effort === 'string' ? effort : ''
+    }
+    return yield* next(e)
   })
 
   on('turn.start', async ($, e, next) => {

@@ -86,6 +86,20 @@ PATCHES = [
 
 
 AGENTS_JS = LOAD_JS + r'''
+// An agent's model and effort, after its name: "Opus 5.5 med", colored by model family and by effort level.
+const PEERLINK_FAMILY = { Opus: "ansi5", Sonnet: "ansi4", Haiku: "ansi2", Fable: "ansi3" };
+const PEERLINK_EFFORT = { low: "ansi2", med: "ansi6", high: "ansi3", xhigh: "ansi1", max: "ansi1" };
+function peerlinkModel(addr) {
+  peerlinkLoad();
+  const m = (peerlinkTree.models || {})[addr];
+  return Array.isArray(m) && m[0] ? m : null;
+}
+function peerlinkTag(t, m) {
+  const hue = (map, key) => t[map[key]] || t.dim;
+  return h_flex().flex_none().gap(4).text_size(10.5)
+    .child(div().text_color(hue(PEERLINK_FAMILY, String(m[0]).split(" ")[0])).child(String(m[0])))
+    .when(Boolean(m[1]), (el) => el.child(div().text_color(hue(PEERLINK_EFFORT, m[1])).child(String(m[1]))));
+}
 function peerlinkParent(k) {
   peerlinkLoad();
   const p = (peerlinkTree.agents || {})[k.address];
@@ -108,6 +122,13 @@ AGENTS_PATCHES = [
     ("      .pl(39)\n", "      .pl(15)\n"),
     ("      .children(s.lines.map(l => div().self_start().mt(-4).w(9).h(17).mr(4).flex_none()",
      "      .children(s.lines.map((l, j) => div().self_start().mt(-4).w(9).h(17).mr(4).flex_none().when(j > 0, el => el.ml(7))"),
+    # The model and effort tag: on a sub-agent's row before its status, on a lead's after its name.
+    ("      .child(this.status(t, { status: st }, compact));",
+     "      .when(Boolean(peerlinkModel(k.address)), el => el.child(div().mr(6).child(peerlinkTag(t, peerlinkModel(k.address)))))\n"
+     "      .child(this.status(t, { status: st }, compact));"),
+    ("          .when(full && Boolean(more), el => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`\\u00b7 ${more}`))))",
+     "          .when(full && Boolean(more), el => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`\\u00b7 ${more}`)))\n"
+     "          .when(Boolean(peerlinkModel(a.address)), el => el.child(peerlinkTag(t, peerlinkModel(a.address)))))"),
 ]
 
 # herdr's mod -> (peerlink's copy, the patches that make it).
@@ -130,19 +151,33 @@ def point_layout(text, to, base="spaces"):
     return block.sub(lambda m: m.group(1) + to + m.group(3), text)
 
 
-def tree(smap, parents, agents=None, names=None):
+EFFORT_TAGS = {"low": "low", "medium": "med", "high": "high", "xhigh": "xhigh", "max": "max"}
+
+
+def model_tag(model, effort=None):
+    """[model, effort] as an agent's row shows them: "Sonnet 5.5", "med". A model peerlink can't name, or none,
+    gives None; an effort it doesn't know is left off."""
+    m = re.search(r"(opus|sonnet|haiku|fable)(?:[-_ ]?(\d+)(?:[-.](\d+))?)?", str(model or "").lower())
+    if not m:
+        return None
+    label = m.group(1).capitalize() + (" " + m.group(2) + ("." + m.group(3) if m.group(3) else "") if m.group(2) else "")
+    return [label, EFFORT_TAGS.get(str(effort or "").lower(), "")]
+
+
+def tree(smap, parents, agents=None, names=None, models=None):
     """The file the patched mods read: each herdr space's parent herdr space, from peerlink's space tree, and each
     agent's parent terminal. smap: {peerlink space: herdr space id}; parents: {peerlink space: the space it sits
     inside}; agents: {terminal address: parent terminal address}; names: {terminal address: its agent's name}, shown
-    on a nested row in place of the terminal's own name."""
+    on a nested row in place of the terminal's own name; models: {terminal address: [model, effort]} (model_tag)."""
     out = {}
     for space, hid in sorted((smap or {}).items()):
         p = (parents or {}).get(space)
         if hid and p and smap.get(p) and smap[p] != hid:
             out[hid] = smap[p]
     return {"parents": out, "agents": {a: p for a, p in sorted((agents or {}).items()) if a and p and a != p},
-            "names": {a: n for a, n in sorted((names or {}).items()) if a and n}}
+            "names": {a: n for a, n in sorted((names or {}).items()) if a and n},
+            "models": {a: m for a, m in sorted((models or {}).items()) if a and m}}
 
 
-def tree_text(smap, parents, agents=None, names=None):
-    return json.dumps(tree(smap, parents, agents, names), sort_keys=True, indent=1) + "\n"
+def tree_text(smap, parents, agents=None, names=None, models=None):
+    return json.dumps(tree(smap, parents, agents, names, models), sort_keys=True, indent=1) + "\n"

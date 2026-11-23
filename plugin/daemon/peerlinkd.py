@@ -34,7 +34,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.9.96"
+VERSION = "0.9.97"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -5762,7 +5762,9 @@ def herdr_sync_once(apply):
         with lock:
             parents = {x: space_parent(x) for x in smap}
             agent_tree = herdr_agent_tree(placed)
-        herdr_nest(smap, parents, agent_tree, {p["address"]: p["name"] for p in placed})
+            models = {p["address"]: herdr_mod.model_tag((sessions.get(p["sid"]) or {}).get("model"),
+                                                        (sessions.get(p["sid"]) or {}).get("effort")) for p in placed}
+        herdr_nest(smap, parents, agent_tree, {p["address"]: p["name"] for p in placed}, models)
     who = {a["address"]: a["name"] for a in placed}
     lines = name_lines + join_lines + [herdr_sync.describe(a, who, smap) for a in actions]
     if layout is None:
@@ -5835,12 +5837,12 @@ def herdr_app_home():
     return os.environ.get("HERDR_APP_HOME") or os.path.expanduser("~/.config/herdr-app")
 
 
-def herdr_nest(smap, parents, agent_tree=None, names=None):
+def herdr_nest(smap, parents, agent_tree=None, names=None, models=None):
     """The herdr app's spaces sidebar and agents list nest like peerlink's spaces and leads: write the tree the
     peerlink-spaces and peerlink-agents mods read, and keep each a patched copy of the herdr app's own mod (made
     again when herdr ships a new one). Best effort: the app is optional, and without a copy its list stays flat."""
     path = os.path.join(HOME, herdr_mod.TREE_FILE)
-    text = herdr_mod.tree_text(smap, parents, agent_tree, names)
+    text = herdr_mod.tree_text(smap, parents, agent_tree, names, models)
     try:
         with open(path) as f:
             same = f.read() == text
@@ -7650,6 +7652,10 @@ class Handler(BaseHTTPRequestHandler):
                     rec["context"] = max(0, min(100, int(b["context"])))
                 if isinstance(b.get("branch"), str):
                     rec["branch"] = b["branch"][:200]
+                # The model and effort its last turn ran on, for its row in the herdr app's agents list.
+                for k in ("model", "effort"):
+                    if isinstance(b.get(k), str) and b[k]:
+                        rec[k] = b[k][:80]
                 # When it queued /reload-plugins for a newer peerlink that hasn't run yet; 0 once none is waiting.
                 if isinstance(b.get("reload_queued"), (int, float)):
                     rec["reload_queued"] = b["reload_queued"] / 1000 if b["reload_queued"] else None
