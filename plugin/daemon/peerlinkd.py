@@ -34,6 +34,20 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+if os.name == "nt":
+    # The daemon has no console on Windows (it's started detached), so each console program it runs (hc, tasklist,
+    # git, powershell) would open a window of its own that flashes on screen. Run them windowless, unless the caller
+    # asked for a detached process or a console of its own.
+    _popen_init = subprocess.Popen.__init__
+
+    def _no_window_init(self, *args, **kwargs):
+        flags = kwargs.get("creationflags", 0)
+        if not flags & (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_CONSOLE):
+            kwargs["creationflags"] = flags | subprocess.CREATE_NO_WINDOW
+        _popen_init(self, *args, **kwargs)
+
+    subprocess.Popen.__init__ = _no_window_init
+
 VERSION = "0.9.101"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
