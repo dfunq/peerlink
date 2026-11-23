@@ -455,7 +455,7 @@ Requires Python 3 (`python3` on your `PATH`). The daemon runs on the newest Pyth
 
 **Pairs well with [herdr](https://herdr.dev).** herdr is a terminal workspace manager for AI coding agents: it keeps your agents in panes and tabs of one persistent session, so you can watch them all. peerlink lets them talk to each other.
 
-**Your own herdr mods.** Settings → **herdr app** has a folder for your private mods repo (`herdr_mods_source`) and an **Install herdr mods** button, both usable only from your browser.
+**Your own herdr mods.** Settings → **herdr app** has a folder for a clone of your mods repo, such as [herdr-mods](https://github.com/dfunq/herdr-mods) (`herdr_mods_source`), and an **Install herdr mods** button, both usable only from your browser.
 - The button copies `mods/<name>/` into the herdr app's mods and `_home/` into your home folder.
 - It adds a layout from `layouts/` only if you don't have that layout yet.
 - Replaced files are first copied to `~/.peerlink/backups/herdr-mods-<time>/`.
