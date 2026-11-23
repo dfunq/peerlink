@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.9.102'
+const DAEMON_VERSION = '0.9.103'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -187,7 +187,16 @@ export const TERMINAL_SH = [
 ].join('\n')
 let terminal: string | undefined
 async function terminalOf($: EngineInterface) {
-  if (terminal === undefined && onWindows($)) terminal = ''
+  if (terminal === undefined && onWindows($)) {
+    // No ps or tty on Windows: in a herdr terminal, its id and the pid hc reports for it (the program it started).
+    const id = (await $.env.get('HC_TERMINAL_ID')) || ''
+    let top = 0
+    if (id) {
+      const run = await $.process.run(['hc', 'get', id, '--json'], { timeoutMs: 5000 }).catch(() => undefined)
+      try { top = Number(JSON.parse(run?.stdout || '{}').pid) || 0 } catch {}
+    }
+    terminal = id && top ? `hc:${id}@${top}` : ''
+  }
   if (terminal === undefined) {
     const run = await $.process.run(['sh', '-c', TERMINAL_SH], { timeoutMs: 3000 }).catch(() => undefined)
     terminal = run?.stdout.trim() || ''
