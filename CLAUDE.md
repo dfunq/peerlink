@@ -7,14 +7,16 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) first: layout, tests, rules for changes.
 ## Shipping a change
 
 1. Branch off `main` (name it after the change, not a ticket key), commit, push, open a PR. `main` has a ruleset: no force push, no deletion. Every PR gets an independent review before merge.
-2. CI (`.github/workflows/ci.yml`) runs the daemon suite on Ubuntu and macOS (Python 3.9 and 3.13) plus the hooks module. Check for `fail` yourself before merging: `gh pr checks N --watch | tail && gh pr merge` merges even when a check failed, because the pipe hides the exit code.
-3. A release bumps the version in all five places listed in CONTRIBUTING.md. In `register.test.tsx` the reload loop's `[[next, true], [current, false]]` must stay one version ahead, so don't blanket-`sed` the old version.
-4. Merge, then tag and release on the merge commit:
+   **Push to this repo, never a fork.** Check `gh api user --jq .login` first. If it isn't the repo owner (`gh repo view --json owner --jq .owner.login`), don't fork and don't open a PR. Write the commit out with `git format-patch -1 -o <folder>` and hand the patch to whoever runs the repo on a machine logged in as the owner. A PR from a fork shows that other account on a public repo.
+2. Before merging, check `gh pr view N --json headRepositoryOwner --jq .headRepositoryOwner.login`. If it isn't the repo owner, don't merge: push the commit to a branch here, open a new PR with the same title and body, and close the fork PR as superseded.
+3. CI (`.github/workflows/ci.yml`) runs the daemon suite on Ubuntu and macOS (Python 3.9 and 3.13) plus the hooks module. Check for `fail` yourself before merging: `gh pr checks N --watch | tail && gh pr merge` merges even when a check failed, because the pipe hides the exit code.
+4. A release bumps the version in all five places listed in CONTRIBUTING.md. In `register.test.tsx` the reload loop's `[[next, true], [current, false]]` must stay one version ahead, so don't blanket-`sed` the old version.
+5. Merge, then tag and release on the merge commit:
    ```bash
    git tag -a vX.Y.Z -m vX.Y.Z <merge sha> && git push origin vX.Y.Z
    gh release create vX.Y.Z --target <merge sha> --title X.Y.Z --notes "<what changed for users>"
    ```
-5. Install it locally: `command claude plugin marketplace update peerlink` then `command claude plugin update peerlink@peerlink`. The daemon restarts on the new version within ~20 s; agents reload when idle. Check `curl -s localhost:7899/api/health`.
+6. Install it locally: `command claude plugin marketplace update peerlink` then `command claude plugin update peerlink@peerlink`. The daemon restarts on the new version within ~20 s; agents reload when idle. Check `curl -s localhost:7899/api/health`.
 
 ## Tests
 
