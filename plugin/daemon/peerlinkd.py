@@ -48,7 +48,7 @@ if os.name == "nt":
 
     subprocess.Popen.__init__ = _no_window_init
 
-VERSION = "0.9.104"
+VERSION = "0.9.105"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -65,7 +65,9 @@ import herdr_mod  # noqa: E402
 
 # A fingerprint of the daemon's code: this file and the modules beside it together.
 _h = hashlib.sha256()
-for _name in ("peerlinkd.py", "chatlink.py", "discordlink.py", "telegramlink.py", "slacklink.py", "teamslink.py", "cronlib.py", "webui.py", "herdr_sync.py", "herdr_mod.py"):
+CODE_FILES = ("peerlinkd.py", "chatlink.py", "discordlink.py", "telegramlink.py", "slacklink.py", "teamslink.py", "agentslink.py",
+              "cronlib.py", "webui.py", "herdr_sync.py", "herdr_mod.py")
+for _name in CODE_FILES:
     with open(os.path.join(_here, _name), "rb") as _f:
         _h.update(_f.read())
 CODE = _h.hexdigest()[:16]
