@@ -186,8 +186,8 @@ class ScenarioTest(unittest.TestCase):
     def test_an_agent_closes_spaces_to_herdr_joins_but_only_you_open_one(self):
         rig = self.rig()
         self.assertEqual(rig.call("PUT", "/api/config", {"herdr_join_never": "ops"})[0], 200)
-        self.assertEqual(rig.call("PUT", "/api/config", {"herdr_join_never": "ops, vault"})[0], 200)
-        code, out = rig.call("PUT", "/api/config", {"herdr_join_never": "vault"})
+        self.assertEqual(rig.call("PUT", "/api/config", {"herdr_join_never": "ops, ledger"})[0], 200)
+        code, out = rig.call("PUT", "/api/config", {"herdr_join_never": "ledger"})
         self.assertEqual((code, out["error"]), (403, "only the web UI takes a space off herdr_join_never"))
         self.assertEqual(rig.user("PUT", "/api/config", {"herdr_join_never": ""})["herdr_join_never"], "")
 
@@ -525,16 +525,16 @@ class ScenarioTest(unittest.TestCase):
         self.assertEqual(lead.peers()["loop"]["cwd"], loop.cwd)
 
     def test_a_plugin_that_reloads_as_it_restarts_the_daemon_keeps_its_agents_name(self):
-        # A hired worker named pg-client in app-wt-x: its plugin reloaded onto a new version and restarted the daemon
+        # A hired worker named shop-client in app-wt-x: its plugin reloaded onto a new version and restarted the daemon
         # in the same moment, so neither remembered the name, and it came back as its folder's.
         rig = self.rig()
         folder = rig.folder("app-wt-x")
-        worker = Agent(rig, "pg-client", folder)
+        worker = Agent(rig, "shop-client", folder)
         worker.register()
-        self.assertEqual(worker.name, "pg-client")
+        self.assertEqual(worker.name, "shop-client")
         rig.restart()
         code, out = rig.call("POST", "/api/sessions", {"id": worker.sid, "name": "app-wt-x", "had_name": None, "cwd": folder, "plugin": "rig"})
-        self.assertEqual((code, out["name"]), (200, "pg-client"))
+        self.assertEqual((code, out["name"]), (200, "shop-client"))
 
     def test_one_folder_spelled_two_ways_stays_one_agent(self):
         rig = self.rig()
@@ -625,19 +625,19 @@ class ScenarioTest(unittest.TestCase):
     def test_two_live_sessions_resuming_one_conversation_never_take_turns(self):
         """The conversation resumed in a second terminal while the first still runs is another agent there."""
         rig = self.rig()
-        cwd = rig.folder("pixelgrid")
+        cwd = rig.folder("shopfront")
         reg = lambda sid, term, pid, succeeds=None: rig.call("POST", "/api/sessions", {
-            "id": sid, "name": "pixelgrid", "had_name": "pixelgrid" if succeeds else None, "cwd": cwd, "plugin": "rig",
+            "id": sid, "name": "shopfront", "had_name": "shopfront" if succeeds else None, "cwd": cwd, "plugin": "rig",
             "terminal": term, "pid": pid, "succeeds": succeeds})
-        self.assertEqual(reg("old", "tmux:%0@1", os.getppid())[1]["name"], "pixelgrid")
-        self.assertEqual(reg("new", "hc:t7@2", os.getpid(), succeeds="old")[1]["name"], "pixelgrid-2")
+        self.assertEqual(reg("old", "tmux:%0@1", os.getppid())[1]["name"], "shopfront")
+        self.assertEqual(reg("new", "hc:t7@2", os.getpid(), succeeds="old")[1]["name"], "shopfront-2")
         for _ in range(3):
             for sid in ("old", "new"):
                 code, out = rig.call("POST", f"/api/sessions/{sid}/heartbeat", {"busy": False, "ack": []})
                 self.assertEqual(code, 200, out)
         names = {p["id"]: p["name"] for p in rig.call("GET", "/api/peers?local=1")[1]["peers"]}
-        self.assertEqual((names.get("old"), names.get("new")), ("pixelgrid", "pixelgrid-2"))
-        self.assertIn("Two Claude sessions tried to be pixelgrid", rig.output())
+        self.assertEqual((names.get("old"), names.get("new")), ("shopfront", "shopfront-2"))
+        self.assertIn("Two Claude sessions tried to be shopfront", rig.output())
 
 if __name__ == "__main__":
     unittest.main()

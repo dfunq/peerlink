@@ -27,14 +27,14 @@ class OneSessionPerAgent(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         self.said = []
-        self.folder = os.path.join(tempfile.mkdtemp(prefix="one-"), "pixelgrid")
+        self.folder = os.path.join(tempfile.mkdtemp(prefix="one-"), "shopfront")
         os.makedirs(self.folder)
 
     def session(self, sid, terminal, agent=None, pid=100):
-        rec = {"id": sid, "name": "pixelgrid", "cwd": self.folder, "last_seen": time.time(), "terminal": terminal, "pid": pid}
+        rec = {"id": sid, "name": "shopfront", "cwd": self.folder, "last_seen": time.time(), "terminal": terminal, "pid": pid}
         if agent:
             rec["agent"] = d.agent_of[sid] = agent
-            d.agents.setdefault(agent, {"id": agent, "name": "pixelgrid", "reg": "pixelgrid", "cwd": self.folder, "sid": sid,
+            d.agents.setdefault(agent, {"id": agent, "name": "shopfront", "reg": "shopfront", "cwd": self.folder, "sid": sid,
                                         "seen": time.time(), "terminal": terminal})
         d.sessions[sid] = rec
         return rec

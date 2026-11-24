@@ -103,20 +103,20 @@ class Plan(unittest.TestCase):
         self.assertFalse([a for a in actions if a[0] == "label" and a[1] == "t9"])
 
     def test_a_terminal_its_agent_left_gives_up_the_labels_and_the_name_once(self):
-        # vault moved from t3 to t2g; t3 is a shell still labelled vault, its tab still named vault.
-        agents = [agent("t2d", "skyforge", "skyforge", lead=True), agent("t2g", "vault", "skyforge")]
-        terms = {"t2d": term("sp1", "tb1", "skyforge", "skyforge"), "t2g": term("sp1", "tb2", "vault", "skyforge"),
-                 "t3": term("sp1", "tb3", "vault", "skyforge"), "t46": term("sp1", "tb4")}
-        layout = [{"id": "sp1", "name": "skyforge", "tabs": [
-            {"id": "tb1", "name": "skyforge", "terminals": ["t2d"]}, {"id": "tb2", "name": "vault", "terminals": ["t2g"]},
-            {"id": "tb3", "name": "vault", "terminals": ["t3"]}, {"id": "tb4", "name": "notes", "terminals": ["t46"]}]}]
-        actions, _, _ = hs.plan(agents, terms, layout, {"skyforge": "sp1"}, ids())
+        # ledger moved from t3 to t2g; t3 is a shell still labelled ledger, its tab still named ledger.
+        agents = [agent("t2d", "hq", "hq", lead=True), agent("t2g", "ledger", "hq")]
+        terms = {"t2d": term("sp1", "tb1", "hq", "hq"), "t2g": term("sp1", "tb2", "ledger", "hq"),
+                 "t3": term("sp1", "tb3", "ledger", "hq"), "t46": term("sp1", "tb4")}
+        layout = [{"id": "sp1", "name": "hq", "tabs": [
+            {"id": "tb1", "name": "hq", "terminals": ["t2d"]}, {"id": "tb2", "name": "ledger", "terminals": ["t2g"]},
+            {"id": "tb3", "name": "ledger", "terminals": ["t3"]}, {"id": "tb4", "name": "notes", "terminals": ["t46"]}]}]
+        actions, _, _ = hs.plan(agents, terms, layout, {"hq": "sp1"}, ids())
         self.assertEqual(actions, [("label", "t3", {"peerlink.agent": "", "peerlink.space": ""}), ("rename_tab", "tb3", "")])
         self.assertEqual(hs.describe(actions[0], {"t3": "t3"}), "take peerlink's labels off t3 (t3): no agent runs there now")
         # Next pass, labels gone: an ordinary terminal, its tab whatever you call it.
         terms["t3"] = term("sp1", "tb3")
         layout[0]["tabs"][2]["name"] = "scratch"
-        self.assertEqual(hs.plan(agents, terms, layout, {"skyforge": "sp1"}, ids())[0], [])
+        self.assertEqual(hs.plan(agents, terms, layout, {"hq": "sp1"}, ids())[0], [])
 
     def test_a_shared_tab_keeps_its_name_when_one_agent_leaves(self):
         agents = [agent("t1", "lead", "s", lead=True)]
@@ -127,7 +127,7 @@ class Plan(unittest.TestCase):
         self.assertFalse([a for a in actions if a[0] == "rename_tab" and a[1] == "tb1" and a[2] == ""])
 
     def test_without_the_app_only_the_labels_go(self):
-        terms = {"t3": term("sp1", "tb3", "vault", "skyforge")}
+        terms = {"t3": term("sp1", "tb3", "ledger", "hq")}
         actions, _, _ = hs.plan([], terms, None, {}, ids())
         self.assertEqual(actions, [("label", "t3", {"peerlink.agent": "", "peerlink.space": ""})])
 
@@ -154,30 +154,30 @@ class Plan(unittest.TestCase):
         self.assertEqual(notes, [])
 
     def test_reuses_a_herdr_space_named_after_the_peerlink_space(self):
-        agents = [agent("t1", "pixelgrid", "pixelgrid", lead=True)]
-        terms = {"t1": term("spother", "tb1", "pixelgrid", "pixelgrid")}
-        layout = [{"id": "spother", "name": "elsewhere", "tabs": [{"id": "tb1", "name": "pixelgrid", "terminals": ["t1"]}]},
-                  {"id": "sppg", "name": "PixelGrid", "tabs": []}]
+        agents = [agent("t1", "shopfront", "shopfront", lead=True)]
+        terms = {"t1": term("spother", "tb1", "shopfront", "shopfront")}
+        layout = [{"id": "spother", "name": "elsewhere", "tabs": [{"id": "tb1", "name": "shopfront", "terminals": ["t1"]}]},
+                  {"id": "sppg", "name": "ShopFront", "tabs": []}]
         actions, smap, _ = hs.plan(agents, terms, layout, {}, ids())
-        self.assertEqual(smap["pixelgrid"], "sppg")
+        self.assertEqual(smap["shopfront"], "sppg")
         self.assertIn(("label", "t1", {"herdr.space": "sppg", "herdr.tab": "tbnew1"}), actions)
-        self.assertIn(("rename_space", "sppg", "pixelgrid"), actions)
+        self.assertIn(("rename_space", "sppg", "shopfront"), actions)
 
     def test_remembered_space_is_kept_and_a_settled_layout_does_nothing(self):
-        agents = [agent("t1", "ceo", "skyforge", lead=True), agent("t2", "vault", "skyforge")]
-        terms = {"t1": term("sp1", "tb1", "ceo", "skyforge"), "t2": term("sp1", "tb2", "vault", "skyforge")}
-        layout = [{"id": "sp1", "name": "skyforge", "tabs": [{"id": "tb1", "name": "ceo", "terminals": ["t1"]},
-                                                            {"id": "tb2", "name": "vault", "terminals": ["t2"]}]}]
-        actions, smap, notes = hs.plan(agents, terms, layout, {"skyforge": "sp1"}, ids())
-        self.assertEqual((actions, smap, notes), ([], {"skyforge": "sp1"}, []))
+        agents = [agent("t1", "ceo", "hq", lead=True), agent("t2", "ledger", "hq")]
+        terms = {"t1": term("sp1", "tb1", "ceo", "hq"), "t2": term("sp1", "tb2", "ledger", "hq")}
+        layout = [{"id": "sp1", "name": "hq", "tabs": [{"id": "tb1", "name": "ceo", "terminals": ["t1"]},
+                                                            {"id": "tb2", "name": "ledger", "terminals": ["t2"]}]}]
+        actions, smap, notes = hs.plan(agents, terms, layout, {"hq": "sp1"}, ids())
+        self.assertEqual((actions, smap, notes), ([], {"hq": "sp1"}, []))
 
     def test_names_tabs_and_puts_the_lead_first(self):
-        agents = [agent("t1", "ceo", "skyforge", lead=True), agent("t2", "vault", "skyforge")]
-        terms = {"t1": term("sp1", "tb1", "ceo", "skyforge"), "t2": term("sp1", "tb2", "vault", "skyforge")}
-        layout = [{"id": "sp1", "name": "skyforge", "tabs": [{"id": "tb2", "name": "2", "terminals": ["t2"]},
+        agents = [agent("t1", "ceo", "hq", lead=True), agent("t2", "ledger", "hq")]
+        terms = {"t1": term("sp1", "tb1", "ceo", "hq"), "t2": term("sp1", "tb2", "ledger", "hq")}
+        layout = [{"id": "sp1", "name": "hq", "tabs": [{"id": "tb2", "name": "2", "terminals": ["t2"]},
                                                             {"id": "tb1", "name": "ceo", "terminals": ["t1"]}]}]
-        actions, _, _ = hs.plan(agents, terms, layout, {"skyforge": "sp1"}, ids())
-        self.assertEqual(actions, [("rename_tab", "tb2", "vault"), ("first_tab", "tb1")])
+        actions, _, _ = hs.plan(agents, terms, layout, {"hq": "sp1"}, ids())
+        self.assertEqual(actions, [("rename_tab", "tb2", "ledger"), ("first_tab", "tb1")])
 
     def test_a_tab_shared_with_a_shell_stays_put(self):
         agents = [agent("t1", "core", "login", lead=True)]
@@ -203,7 +203,7 @@ class Plan(unittest.TestCase):
 
     def test_stale_labels_are_refreshed(self):
         agents = [agent("t2", "quality", "quality", lead=True)]
-        terms = {"t2": term("spq", "tb2", "skyforge-worker", "skyforge")}
+        terms = {"t2": term("spq", "tb2", "hq-worker", "hq")}
         actions, _, _ = hs.plan(agents, terms, None, {"quality": "spq"}, ids())
         self.assertEqual(actions, [("label", "t2", {"peerlink.agent": "a-quality", "peerlink.space": "quality"})])
 
