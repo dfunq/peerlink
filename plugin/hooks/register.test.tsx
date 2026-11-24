@@ -1238,7 +1238,7 @@ test('commands asked for on Discord run one at a time, each when the agent is id
   await $.session.start(START)
   await settle()
   await $.turn.start({ text: 'working', turnId: 't1' } as any)
-  daemon.state.once = { run: [{ command: 'loop', args: '5m check the deploy', by: 'Discord (DLowne)' }, { command: 'goal', args: 'ship the beta', by: 'Discord (DLowne)' }] }
+  daemon.state.once = { run: [{ command: 'loop', args: '5m check the deploy', by: 'Discord (alex)' }, { command: 'goal', args: 'ship the beta', by: 'Discord (alex)' }] }
   await clock.advance(600000)
   for (let i = 0; i < 10; i++) await settle()
   // Busy: nothing runs until the turn ends, then the first; the second waits for the turn that one starts.
