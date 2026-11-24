@@ -4208,7 +4208,7 @@ def pid_alive(pid):
     if pid <= 0:
         return True
     if os.name == "nt":
-        return windows_pid_alive(pid)
+        return pid > 0xFFFFFFFF or windows_pid_alive(pid)  # a pid Windows can't have: can't tell, so alive
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

@@ -465,7 +465,8 @@ class StateFileTest(unittest.TestCase):
             t.join()
         self.assertEqual(errors, [])
         self.assertIn(peerlinkd.read_json(self.path)["writer"], range(8))
-        self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o600)
+        if os.name != "nt":  # Windows has no such modes
+            self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o600)
 
     def test_a_rotated_key_leaves_no_copy(self):
         old = (peerlinkd.KEY_PATH, peerlinkd.HOME)
