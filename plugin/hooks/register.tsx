@@ -2153,8 +2153,8 @@ export const register: Register = (on, options) => {
       asked.catch(() => {})
       const answer = await Promise.race([asked, $.clock.sleep(RULE_ASK_MS).then(() => null)]).catch(() => null)
       if (answer === null) {
-        if (op === 'add') return text(`Nobody answered in this terminal. ${await proposeRule($, rule)}`)
-        return text('Not changed: nobody answered in this terminal. Ask your user to try again, or they change it in the web UI.')
+        if (op === 'add') return text(`Nobody answered in this terminal (an answer still on screen there now does nothing). ${await proposeRule($, rule)}`)
+        return text('Not changed: nobody answered in this terminal. The question may still be on screen: an answer there now does nothing. Ask your user to try again, or they change it in the web UI.')
       }
       const ok = answer === 'Approve'
       const done = await call($, 'POST', '/api/rules/lead/confirm', { by: sessionId, code: ask.data.code, approve: ok })

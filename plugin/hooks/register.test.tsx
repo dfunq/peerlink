@@ -360,11 +360,11 @@ test("the rules lead's question counts as dismissed after three minutes: an add 
   await settle()
   expect(daemon.posted.some(p => p.path === '/api/rules/lead/confirm')).toBe(false)
   await clock.advance(2_000)
-  expect(JSON.stringify(await off)).toContain('Not changed: nobody answered in this terminal')
+  expect(JSON.stringify(await off)).toContain('Not changed: nobody answered in this terminal. The question may still be on screen: an answer there now does nothing.')
   const add = $.tool.call({ tool: 'mcp__peerlink__rule', text: 'Never merge on a Friday.' } as any)
   await settle()
   await clock.advance(181_000)
-  expect(JSON.stringify(await add)).toContain("Nobody answered in this terminal. Rule r4 for acme waits for your user's approval")
+  expect(JSON.stringify(await add)).toContain("Nobody answered in this terminal (an answer still on screen there now does nothing). Rule r4 for acme waits for your user's approval")
   expect(daemon.posted.some(p => p.path === '/api/rules/lead/confirm')).toBe(false)
 })
 

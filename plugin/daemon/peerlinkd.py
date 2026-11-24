@@ -4668,6 +4668,10 @@ def rename_self(sid, name, hold=False):
         now, holds = time.time(), config.setdefault("name_holds", {})
         for k in [k for k, v in holds.items() if v.get("until", 0) < now]:
             holds.pop(k)
+        lead = str(config.get("rules_lead") or "").strip().lower()
+        is_lead = bool(lead) and rec.get("agent") == config.get("rules_lead_agent")
+        if lead == name.lower() and not is_lead:
+            return 409, {"error": f"{name} is the rules lead's name; your user changes that in Settings"}
         held = holds.get(name.lower())
         if held and held.get("agent") != (rec.get("agent") or sid):
             return 409, {"error": f"{name} was given up less than a day ago and is still kept for the agent that had it"}
@@ -4677,6 +4681,8 @@ def rename_self(sid, name, hold=False):
         holds.pop(name.lower(), None)
         rec["name"] = name
         config["sessions"].setdefault(sid, {})["nickname"] = name
+        if is_lead:  # the lead keeps the role under its new name, and Settings shows it
+            config["rules_lead"] = name
         save_config()
     forget_spaces()
     log("agent", sid, "renamed", was, "->", name)
@@ -5261,8 +5267,21 @@ LEAD_OPS = ("add", "edit", "off", "on", "delete")
 
 
 def is_rules_lead(rec):
-    lead = str(config.get("rules_lead") or "").strip().lower()
-    return bool(lead and rec and display_name(rec).lower() == lead)
+    """The lead is the agent you named, held by its agent id from when you named it: an agent that renames itself
+    to that name later isn't it."""
+    aid = config.get("rules_lead_agent") or ""
+    return bool(str(config.get("rules_lead") or "").strip() and aid and rec and rec.get("agent") == aid)
+
+
+def rules_lead_agent(name):
+    """The agent id of the agent going by `name` now (the most recently seen, if more than one did), or ""."""
+    name = str(name or "").strip().lower()
+    with lock:
+        live = [r for r in sessions.values() if r.get("agent") and is_live(r) and display_name(r).lower() == name]
+        if live:
+            return max(live, key=lambda r: r.get("last_seen", 0))["agent"]
+        known = [a for a in agents.values() if a.get("name", "").lower() == name]
+        return max(known, key=lambda a: a.get("seen", 0))["id"] if name and known else ""
 
 
 def propose_lead_change(by, body):
@@ -7700,7 +7719,16 @@ class Handler(BaseHTTPRequestHandler):
                 bad = [why for _, why in checked.values() if why]
                 if bad:
                     return self.reply(400, {"error": "; ".join(bad)})
+                lead = checked.get("rules_lead", (None,))[0]
+                if lead is not None:
+                    lead = lead.strip()
+                    checked["rules_lead"] = (lead, None)
+                    aid = rules_lead_agent(lead) if lead else ""
+                    if lead and not aid and lead.lower() != str(config.get("rules_lead") or "").lower():  # a save that leaves it as it was never fails on it
+                        return self.reply(400, {"error": f"no agent is called {lead}: give the rules lead's name as the Agents page shows it"})
                 with lock:
+                    if lead is not None and (lead.lower() != str(config.get("rules_lead") or "").lower() or not config.get("rules_lead_agent")):
+                        config["rules_lead_agent"] = aid
                     config.update({k: v for k, (v, _) in checked.items()})
                     save_config()
                 forget_spaces()

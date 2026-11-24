@@ -149,10 +149,15 @@ class RecordsTest(unittest.TestCase):
 
     def test_the_rules_lead_changes_any_rule_only_with_the_code_your_terminal_answer_sends_back(self):
         lead, other = peerlinkd.sessions["s-lead"], peerlinkd.sessions["s-other"]
-        self.addCleanup(peerlinkd.config.update, {"rules_lead": ""})
+        self.addCleanup(peerlinkd.config.update, {"rules_lead": "", "rules_lead_agent": ""})
+        lead["agent"], other["agent"] = "a-lead", "a-other"
+        peerlinkd.agents.update({"a-lead": {"id": "a-lead", "name": "lead", "seen": 1}, "a-other": {"id": "a-other", "name": "other", "seen": 1}})
+        self.addCleanup(lambda: [peerlinkd.agents.pop(a, None) for a in ("a-lead", "a-other")])
         # Nobody is lead until you name one: an agent can't change a rule.
         self.assertTrue(peerlinkd.propose_lead_change(lead, {"op": "add", "text": "Ship on Tuesdays."})[1]["not_lead"])
-        peerlinkd.config["rules_lead"] = "Lead"  # by name, either case
+        # You name it in Settings; it's held by the agent id the name had then.
+        self.assertEqual((peerlinkd.rules_lead_agent("Lead"), peerlinkd.rules_lead_agent("nobody")), ("a-lead", ""))
+        peerlinkd.config.update({"rules_lead": "lead", "rules_lead_agent": "a-lead"})
         self.assertEqual(peerlinkd.propose_lead_change(other, {"op": "add", "text": "x"})[0], 403)
         status, ask = peerlinkd.propose_lead_change(lead, {"op": "add", "text": "Ship  on Tuesdays."})
         self.assertEqual(status, 200, ask)
@@ -183,8 +188,20 @@ class RecordsTest(unittest.TestCase):
         ask = peerlinkd.propose_lead_change(lead, {"op": "on", "id": mine})[1]
         peerlinkd.lead_changes[ask["code"]]["expires"] = 0
         self.assertEqual(peerlinkd.confirm_lead_change(lead, {"code": ask["code"], "approve": True})[0], 403)
+        # While the lead is offline, another agent can't take its name, and one going by it anyway isn't the lead.
+        was = lead["last_seen"]
+        lead["last_seen"] = 0
+        self.assertIn("rules lead's name", peerlinkd.rename_self("s-other", "lead")[1]["error"])
+        other["name"] = "lead"
+        self.assertEqual(peerlinkd.propose_lead_change(other, {"op": "add", "text": "z"})[0], 403)
+        other["name"] = "other"
+        lead["last_seen"] = was
+        # The lead renaming itself keeps the role, and Settings follows the name.
+        self.assertEqual(peerlinkd.rename_self("s-lead", "chief")[0], 200)
+        self.addCleanup(lambda: peerlinkd.config["sessions"].get("s-lead", {}).pop("nickname", None))
+        self.assertEqual((peerlinkd.config["rules_lead"], peerlinkd.is_rules_lead(lead)), ("chief", True))
         ask = peerlinkd.propose_lead_change(lead, {"op": "on", "id": mine})[1]
-        peerlinkd.config["rules_lead"] = "other"
+        peerlinkd.config.update({"rules_lead": "other", "rules_lead_agent": "a-other"})
         self.assertEqual(peerlinkd.confirm_lead_change(lead, {"code": ask["code"], "approve": True})[0], 403)
         self.assertEqual(peerlinkd.propose_lead_change(lead, {"op": "add", "text": "y"})[0], 403)
         self.assertEqual(peerlinkd.config_value("rules_lead", "alex")[0], "alex")
