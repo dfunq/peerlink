@@ -1,4 +1,4 @@
-"""SKY-689 follow-up: a terminal gives up peerlink's labels only once it's clear its agent is gone, never on the first
+"""A terminal gives up peerlink's labels only once it's clear its agent is gone, never on the first
 passes after the daemon starts or the machine wakes, when every heartbeat is late."""
 import os
 import sys
@@ -17,14 +17,14 @@ class LabelKeep(unittest.TestCase):
     def setUp(self):
         d.load_config()
         d.config["peer_ttl_s"] = 30  # as live
-        self.agents = {"a-vault": {"id": "a-vault", "seen": 0}, "a-gone": {"id": "a-gone", "seen": 0}}
+        self.agents = {"a-ledger": {"id": "a-ledger", "seen": 0}, "a-gone": {"id": "a-gone", "seen": 0}}
         for name, value in (("agents", self.agents), ("herdr_steady", {"since": 1000.0, "last": 0.0})):
             p = unittest.mock.patch.object(d, name, value)
             p.start()
             self.addCleanup(p.stop)
-        self.placed = [{"address": "t2g", "agent": "a-vault"}]
-        self.terms = {"t2g": {"agent": "a-vault"}, "t3": {"agent": "a-vault"}, "t9": {"agent": "a-gone"},
-                      "t4": {"agent": "vault"}, "t5": {}}
+        self.placed = [{"address": "t2g", "agent": "a-ledger"}]
+        self.terms = {"t2g": {"agent": "a-ledger"}, "t3": {"agent": "a-ledger"}, "t9": {"agent": "a-gone"},
+                      "t4": {"agent": "ledger"}, "t5": {}}
 
     def test_right_after_start_every_label_stays(self):
         self.assertEqual(d.herdr_label_keep(self.placed, self.terms, now=1010), {"t3", "t9", "t4"})
@@ -32,7 +32,7 @@ class LabelKeep(unittest.TestCase):
     def test_once_steady_an_agent_running_elsewhere_or_long_gone_lets_go(self):
         self.agents["a-gone"]["seen"] = 1100
         d.herdr_label_keep(self.placed, self.terms, now=1100)
-        # t3: vault runs in t2g. t4: no agent goes by "vault". t9: seen 30s ago, maybe just late.
+        # t3: ledger runs in t2g. t4: no agent goes by "ledger". t9: seen 30s ago, maybe just late.
         self.assertEqual(d.herdr_label_keep(self.placed, self.terms, now=1130), {"t9"})
         d.herdr_label_keep(self.placed, self.terms, now=1180)
         self.assertEqual(d.herdr_label_keep(self.placed, self.terms, now=1230), set())
@@ -57,8 +57,8 @@ class LabelKeep(unittest.TestCase):
         self.assertEqual(d.herdr_steady, {"since": 1000.0, "last": 0.0})
 
     def test_plan_leaves_kept_terminals_alone(self):
-        terms = {"t3": {"space": "sp1", "tab": "tb3", "agent": "a-vault", "pspace": "s"}}
-        layout = [{"id": "sp1", "name": "s", "tabs": [{"id": "tb3", "name": "vault", "terminals": ["t3"]}]}]
+        terms = {"t3": {"space": "sp1", "tab": "tb3", "agent": "a-ledger", "pspace": "s"}}
+        layout = [{"id": "sp1", "name": "s", "tabs": [{"id": "tb3", "name": "ledger", "terminals": ["t3"]}]}]
         self.assertEqual(hs.plan([], terms, layout, {}, lambda p: p + "x", keep={"t3"})[0], [])
 
 

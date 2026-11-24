@@ -3756,7 +3756,7 @@ def send(body):
         out = send_discord(sender_rec, to, shown, parent, hops, options, files, asks)
         if out is not None:
             return to_you(out)
-    # "discord", "telegram", "slack" or one with "#channel", not an agent whose name starts with discord, like discord-voice.
+    # "discord", "telegram", "slack" or one with "#channel", not an agent whose name starts with discord, like discord-bot.
     if sender_rec and (word in USER_ALIASES or (kind == "task" and chat_target(word) and not parent)):
         return to_you(user_send(sender_rec, word, shown, kind, parent_task, asks, hops, options, files))
     out = send_discord(sender_rec, to, shown, parent, hops, options, files, asks)

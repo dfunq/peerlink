@@ -61,8 +61,8 @@ console.log(JSON.stringify([peerlinkParent({ address: "t9", parent: null }), pee
         self.assertIn("const out", missing)
 
     def test_the_tree_names_each_herdr_spaces_parent(self):
-        smap = {"skyforge": "sp1", "ops": "sp2", "login": "sp3", "games": "sp4", "deep": "sp5"}
-        parents = {"ops": "skyforge", "login": "skyforge", "deep": "ops", "games": "gone"}
+        smap = {"hq": "sp1", "ops": "sp2", "login": "sp3", "games": "sp4", "deep": "sp5"}
+        parents = {"ops": "hq", "login": "hq", "deep": "ops", "games": "gone"}
         self.assertEqual(hm.tree(smap, parents), {"parents": {"sp2": "sp1", "sp3": "sp1", "sp5": "sp2"}, "agents": {}, "names": {}, "models": {}})
 
     def test_a_model_tag_is_short(self):
@@ -117,7 +117,7 @@ class Daemon(unittest.TestCase):
         self.addCleanup(p.stop)
 
     def test_it_writes_the_tree_and_makes_the_mod_once(self):
-        self.d.herdr_nest({"skyforge": "sp1", "ops": "sp2"}, {"ops": "skyforge"})
+        self.d.herdr_nest({"hq": "sp1", "ops": "sp2"}, {"ops": "hq"})
         with open(os.path.join(self.d.HOME, "herdr-tree.json")) as f:
             self.assertEqual(json.load(f), {"parents": {"sp2": "sp1"}, "agents": {}, "names": {}, "models": {}})
         mod = os.path.join(self.app, "mods", "peerlink-spaces")
@@ -130,7 +130,7 @@ class Daemon(unittest.TestCase):
             f.write('{"content": {"mod": "spaces"}}')
         before = os.path.getmtime(os.path.join(mod, "main.js"))
         with unittest.mock.patch.object(self.d.herdr_mod, "patch", side_effect=AssertionError("made again")):
-            self.d.herdr_nest({"skyforge": "sp1", "ops": "sp2"}, {"ops": "skyforge"})
+            self.d.herdr_nest({"hq": "sp1", "ops": "sp2"}, {"ops": "hq"})
         self.assertEqual(os.path.getmtime(os.path.join(mod, "main.js")), before)
         with open(os.path.join(self.app, "layouts", "mine.json")) as f:
             self.assertEqual(f.read(), '{"content": {"mod": "spaces"}}')  # and it stays that way

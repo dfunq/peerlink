@@ -169,11 +169,11 @@ class HiringTest(unittest.TestCase):
 
     def test_dir_naming_the_repo_puts_the_worktree_beside_it(self):
         repo = self.repo()
-        sp = self.hire(dir=repo, worktree={"repo": repo, "branch": "SKY-1-relay"})
-        self.assertEqual(os.path.basename(d.spawns[sp]["dir"]), "app-wt-SKY-1-relay")
+        sp = self.hire(dir=repo, worktree={"repo": repo, "branch": "fix-relay"})
+        self.assertEqual(os.path.basename(d.spawns[sp]["dir"]), "app-wt-fix-relay")
         # The repo can come from dir alone.
-        other = self.hire(1, dir=repo, worktree={"branch": "SKY-2-copy"})
-        self.assertEqual(d.git(d.spawns[other]["dir"], "rev-parse", "--abbrev-ref", "HEAD"), (0, "SKY-2-copy"))
+        other = self.hire(1, dir=repo, worktree={"branch": "fix-copy"})
+        self.assertEqual(d.git(d.spawns[other]["dir"], "rev-parse", "--abbrev-ref", "HEAD"), (0, "fix-copy"))
 
     def test_a_session_reloaded_onto_newer_tools_is_told_what_they_take_once(self):
         rec = d.sessions["s-lead"]
@@ -189,14 +189,14 @@ class HiringTest(unittest.TestCase):
 
     def test_a_worktree_beside_its_repo_sits_in_its_repos_space(self):
         repo = self.repo()
-        for folder, text in ((os.path.dirname(repo), "space: skyforge\n"), (repo, "space: pixelgrid\nparent: skyforge\nrole: the lead\n")):
+        for folder, text in ((os.path.dirname(repo), "space: hq\n"), (repo, "space: shopfront\nparent: hq\nrole: the lead\n")):
             with open(os.path.join(folder, ".peerlink"), "w") as f:
                 f.write(text)
         wt = repo + "-wt-fix"
         d.git(repo, "worktree", "add", "-q", "-b", "fix", wt)
         self.assertEqual(os.path.realpath(d.find_space_file(wt)), os.path.realpath(os.path.join(repo, ".peerlink")))
         rec = {"id": "s-x", "cwd": wt}
-        self.assertEqual(d.space_of(rec)[:2], ("pixelgrid", "file"))
+        self.assertEqual(d.space_of(rec)[:2], ("shopfront", "file"))
         self.assertEqual(d.folder_role(rec), "")  # the lead's role stays the lead's
         # A plain folder beside the repo still finds the one above it.
         plain = repo + "-notes"
@@ -263,7 +263,7 @@ class HerdrLaunchTest(unittest.TestCase):
                 self.assertEqual(d.claude_argv("/bin/claude", ["--effort", "low"]), ["/bin/claude", "--effort", "low"])
 
     def test_an_agent_starts_in_a_herdr_terminal_that_outlives_the_daemons(self):
-        sp = {"id": "s9", "dir": "/x/api", "name": "pg-client", "space": "pixelgrid"}
+        sp = {"id": "s9", "dir": "/x/api", "name": "shop-client", "space": "shopfront"}
         calls = []
 
         def run(argv, **kw):
@@ -286,7 +286,7 @@ class HerdrLaunchTest(unittest.TestCase):
     def test_a_hire_opens_in_its_leads_herdr_app_space(self):
         d.sessions["s-lead9"] = {"id": "s-lead9", "name": "lead9", "cwd": "/x/lead9", "pid": 77, "last_seen": time.time()}
         self.addCleanup(d.sessions.pop, "s-lead9", None)
-        sp = {"id": "s9", "dir": "/x/api", "name": "pg-client", "space": "pixelgrid", "requester": {"id": "s-lead9", "cwd": "/x/lead9"}}
+        sp = {"id": "s9", "dir": "/x/api", "name": "shop-client", "space": "shopfront", "requester": {"id": "s-lead9", "cwd": "/x/lead9"}}
         terms = {"t1": {"cwd": "/x/lead9", "labels": {"herdr.space": "sp-other"}, "foreground": {"pid": 5}},
                  "t2": {"cwd": "/x/lead9", "labels": {"herdr.space": "sp-lead"}, "foreground": {"pid": 77}}}
         calls = []
@@ -314,7 +314,7 @@ class HerdrLaunchTest(unittest.TestCase):
         self.addCleanup(d.sessions.pop, "s-lead9", None)
         for worker, lead_pid, parented in ((True, 50, True), (True, 51, False), (False, 50, False)):
             with self.subTest(worker=worker, lead_pid=lead_pid):
-                sp = {"id": "s9", "dir": "/x/api", "name": "pg-client", "space": "pixelgrid", "worker": worker,
+                sp = {"id": "s9", "dir": "/x/api", "name": "shop-client", "space": "shopfront", "worker": worker,
                       "requester": {"id": "s-lead9", "cwd": "/x/lead9"}}
                 calls = []
 
@@ -340,15 +340,15 @@ class HerdrLaunchTest(unittest.TestCase):
         d.sessions["s-boss"] = {"id": "s-boss", "name": "boss", "cwd": "/x/boss", "pid": 78, "terminal": "hc:t5@55", "last_seen": time.time()}
         for sid in ("s-lead9", "s-boss"):
             self.addCleanup(d.sessions.pop, sid, None)
-        leads = {"pixelgrid": {"cwd": "/x/lead9", "how": "set"}}
+        leads = {"shopfront": {"cwd": "/x/lead9", "how": "set"}}
         pids = {"t2": 50, "t5": 55}
-        cases = (("a standing agent in the space", {"dir": "/x/api", "space": "pixelgrid", "requester": {"id": "s-boss"}}, "t2"),
-                 ("the lead restarting", {"dir": "/x/lead9", "space": "pixelgrid", "requester": {"id": "s-boss"}}, ""),
+        cases = (("a standing agent in the space", {"dir": "/x/api", "space": "shopfront", "requester": {"id": "s-boss"}}, "t2"),
+                 ("the lead restarting", {"dir": "/x/lead9", "space": "shopfront", "requester": {"id": "s-boss"}}, ""),
                  ("a worker in a space with no lead running", {"dir": "/x/api", "space": "games", "worker": True, "requester": {"id": "s-boss"}}, "t5"),
                  ("an agent in no space", {"dir": "/x/api", "space": "", "requester": {}}, ""))
         for why, extra, parent in cases:
             with self.subTest(why), unittest.mock.patch.dict(d.config, {"space_leads": leads}):
-                sp = {"id": "s9", "name": "pg-client", **extra}
+                sp = {"id": "s9", "name": "shop-client", **extra}
                 calls = []
 
                 def run(argv, **kw):
@@ -356,8 +356,8 @@ class HerdrLaunchTest(unittest.TestCase):
                     out = {"terminals": []} if argv[1] == "ls" else {"state": "live", "pid": pids.get(argv[2], 0)} if argv[1] == "get" else {"address": "t42"}
                     return unittest.mock.Mock(returncode=0, stdout=json.dumps(out), stderr="")
                 with unittest.mock.patch.object(d, "find_claude", lambda: "/bin/claude"), unittest.mock.patch.object(d, "find_hc", lambda: "/bin/hc"), \
-                        unittest.mock.patch.object(d.subprocess, "run", run), unittest.mock.patch.object(d, "space_of", lambda r: ("skyforge", "", "")), \
-                        unittest.mock.patch.object(d, "lead_rec", lambda space: d.sessions["s-lead9"] if space == "pixelgrid" else None):
+                        unittest.mock.patch.object(d.subprocess, "run", run), unittest.mock.patch.object(d, "space_of", lambda r: ("hq", "", "")), \
+                        unittest.mock.patch.object(d, "lead_rec", lambda space: d.sessions["s-lead9"] if space == "shopfront" else None):
                     self.assertEqual(d.launch(sp)[1], "")
                 argv = next(a for a in calls if a[1] == "run")
                 self.assertEqual(argv[argv.index("--parent") + 1] if "--parent" in argv else "", parent)

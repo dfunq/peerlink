@@ -143,7 +143,7 @@ class Daemon:
 
     def register(self):
         code, out = self.call("POST", "/api/sessions", {
-            # had_name: the daemon otherwise names a peer after its folder's agent ("discord-voice-2"), not --name.
+            # had_name: the daemon otherwise names a peer after its folder's agent ("discord-bot-2"), not --name.
             "id": self.id, "name": self.name, "had_name": self.name, "cwd": self.cwd, "pid": os.getpid(), "plugin": f"peerlink-mcp {VERSION}",
             "summary": "A client outside Claude Code, over MCP", "busy": False,
         })

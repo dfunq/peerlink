@@ -236,7 +236,7 @@ class DaemonTelegramTest(unittest.TestCase):
         self.assertEqual(peerlinkd.chat_target("telegram"), ("Telegram", ""))
         self.assertEqual(peerlinkd.chat_target("telegram#family"), ("Telegram", "#family"))
         self.assertEqual(peerlinkd.chat_target("discord"), ("", ""))
-        self.assertIsNone(peerlinkd.chat_target("discord-voice"))
+        self.assertIsNone(peerlinkd.chat_target("discord-bot"))
         chans = [{"channel": "#ops", "platform": "Discord"}, {"channel": "#family", "platform": "Telegram"}]
         self.assertEqual(peerlinkd.chats_matching(chans, ("Telegram", "")), [chans[1]])
         self.assertEqual(peerlinkd.chats_matching(chans, ("", "#ops")), [chans[0]])
