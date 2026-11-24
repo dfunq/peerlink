@@ -348,6 +348,26 @@ test('the rules lead turns a rule off only on the answer given in its own termin
   expect(JSON.stringify(await $.tool.call({ tool: 'mcp__peerlink__rule', action: 'delete', id: 'r9' } as any))).toContain('Not changed: no rule r9')
 })
 
+test("the rules lead's question counts as dismissed after three minutes: an add waits for approval as before, a change is dropped", async ($, on) => {
+  const { clock } = engine(on)
+  const daemon = fakeDaemon(on)
+  daemon.state.notLead = false
+  on('tool.call', { tool: 'AskUserQuestion' }, () => new Promise(() => {}))  // nobody at the terminal
+  await $.session.start(START)
+  const off = $.tool.call({ tool: 'mcp__peerlink__rule', action: 'off', id: 'r1' } as any)
+  await settle()
+  await clock.advance(179_000)
+  await settle()
+  expect(daemon.posted.some(p => p.path === '/api/rules/lead/confirm')).toBe(false)
+  await clock.advance(2_000)
+  expect(JSON.stringify(await off)).toContain('Not changed: nobody answered in this terminal')
+  const add = $.tool.call({ tool: 'mcp__peerlink__rule', text: 'Never merge on a Friday.' } as any)
+  await settle()
+  await clock.advance(181_000)
+  expect(JSON.stringify(await add)).toContain("Nobody answered in this terminal. Rule r4 for acme waits for your user's approval")
+  expect(daemon.posted.some(p => p.path === '/api/rules/lead/confirm')).toBe(false)
+})
+
 test('an agent that is not the rules lead still only proposes, and cannot change a rule', async ($, on) => {
   engine(on)
   const daemon = fakeDaemon(on)

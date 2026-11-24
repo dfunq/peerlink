@@ -1132,6 +1132,9 @@ function startPolling($: EngineInterface) {
   cancelPoll = () => timer.cancel()
 }
 
+// How long the rules lead's question waits in its terminal before it counts as dismissed.
+const RULE_ASK_MS = 180_000
+
 async function proposeRule($: EngineInterface, rule: string) {
   const res = await call($, 'POST', '/api/rules', { by: sessionId, text: rule })
   if (!res.ok) return `Not added: ${res.data.error ?? res.status}`
@@ -2145,10 +2148,11 @@ export const register: Register = (on, options) => {
       const ask = await call($, 'POST', '/api/rules/lead', { by: sessionId, op, text: rule, ...(input.id ? { id: String(input.id) } : {}), ...(input.space !== undefined ? { space: String(input.space) } : {}) })
       if (!ask.ok && ask.data.not_lead) return text(op === 'add' ? await proposeRule($, rule) : 'Not changed: only your user changes or removes a rule, from the web UI. Ask them.')
       if (!ask.ok) return text(`Not changed: ${ask.data.error ?? ask.status}`)
-      let answer = ''
-      try {
-        answer = await $.ui.ask(`Rules lead ${myName || 'this agent'} asks to ${ask.data.change}. Allow it?`, { options: ['Approve', 'Deny'], header: 'Rule' })
-      } catch {
+      // An agent can run unattended: a question nobody answers within RULE_ASK_MS counts as dismissed, so the turn goes on.
+      const asked = $.ui.ask(`Rules lead ${myName || 'this agent'} asks to ${ask.data.change}. Allow it?`, { options: ['Approve', 'Deny'], header: 'Rule' })
+      asked.catch(() => {})
+      const answer = await Promise.race([asked, $.clock.sleep(RULE_ASK_MS).then(() => null)]).catch(() => null)
+      if (answer === null) {
         if (op === 'add') return text(`Nobody answered in this terminal. ${await proposeRule($, rule)}`)
         return text('Not changed: nobody answered in this terminal. Ask your user to try again, or they change it in the web UI.')
       }
