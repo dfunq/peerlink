@@ -48,7 +48,7 @@ if os.name == "nt":
 
     subprocess.Popen.__init__ = _no_window_init
 
-VERSION = "0.9.106"
+VERSION = "0.9.107"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -5730,12 +5730,40 @@ def user_shell():
     return sh if os.path.basename(sh) in ("zsh", "bash") and os.access(sh, os.X_OK) else ""
 
 
+IS_WINDOWS = os.name == "nt"
+
+
+def ps_quote(v):
+    return "'" + str(v).replace("'", "''") + "'"
+
+
+def windows_shell():
+    """The PowerShell whose profile defines `claude` as an alias or function (your own flags, such as a permission
+    mode), pwsh first, then Windows PowerShell; '' when neither does."""
+    for name in ("pwsh", "powershell"):
+        ps = shutil.which(name)
+        if not ps:
+            continue
+        try:
+            r = subprocess.run([ps, "-NoLogo", "-NonInteractive", "-Command", "(Get-Command claude -ErrorAction SilentlyContinue).CommandType"],
+                               timeout=20, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if ((r.stdout or "").strip().splitlines()[-1:] or [""])[0].strip() in ("Alias", "Function"):
+            return ps
+    return ""
+
+
 def claude_argv(claude, extra=()):
-    """How to start Claude Code: through your login shell when `claude` is an alias or function there (your own flags,
-    such as a model or permission mode), else the program itself. PEERLINK_CLAUDE names one outright."""
+    """How to start Claude Code: through your login shell (on Windows, PowerShell with your profile) when `claude` is an
+    alias or function there (your own flags, such as a model or permission mode), else the program itself.
+    PEERLINK_CLAUDE names one outright."""
     extra = list(extra)
     if os.environ.get("PEERLINK_CLAUDE"):
         return [claude, *extra]
+    if IS_WINDOWS:
+        ps = windows_shell()
+        return [ps, "-NoLogo", "-Command", " ".join(["claude", *map(ps_quote, extra)])] if ps else [claude, *extra]
     sh = user_shell()
     if not sh:
         return [claude, *extra]

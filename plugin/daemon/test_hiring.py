@@ -262,6 +262,22 @@ class HerdrLaunchTest(unittest.TestCase):
                 self.assertEqual(d.claude_argv("/bin/claude"), ["/bin/claude"])
                 self.assertEqual(d.claude_argv("/bin/claude", ["--effort", "low"]), ["/bin/claude", "--effort", "low"])
 
+    def test_on_windows_claude_starts_through_powershell_when_your_profile_defines_it(self):
+        def run_with(outs):
+            return lambda argv, **kw: unittest.mock.Mock(returncode=0, stdout=outs[os.path.basename(argv[0])], stderr="")
+        which = {"pwsh": "C:/ps7/pwsh.exe", "powershell": "C:/ps5/powershell.exe"}
+        with unittest.mock.patch.object(d, "IS_WINDOWS", True), unittest.mock.patch.dict(os.environ, {"PEERLINK_CLAUDE": ""}), \
+                unittest.mock.patch.object(d.shutil, "which", lambda n: which.get(n)):
+            # Only Windows PowerShell's profile has it: that one starts it, with the spawn's flags quoted.
+            with unittest.mock.patch.object(d.subprocess, "run", run_with({"pwsh.exe": "Application\n", "powershell.exe": "Function\r\n"})):
+                self.assertEqual(d.claude_argv("C:/bin/claude.exe", ["--model", "opus[1m]"]),
+                                 ["C:/ps5/powershell.exe", "-NoLogo", "-Command", "claude '--model' 'opus[1m]'"])
+            with unittest.mock.patch.object(d.subprocess, "run", run_with({"pwsh.exe": "profile says hi\nAlias\n", "powershell.exe": ""})):
+                self.assertEqual(d.claude_argv("C:/bin/claude.exe"), ["C:/ps7/pwsh.exe", "-NoLogo", "-Command", "claude"])
+            with unittest.mock.patch.object(d.subprocess, "run", run_with({"pwsh.exe": "Application\n", "powershell.exe": "Application\n"})):
+                self.assertEqual(d.claude_argv("C:/bin/claude.exe", ["--effort", "low"]), ["C:/bin/claude.exe", "--effort", "low"])
+        self.assertEqual(d.ps_quote("it's"), "'it''s'")
+
     def test_an_agent_starts_in_a_herdr_terminal_that_outlives_the_daemons(self):
         sp = {"id": "s9", "dir": "/x/api", "name": "shop-client", "space": "shopfront"}
         calls = []
