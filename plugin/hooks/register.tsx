@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.9.105'
+const DAEMON_VERSION = '0.9.106'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -1132,6 +1132,12 @@ function startPolling($: EngineInterface) {
   cancelPoll = () => timer.cancel()
 }
 
+async function proposeRule($: EngineInterface, rule: string) {
+  const res = await call($, 'POST', '/api/rules', { by: sessionId, text: rule })
+  if (!res.ok) return `Not added: ${res.data.error ?? res.status}`
+  return `Rule ${res.data.rule.id} for ${res.data.rule.space} waits for your user's approval. You'll get a message when they decide; follow it yourself meanwhile.`
+}
+
 function text(t: string) {
   return { result: t } as any
 }
@@ -1782,12 +1788,14 @@ export const register: Register = (on, options) => {
     await $.tool.register({
       name: 'rule',
       description:
-        'Standing rules from your user, kept for every agent in your space across context clears. When your user gives an instruction meant for good ("from now on", "always", "never"), add it here in their words, a sentence or two: they approve it, and then it is in every agent\'s instructions. List them to see what stands, with any of yours still waiting. Only your user changes or removes one.',
+        'Standing rules from your user, kept for every agent in your space across context clears. When your user gives an instruction meant for good ("from now on", "always", "never"), add it here in their words, a sentence or two: they approve it, and then it is in every agent\'s instructions. List them to see what stands, with any of yours still waiting. Only your user changes or removes one, unless they made you the rules lead: then you may also add one for any space, and edit, turn off, turn on or delete any rule, and each change asks your user in this terminal first.',
       inputSchema: {
         type: 'object',
         properties: {
-          action: { type: 'string', enum: ['add', 'list'], description: 'add (the default when text is given) or list' },
-          text: { type: 'string', description: 'add: the rule, as your user said it' },
+          action: { type: 'string', enum: ['add', 'list', 'edit', 'off', 'on', 'delete'], description: 'add (the default when text is given) or list; the rules lead also edit, off, on, delete' },
+          text: { type: 'string', description: 'add: the rule, as your user said it; edit: its new words' },
+          id: { type: 'string', description: 'edit, off, on, delete (rules lead): the rule, like r3' },
+          space: { type: 'string', description: 'rules lead, add or edit: the space it is for, "*" for every space (the default for add)' },
         },
       },
       isDeferred: false,
@@ -2131,15 +2139,29 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: 'mcp__peerlink__rule' }, async ($, e) => {
     const input = e as any
     const rule = String(input.text ?? '').trim()
-    if (input.action === 'list' || !rule) {
-      const res = await call($, 'GET', `/api/rules?by=${encodeURIComponent(sessionId)}`)
-      if (!res.ok) return text(`Daemon error: ${res.data.error ?? res.status}`)
-      const rows = (res.data.rules as any[]).map(r => `- ${r.id}${r.status === 'pending' ? ' (waiting for your user)' : ''} [${r.space === '*' ? 'every space' : r.space}]: ${r.text}`)
-      return text(rows.length ? rows.join('\n') : 'No standing rules reach you.')
+    const op = String(input.action ?? 'add')
+    if (op !== 'list' && (op !== 'add' || rule)) {
+      // The rules lead's change goes to your user as a question in this terminal; anyone else's add waits as before.
+      const ask = await call($, 'POST', '/api/rules/lead', { by: sessionId, op, text: rule, ...(input.id ? { id: String(input.id) } : {}), ...(input.space !== undefined ? { space: String(input.space) } : {}) })
+      if (!ask.ok && ask.data.not_lead) return text(op === 'add' ? await proposeRule($, rule) : 'Not changed: only your user changes or removes a rule, from the web UI. Ask them.')
+      if (!ask.ok) return text(`Not changed: ${ask.data.error ?? ask.status}`)
+      let answer = ''
+      try {
+        answer = await $.ui.ask(`Rules lead ${myName || 'this agent'} asks to ${ask.data.change}. Allow it?`, { options: ['Approve', 'Deny'], header: 'Rule' })
+      } catch {
+        if (op === 'add') return text(`Nobody answered in this terminal. ${await proposeRule($, rule)}`)
+        return text('Not changed: nobody answered in this terminal. Ask your user to try again, or they change it in the web UI.')
+      }
+      const ok = answer === 'Approve'
+      const done = await call($, 'POST', '/api/rules/lead/confirm', { by: sessionId, code: ask.data.code, approve: ok })
+      if (!done.ok) return text(`Not changed: ${done.data.error ?? done.status}`)
+      if (!ok) return text('Your user said no in the terminal; nothing changed.')
+      return text(done.data.deleted ? `Deleted ${done.data.deleted}.` : `Done: rule ${done.data.rule.id} is ${done.data.rule.status} for ${done.data.rule.space === '*' ? 'every space' : done.data.rule.space}. Every agent there has it from its next prompt.`)
     }
-    const res = await call($, 'POST', '/api/rules', { by: sessionId, text: rule })
-    if (!res.ok) return text(`Not added: ${res.data.error ?? res.status}`)
-    return text(`Rule ${res.data.rule.id} for ${res.data.rule.space} waits for your user's approval. You'll get a message when they decide; follow it yourself meanwhile.`)
+    const res = await call($, 'GET', `/api/rules?by=${encodeURIComponent(sessionId)}`)
+    if (!res.ok) return text(`Daemon error: ${res.data.error ?? res.status}`)
+    const rows = (res.data.rules as any[]).map(r => `- ${r.id}${r.status === 'pending' ? ' (waiting for your user)' : r.status === 'off' ? ' (off)' : r.status === 'denied' ? ' (denied)' : ''} [${r.space === '*' ? 'every space' : r.space}]: ${r.text}`)
+    return text((rows.length ? rows.join('\n') : 'No standing rules reach you.') + (res.data.lead ? '\nYou are the rules lead: this is every rule, in every space.' : ''))
   }).catch(daemonDown)
 
   on('tool.call', { tool: 'mcp__peerlink__check_approval' }, async ($, e) => {

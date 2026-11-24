@@ -48,7 +48,7 @@ if os.name == "nt":
 
     subprocess.Popen.__init__ = _no_window_init
 
-VERSION = "0.9.105"
+VERSION = "0.9.106"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -211,6 +211,7 @@ DEFAULT_CONFIG = {
     "herdr_spaces": {},  # peerlink space -> the herdr space id herdr sync shows it in
     "herdr_tab_names": {},  # herdr tab id -> the name herdr sync last left it showing: a tab renamed since renames its agent
     "herdr_join_never": "",  # spaces a tab you open in herdr never joins on its own, comma separated (a space others nest in never does either); agents can add to it, only the web UI removes
+    "rules_lead": "",  # the one agent, by name, that may add, change and remove any standing rule, each change on your Yes in its own terminal; set only from the web UI
     "herdr_mods_source": "",  # a folder (a clone of your private mods repo) that Install herdr mods copies from; set only from the web UI
     "use_herdr": True,  # start agents in herdr's terminals when herdr (hc) is installed; off, or without herdr, tmux or Terminal as before  # hours no worker is started, like "22-8"; empty is off; set only from the web UI
     "task_nudge_h": 24,  # an open task with no update for this many hours is raised with its owner, then with whoever asked; 0 is off
@@ -666,7 +667,7 @@ CONFIG_MIN_1 = {"poll_interval_ms", "peer_ttl_s", "max_hops", "rate_limit_per_mi
 
 
 # What no agent changes for itself: who starts agents without asking, and how many workers run when.
-BROWSER_ONLY_SETTINGS = ("auto_approve_all", "auto_approve_folders", "max_live_spawns", "night_guard", "herdr_mods_source")
+BROWSER_ONLY_SETTINGS = ("auto_approve_all", "auto_approve_folders", "max_live_spawns", "night_guard", "herdr_mods_source", "rules_lead")
 
 
 def config_value(name, value):
@@ -5169,8 +5170,9 @@ def rule_view(r):
     return {k: r[k] for k in ("id", "space", "text", "status", "created", "updated")} | {"by": r["requester"].get("name", "")}
 
 
-def add_rule(body, by=None):
-    """A rule from you (by None): active at once. From an agent: for its own space, pending until you approve."""
+def add_rule(body, by=None, lead=False):
+    """A rule from you (by None): active at once. From an agent: for its own space, pending until you approve. From the
+    rules lead once you said Yes in its terminal (lead): for the space it names, every space by default, active at once."""
     text = " ".join(str(body.get("text") or "").split())
     if not text:
         return 400, {"error": "text is required: the rule, in a sentence"}
@@ -5178,12 +5180,16 @@ def add_rule(body, by=None):
         return 400, {"error": f"a rule is a sentence or two: this is {len(text)} characters, over {RULE_MAX}"}
     now = time.time()
     with lock:
-        space = space_of(by)[0] if by else "*" if str(body.get("space") or "*") == "*" else clean_space(body.get("space")) or "*"
+        space = space_of(by)[0] if by and not lead else "*" if str(body.get("space") or "*") == "*" else clean_space(body.get("space")) or "*"
         if any(r["text"].lower() == text.lower() and r["space"] == space and r["status"] in ("active", "pending") for r in rules.values()):
             return 409, {"error": "that rule is already there" + ("" if not by else ", or waiting for your user")}
+        if lead == "check":
+            return 200, {"space": space}
         n = max([int(i[1:]) for i in rules] or [0]) + 1
-        r = {"id": f"r{n}", "space": space, "text": text, "status": "pending" if by else "active", "created": now, "updated": now,
+        r = {"id": f"r{n}", "space": space, "text": text, "status": "pending" if by and not lead else "active", "created": now, "updated": now,
              "requester": {"id": by["id"], "name": display_name(by), "cwd": by.get("cwd", "")} if by else {"name": USER_NAME, "cwd": ""}}
+        if lead:
+            r["via"] = "terminal"
         rules[r["id"]] = r
         save_rules()
         channel = approval_channel(by) if by else ""
@@ -5243,6 +5249,87 @@ def edit_rule(rid, body):
         save_rules()
     close_buttons(r)
     return 200, {"rule": rule_view(r)}
+
+
+# The rules lead (Settings > Approvals, only from the web UI) is one agent, by name, that may add a rule for any space
+# and change, turn off or delete any rule. It asks here first and gets back a single-use code its hooks module holds
+# while it puts the change to you in that agent's own terminal; your Yes there sends the code back and applies it.
+# The model never sees the code. It is a guard, not a lock: an agent with a shell on this machine could ask for one.
+lead_changes = {}  # code -> the change, who asked and until when
+LEAD_CHANGE_TTL = 600
+LEAD_OPS = ("add", "edit", "off", "on", "delete")
+
+
+def is_rules_lead(rec):
+    lead = str(config.get("rules_lead") or "").strip().lower()
+    return bool(lead and rec and display_name(rec).lower() == lead)
+
+
+def propose_lead_change(by, body):
+    """(status, reply): the change in words and its code, or why the rules lead can't make it."""
+    if not is_rules_lead(by):
+        return 403, {"error": "only the rules lead changes rules itself; your user names it in the web UI's Settings", "not_lead": True}
+    op = str(body.get("op") or "add")
+    if op not in LEAD_OPS:
+        return 400, {"error": f"op is one of {', '.join(LEAD_OPS)}"}
+    text = " ".join(str(body.get("text") or "").split())
+    where = lambda sp: "every space" if sp == "*" else sp
+    if op == "add":
+        status, out = add_rule(body, by, lead="check")
+        if status != 200:
+            return status, out
+        change, words = {"op": op, "text": text, "space": out["space"]}, f'add this standing rule for {where(out["space"])}: "{text}"'
+    else:
+        rid = str(body.get("id") or "")
+        with lock:
+            r = rules.get(rid)
+        if r is None:
+            return 404, {"error": f"no rule {rid}" if rid else "id is required: the rule's id, like r3"}
+        if op == "edit":
+            if not text and "space" not in body:
+                return 400, {"error": "edit needs the new text, the new space, or both"}
+            if len(text) > RULE_MAX:
+                return 400, {"error": f"a rule is a sentence or two, up to {RULE_MAX} characters"}
+            space = r["space"] if "space" not in body else "*" if str(body["space"]) == "*" else clean_space(body["space"]) or r["space"]
+            change = {"op": op, "id": rid, "text": text or r["text"], "space": space}
+            words = f'change rule {rid} to "{change["text"]}" for {where(space)}' + f' (now: "{r["text"]}" for {where(r["space"])})'
+        else:
+            if r["status"] == "pending":
+                return 409, {"error": f"{rid} still waits for your user's approval"}
+            change = {"op": op, "id": rid}
+            words = {"off": "turn off", "on": "turn back on", "delete": "delete"}[op] + f' rule {rid} for {where(r["space"])}: "{r["text"]}"'
+    code = secrets.token_urlsafe(12)
+    with lock:
+        now = time.time()
+        for c in [c for c, x in lead_changes.items() if x["expires"] < now]:
+            lead_changes.pop(c)
+        lead_changes[code] = {**change, "by": by["id"], "expires": now + LEAD_CHANGE_TTL}
+    log("rule", "lead asks", display_name(by), op, change.get("id", ""))
+    return 200, {"code": code, "change": words}
+
+
+def confirm_lead_change(by, body):
+    """Your answer in the rules lead's terminal: approve applies the change its code stands for, anything else drops it."""
+    with lock:
+        change = lead_changes.pop(str(body.get("code") or ""), None)
+    if not change or change["by"] != (by or {}).get("id") or change["expires"] < time.time() or not is_rules_lead(by):
+        return 403, {"error": "that change has expired or isn't this agent's: ask again"}
+    name = display_name(by)
+    if not body.get("approve"):
+        log("rule", "lead change denied in the terminal", name, change["op"], change.get("id", ""))
+        return 200, {"denied": True}
+    op = change["op"]
+    if op == "add":
+        status, out = add_rule({"text": change["text"], "space": change["space"]}, by, lead=True)
+    elif op == "delete":
+        status, out = edit_rule(change["id"], {"delete": True})
+    elif op == "edit":
+        status, out = edit_rule(change["id"], {"text": change["text"], "space": change["space"]})
+    else:
+        status, out = edit_rule(change["id"], {"status": "active" if op == "on" else "off"})
+    if status == 200:
+        log("rule", out.get("rule", {}).get("id") or out.get("deleted"), op, "approved in the terminal of", name)
+    return status, out
 
 
 # A question to you may carry a default: what the agent goes with when you haven't answered in time. You can turn
@@ -8013,8 +8100,9 @@ class Handler(BaseHTTPRequestHandler):
         if rest == ["rules"] and method == "GET":
             with lock:
                 by = sessions.get(q.get("by", [""])[0])
-                shown = rules_for(by) + [r for r in rules.values() if r["status"] == "pending" and r["requester"].get("id") == by["id"]] if by else sorted(rules.values(), key=lambda r: r["created"])
-                return self.reply(200, {"rules": [rule_view(r) for r in shown]})
+                lead = is_rules_lead(by)
+                shown = rules_for(by) + [r for r in rules.values() if r["status"] == "pending" and r["requester"].get("id") == by["id"]] if by and not lead else sorted(rules.values(), key=lambda r: r["created"])
+                return self.reply(200, {"rules": [rule_view(r) for r in shown], "lead": lead})
         if rest == ["rules"] and method == "POST":
             b = self.body()
             if browser and not self.key_ok():
@@ -8024,7 +8112,15 @@ class Handler(BaseHTTPRequestHandler):
             if by is None:
                 return self.reply(403, {"error": "unknown agent; register again"})
             return self.reply(*add_rule(b, by))
-        # Only you change or drop a rule: an agent proposes one, and asks you to change one.
+        # The rules lead asks for a change, then sends your answer from its terminal.
+        if rest[:2] == ["rules", "lead"] and len(rest) in (2, 3) and method == "POST" and rest[2:] in ([], ["confirm"]):
+            b = self.body()
+            with lock:
+                by = sessions.get(str(b.get("by") or ""))
+            if by is None:
+                return self.reply(403, {"error": "unknown agent; register again"})
+            return self.reply(*(confirm_lead_change(by, b) if rest[2:] else propose_lead_change(by, b)))
+        # Only you change or drop a rule (or the rules lead, above, on your Yes in its terminal): an agent proposes one.
         if len(rest) == 2 and rest[0] == "rules" and method == "POST":
             if not browser:
                 return self.reply(403, {"error": "only your user changes or removes a rule, from the web UI: ask them"})

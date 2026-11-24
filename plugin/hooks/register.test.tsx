@@ -12,7 +12,7 @@ async function settle() {
 // A daemon in memory: what the plugin posts, and the peers it answers.
 function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unknown[] = [], config: Record<string, unknown> = {}, code = '') {
   const posted: { path: string; body: any }[] = []
-  const state = { down: false, forget: false, threads: { owes: [] as any[], waiting: [] as any[] }, once: {} as Record<string, unknown> }
+  const state = { down: false, forget: false, notLead: true, threads: { owes: [] as any[], waiting: [] as any[] }, once: {} as Record<string, unknown> }
   const peers = [
     { id: 'p1', name: 'billing-api', host: 'Mac', cwd: '/Users/x/r/billing', branch: 'main', summary: 'Owns the invoice schema', busy: false, muted: false },
   ]
@@ -22,7 +22,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     const body = e.init?.body ? JSON.parse(e.init.body) : undefined
     posted.push({ path, body })
     const ok = (data: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(data) } })
-    if (path === '/api/health') return ok({ ok: true, version: '0.9.105', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
+    if (path === '/api/health') return ok({ ok: true, version: '0.9.106', code: posted.some(p => p.path === '/api/shutdown') ? 'new' : code })
     if (state.forget && path.endsWith('/heartbeat') && 'busy' in body) {
       state.forget = false
       return { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'unknown agent; register again' }) } }
@@ -36,6 +36,10 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
       return new URL(e.url).search === '?message=m12&by=me-session'
         ? ok({ id: 'da7', valid: true, client: 'grok', scope: 'dev.change', env: 'dev', action: 'revert the copy', ticket: '', valid_until: '2026-11-18T20:30:00Z' })
         : ok({ id: 'da7', valid: false, reason: 'da7 was stamped on m12, not on m13: a copy of its id in any other message counts for nothing' })
+    if (path === '/api/rules/lead') return body.op === 'delete' && body.id === 'r9' ? { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'no rule r9' }) } }
+      : state.notLead ? { value: { status: 403, ok: false, headers: {}, text: JSON.stringify({ error: 'only the rules lead', not_lead: true }) } }
+      : ok({ code: 'c0de', change: `turn off rule ${body.id} for every space: "Never merge on a Friday."` })
+    if (path === '/api/rules/lead/confirm') return ok(body.approve ? { rule: { id: 'r1', space: '*', status: 'off' } } : { denied: true })
     if (path === '/api/rules') return body ? ok({ rule: { id: 'r4', space: 'acme', status: 'pending' } }) : ok({ rules: [{ id: 'r1', space: 'acme', status: 'active', text: 'Never merge on a Friday.' }] })
     if (path.endsWith('/retire')) return ok(body.agent ? { retired: body.agent, told: '', note: `You retired ${body.agent}` } : { retired: 'web', told: 'acme', note: 'web retired' })
     if (path === '/api/spawns' && body?.worker) return ok({ id: 's4', status: 'queued' })
@@ -317,6 +321,39 @@ test('rule proposes a standing rule for approval and lists what stands', async (
   expect(added).toContain("Rule r4 for acme waits for your user's approval")
   expect(daemon.posted.find(p => p.path === '/api/rules' && p.body)!.body).toEqual({ by: 'me-session', text: 'Never merge on a Friday.' })
   expect(JSON.stringify(await $.tool.call({ tool: 'mcp__peerlink__rule', action: 'list' } as any))).toContain('- r1 [acme]: Never merge on a Friday.')
+})
+
+test('the rules lead turns a rule off only on the answer given in its own terminal, and the model never sees the code', async ($, on) => {
+  engine(on)
+  const daemon = fakeDaemon(on)
+  daemon.state.notLead = false
+  const asked: any[] = []
+  let answer: string | null = 'Approve'
+  on('tool.call', { tool: 'AskUserQuestion' }, (_: any, e: any) => {
+    asked.push(e)
+    if (answer === null) throw new Error('dismissed')
+    return { result: { questions: e.questions, answers: { [e.questions[0].question]: answer } } }
+  })
+  await $.session.start(START)
+  const done = JSON.stringify(await $.tool.call({ tool: 'mcp__peerlink__rule', action: 'off', id: 'r1' } as any))
+  expect(asked[0].questions[0].question).toContain('asks to turn off rule r1 for every space: "Never merge on a Friday."')
+  expect(daemon.posted.find(p => p.path === '/api/rules/lead/confirm')!.body).toEqual({ by: 'me-session', code: 'c0de', approve: true })
+  expect(done).toContain('rule r1 is off for every space')
+  expect(done).not.toContain('c0de')
+  answer = 'Deny'
+  expect(JSON.stringify(await $.tool.call({ tool: 'mcp__peerlink__rule', action: 'off', id: 'r1' } as any))).toContain('said no in the terminal')
+  expect(daemon.posted.filter(p => p.path === '/api/rules/lead/confirm').pop()!.body.approve).toBe(false)
+  answer = null
+  expect(JSON.stringify(await $.tool.call({ tool: 'mcp__peerlink__rule', action: 'off', id: 'r1' } as any))).toContain('nobody answered in this terminal')
+  expect(JSON.stringify(await $.tool.call({ tool: 'mcp__peerlink__rule', action: 'delete', id: 'r9' } as any))).toContain('Not changed: no rule r9')
+})
+
+test('an agent that is not the rules lead still only proposes, and cannot change a rule', async ($, on) => {
+  engine(on)
+  const daemon = fakeDaemon(on)
+  await $.session.start(START)
+  expect(JSON.stringify(await $.tool.call({ tool: 'mcp__peerlink__rule', action: 'delete', id: 'r1' } as any))).toContain('only your user changes or removes a rule')
+  expect(daemon.posted.some(p => p.path === '/api/rules/lead/confirm')).toBe(false)
 })
 
 test('check_approval asks about the message it came on, as this session, and a copy in another message does not count', async ($, on) => {
@@ -1221,7 +1258,7 @@ test('a session says which plugin and daemon versions it runs', async ($, on) =>
   on('ui.log', (_: any, e: any) => { logged.push(e.text); return { value: undefined } })
   fakeDaemon(on)
   await $.session.start(START)
-  expect(logged.some(l => l.startsWith('peerlink 0.9.105 · daemon 0.9.105 · web'))).toBe(true)
+  expect(logged.some(l => l.startsWith('peerlink 0.9.106 · daemon 0.9.106 · web'))).toBe(true)
 })
 
 test('two sessions in a lead folder both sit with the parent; the space is listed once', async ($, on) => {
@@ -1262,7 +1299,7 @@ test('an agent is known by its project root, not the folder its shell moved to',
   const reg = daemon.posted.find(p => p.path === '/api/sessions')!.body
   expect(reg.cwd).toBe('/Users/x/r/web')
   expect(reg.name).toBe('web')
-  expect(reg.plugin).toBe('0.9.105')
+  expect(reg.plugin).toBe('0.9.106')
 })
 
 test('an agent registers again under the folder it started in, wherever the host has moved its root since', async ($, on) => {
@@ -1402,7 +1439,7 @@ test('after /clear the agent stays registered, and its new session takes over th
   expect(again.succeeds).toBe('me-session')
 })
 
-for (const [installed, reloads] of [['0.9.106', true], ['0.9.105', false]] as const)
+for (const [installed, reloads] of [['0.9.107', true], ['0.9.106', false]] as const)
   test(`with ${installed} installed, an agent ${reloads ? 'queues a reload of itself' : 'stays as it is'}`, async ($, on) => {
     const { clock } = engine(on, { installed })
     const daemon = fakeDaemon(on)
