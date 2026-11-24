@@ -27,6 +27,8 @@ jobs:
       # A test that hangs prints every thread's stack and fails here, rather than running into the job's timeout and
       # losing its log: the watchdog starts again with each test, so it fires after one test runs for two minutes.
       - shell: bash  # also on Windows (Git Bash), where setup-python provides python but not always python3
+        env:
+          PYTHONUTF8: "1"  # as the daemon runs on Windows: it restarts itself with -X utf8
         run: |
           python -u -c "
           import faulthandler, unittest

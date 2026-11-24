@@ -31,7 +31,7 @@ class InstallHerdrMods(unittest.TestCase):
         self.src, self.app, self.home = (os.path.join(base, x) for x in ("src", "app", "home"))
         os.makedirs(os.path.join(self.app, "mods"))
         os.makedirs(self.home)
-        for target, value in ((os.environ, {"HERDR_APP_HOME": self.app, "HOME": self.home}),
+        for target, value in ((os.environ, {"HERDR_APP_HOME": self.app, "HOME": self.home, "USERPROFILE": self.home}),
                               (d.config, {"herdr_mods_source": ""})):
             p = unittest.mock.patch.dict(target, value)
             p.start()

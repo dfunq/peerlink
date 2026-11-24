@@ -276,7 +276,8 @@ def write_file(path, text, backup=True, mode=0o600):
     d = os.path.dirname(path) or "."
     fd, tmp = tempfile.mkstemp(dir=d, prefix=os.path.basename(path) + ".", suffix=".tmp")
     try:
-        os.fchmod(fd, mode)
+        if hasattr(os, "fchmod"):  # not on Windows before Python 3.13, where the mode means nothing anyway
+            os.fchmod(fd, mode)
         with os.fdopen(fd, "w") as f:
             f.write(text)
             f.flush()
@@ -284,10 +285,10 @@ def write_file(path, text, backup=True, mode=0o600):
         if backup and os.path.exists(path):
             try:
                 os.link(path, tmp + ".bak")  # the old file under a second name, then renamed into place: no gap
-                os.replace(tmp + ".bak", path + ".bak")
+                replace_file(tmp + ".bak", path + ".bak")
             except OSError:
                 pass
-        os.replace(tmp, path)
+        replace_file(tmp, path)
     except BaseException:
         for t in (tmp, tmp + ".bak"):
             try:
@@ -303,6 +304,18 @@ def write_file(path, text, backup=True, mode=0o600):
             os.close(dfd)
     except OSError:
         pass
+
+
+def replace_file(src, dst):
+    """os.replace, which Windows refuses (access denied) for a moment while another writer is replacing the same file
+    or a reader has it open; there it tries again for up to a second."""
+    for i in range(20):
+        try:
+            return os.replace(src, dst)
+        except PermissionError:
+            if os.name != "nt" or i == 19:
+                raise
+            time.sleep(0.05)
 
 
 def write_json(path, data, indent=None, backup=True):
@@ -4187,13 +4200,15 @@ def save_agents():
 
 
 def pid_alive(pid):
-    """Whether process `pid` is still running; True when that can't be told (no pid, Windows)."""
+    """Whether process `pid` is still running; True when that can't be told (no pid)."""
     try:
         pid = int(pid or 0)
     except (TypeError, ValueError):
         return True
-    if pid <= 0 or os.name == "nt":
+    if pid <= 0:
         return True
+    if os.name == "nt":
+        return windows_pid_alive(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -4201,6 +4216,31 @@ def pid_alive(pid):
     except (OSError, OverflowError):
         return True
     return True
+
+
+def windows_pid_alive(pid):
+    """Whether process `pid` is running on Windows: it opens and hasn't exited (os.kill(pid, 0) there would end it).
+    True when that can't be told, as on other systems."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.restype = wintypes.HANDLE
+        k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return ctypes.get_last_error() == 5  # access denied: it exists, it's someone else's; else it's gone
+        try:
+            code = wintypes.DWORD()
+            if not k32.GetExitCodeProcess(h, ctypes.byref(code)):
+                return True
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            k32.CloseHandle(h)
+    except (OSError, AttributeError, OverflowError):
+        return True
 
 
 def running_elsewhere(other, rec):
@@ -5390,6 +5430,7 @@ def plan_worktree(spec, folder):
     code, top = git(repo, "rev-parse", "--show-toplevel")
     if code != 0:
         return None, f"{repo} isn't a git repository"
+    top = os.path.normpath(top)  # git prints C:/Users/x/app on Windows; agents report C:\Users\x\app
     if not branch or git(repo, "check-ref-format", "--branch", branch)[0] != 0:
         return None, f"'{branch}' isn't a branch name git takes"
     if folder and os.path.realpath(folder) in (os.path.realpath(repo), os.path.realpath(top)):
@@ -5398,6 +5439,13 @@ def plan_worktree(spec, folder):
     if os.path.exists(path) and git(path, "rev-parse", "--abbrev-ref", "HEAD") != (0, branch):
         return None, f"{path} already exists and isn't a worktree on {branch}"
     return {"repo": top, "branch": branch, "base": base, "path": path, "created": False}, ""
+
+
+def claude_project_key(path):
+    """A folder as Claude Code names it in ~/.claude.json's projects: its absolute path, with forward slashes on
+    Windows (C:/Users/x/app), as Claude Code writes them there."""
+    p = os.path.abspath(path)
+    return p.replace("\\", "/") if os.name == "nt" else p
 
 
 def claude_trusts(path):
@@ -5409,7 +5457,7 @@ def claude_trusts(path):
         return False
     p = os.path.abspath(path)
     while True:
-        if (projects.get(p) or {}).get("hasTrustDialogAccepted"):
+        if any((projects.get(k) or {}).get("hasTrustDialogAccepted") for k in {p, claude_project_key(p)}):
             return True
         up = os.path.dirname(p)
         if up == p:
@@ -5426,7 +5474,7 @@ def trust_folder(path):
     try:
         with open(conf) as f:
             data = json.load(f)
-        data.setdefault("projects", {}).setdefault(os.path.abspath(path), {})["hasTrustDialogAccepted"] = True
+        data.setdefault("projects", {}).setdefault(claude_project_key(path), {})["hasTrustDialogAccepted"] = True
         tmp = f"{conf}.peerlink-{os.getpid()}.tmp"
         with open(tmp, "w") as f:
             json.dump(data, f, indent=2)

@@ -61,7 +61,7 @@ class Rig:
             with open(path, "w") as f:
                 json.dump(self.config, f)
         self.log = open(os.path.join(self.home, "rig.log"), "a")
-        self.proc = subprocess.Popen([sys.executable, DAEMON, "serve"], env=self.env, stdout=self.log, stderr=self.log)
+        self.proc = subprocess.Popen([sys.executable, "-X", "utf8", DAEMON, "serve"], env=self.env, stdout=self.log, stderr=self.log)
         for _ in range(100):
             if self.proc.poll() is not None:
                 raise RuntimeError("the daemon exited: " + self.output())
