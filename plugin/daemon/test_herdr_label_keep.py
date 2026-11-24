@@ -1,4 +1,4 @@
-"""SKY-689 follow-up: a terminal gives up peerlink's labels only once it's clear its agent is gone, never on the first
+"""A terminal gives up peerlink's labels only once it's clear its agent is gone, never on the first
 passes after the daemon starts or the machine wakes, when every heartbeat is late."""
 import os
 import sys

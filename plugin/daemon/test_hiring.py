@@ -169,11 +169,11 @@ class HiringTest(unittest.TestCase):
 
     def test_dir_naming_the_repo_puts_the_worktree_beside_it(self):
         repo = self.repo()
-        sp = self.hire(dir=repo, worktree={"repo": repo, "branch": "SKY-1-relay"})
-        self.assertEqual(os.path.basename(d.spawns[sp]["dir"]), "app-wt-SKY-1-relay")
+        sp = self.hire(dir=repo, worktree={"repo": repo, "branch": "fix-relay"})
+        self.assertEqual(os.path.basename(d.spawns[sp]["dir"]), "app-wt-fix-relay")
         # The repo can come from dir alone.
-        other = self.hire(1, dir=repo, worktree={"branch": "SKY-2-copy"})
-        self.assertEqual(d.git(d.spawns[other]["dir"], "rev-parse", "--abbrev-ref", "HEAD"), (0, "SKY-2-copy"))
+        other = self.hire(1, dir=repo, worktree={"branch": "fix-copy"})
+        self.assertEqual(d.git(d.spawns[other]["dir"], "rev-parse", "--abbrev-ref", "HEAD"), (0, "fix-copy"))
 
     def test_a_session_reloaded_onto_newer_tools_is_told_what_they_take_once(self):
         rec = d.sessions["s-lead"]

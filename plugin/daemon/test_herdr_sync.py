@@ -103,7 +103,7 @@ class Plan(unittest.TestCase):
         self.assertFalse([a for a in actions if a[0] == "label" and a[1] == "t9"])
 
     def test_a_terminal_its_agent_left_gives_up_the_labels_and_the_name_once(self):
-        # SKY-689: vault moved from t3 to t2g; t3 is a shell still labelled vault, its tab still named vault.
+        # vault moved from t3 to t2g; t3 is a shell still labelled vault, its tab still named vault.
         agents = [agent("t2d", "skyforge", "skyforge", lead=True), agent("t2g", "vault", "skyforge")]
         terms = {"t2d": term("sp1", "tb1", "skyforge", "skyforge"), "t2g": term("sp1", "tb2", "vault", "skyforge"),
                  "t3": term("sp1", "tb3", "vault", "skyforge"), "t46": term("sp1", "tb4")}

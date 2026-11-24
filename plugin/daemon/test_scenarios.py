@@ -623,7 +623,7 @@ class ScenarioTest(unittest.TestCase):
 
 
     def test_two_live_sessions_resuming_one_conversation_never_take_turns(self):
-        """SKY-683: the conversation resumed in a second terminal while the first still runs is another agent there."""
+        """The conversation resumed in a second terminal while the first still runs is another agent there."""
         rig = self.rig()
         cwd = rig.folder("pixelgrid")
         reg = lambda sid, term, pid, succeeds=None: rig.call("POST", "/api/sessions", {

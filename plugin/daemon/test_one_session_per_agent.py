@@ -1,4 +1,4 @@
-"""SKY-683: an agent runs in one session. A second live session in another terminal (a resumed conversation, an old
+"""An agent runs in one session. A second live session in another terminal (a resumed conversation, an old
 pane left running) is another agent, said once, and the two never take turns as one."""
 import os
 import sys
