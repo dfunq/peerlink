@@ -144,7 +144,7 @@ class HiringTest(unittest.TestCase):
         repo = self.repo()
         sp = self.hire(dir="", worktree={"repo": repo, "branch": "fix/login-copy", "base": "main"})
         path = repo + "-wt-fix-login-copy"
-        self.assertEqual(d.spawns[sp]["dir"], os.path.realpath(path) if os.path.realpath(repo) != repo else path)
+        self.assertEqual(os.path.normcase(os.path.realpath(d.spawns[sp]["dir"])), os.path.normcase(os.path.realpath(path)))
         wt = d.spawns[sp]["worktree"]
         self.assertTrue(wt["created"] and os.path.isdir(wt["path"]))
         self.assertEqual(d.git(wt["path"], "rev-parse", "--abbrev-ref", "HEAD"), (0, "fix/login-copy"))
@@ -218,14 +218,14 @@ class HiringTest(unittest.TestCase):
         conf = os.path.join(home, ".claude.json")
         with open(conf, "w") as f:
             json.dump({"projects": {os.path.join(home, "Repos"): {"hasTrustDialogAccepted": True}}, "other": 1}, f)
-        with unittest.mock.patch.dict(os.environ, {"HOME": home}):
+        with unittest.mock.patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}):
             self.real_trust(os.path.join(home, "Repos", "app-wt-x"))
             with open(conf) as f:
                 self.assertEqual(len(json.load(f)["projects"]), 1)  # under a trusted folder already
             self.real_trust(os.path.join(home, "work", "app-wt-y"))
             with open(conf) as f:
                 data = json.load(f)
-        self.assertTrue(data["projects"][os.path.join(home, "work", "app-wt-y")]["hasTrustDialogAccepted"])
+        self.assertTrue(data["projects"][d.claude_project_key(os.path.join(home, "work", "app-wt-y"))]["hasTrustDialogAccepted"])
         self.assertEqual(data["other"], 1)
 
     def test_the_night_guard_holds_its_hours_and_refuses_hires_in_them(self):

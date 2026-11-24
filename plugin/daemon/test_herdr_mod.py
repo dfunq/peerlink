@@ -45,7 +45,7 @@ peerlinkTree = { agents: { t9: "t8", t7: "t7" } };
 console.log(JSON.stringify([peerlinkParent({ address: "t9", parent: null }), peerlinkParent({ address: "t6", parent: "t5" }),
                             peerlinkParent({ address: "t7", parent: null })]));
 '''
-        r = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=20)
+        r = subprocess.run(["node", "-e", script], capture_output=True, text=True, encoding="utf-8", timeout=20)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout), ["t8", "t5", None])
 
@@ -87,7 +87,7 @@ const row = (id, tree) => ({ w: { id }, tree: tree || null });
 const out = peerlinkNest([row("sp4"), row("sp4wt", "└─"), row("sp2"), row("sp1"), row("sp5"), row("sp3")]);
 console.log(JSON.stringify(out.map((r) => [r.w.id, r.depth, r.lines || null])));
 '''
-        r = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=20)
+        r = subprocess.run(["node", "-e", script], capture_output=True, text=True, encoding="utf-8", timeout=20)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout), [["sp4", 0, []], ["sp4wt", 0, None], ["sp1", 0, []], ["sp2", 1, ["├"]],
                                                 ["sp5", 2, ["│", "└"]], ["sp3", 1, ["└"]]])
