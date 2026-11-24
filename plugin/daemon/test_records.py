@@ -147,6 +147,66 @@ class RecordsTest(unittest.TestCase):
         peerlinkd.edit_rule(rid, {"delete": True})
         self.assertEqual(peerlinkd.client_config("s-lead")["rules"], [])
 
+    def test_the_rules_lead_changes_any_rule_only_with_the_code_your_terminal_answer_sends_back(self):
+        lead, other = peerlinkd.sessions["s-lead"], peerlinkd.sessions["s-other"]
+        self.addCleanup(peerlinkd.config.update, {"rules_lead": "", "rules_lead_agent": ""})
+        lead["agent"], other["agent"] = "a-lead", "a-other"
+        peerlinkd.agents.update({"a-lead": {"id": "a-lead", "name": "lead", "seen": 1}, "a-other": {"id": "a-other", "name": "other", "seen": 1}})
+        self.addCleanup(lambda: [peerlinkd.agents.pop(a, None) for a in ("a-lead", "a-other")])
+        # Nobody is lead until you name one: an agent can't change a rule.
+        self.assertTrue(peerlinkd.propose_lead_change(lead, {"op": "add", "text": "Ship on Tuesdays."})[1]["not_lead"])
+        # You name it in Settings; it's held by the agent id the name had then.
+        self.assertEqual((peerlinkd.rules_lead_agent("Lead"), peerlinkd.rules_lead_agent("nobody")), ("a-lead", ""))
+        peerlinkd.config.update({"rules_lead": "lead", "rules_lead_agent": "a-lead"})
+        self.assertEqual(peerlinkd.propose_lead_change(other, {"op": "add", "text": "x"})[0], 403)
+        status, ask = peerlinkd.propose_lead_change(lead, {"op": "add", "text": "Ship  on Tuesdays."})
+        self.assertEqual(status, 200, ask)
+        self.assertEqual(ask["change"], 'add this standing rule for every space: "Ship on Tuesdays."')
+        self.assertFalse([r for r in peerlinkd.rules.values() if r["text"] == "Ship on Tuesdays."])  # nothing yet
+        # Another agent can't spend the lead's code, a wrong code does nothing, and a code works once.
+        self.assertEqual(peerlinkd.confirm_lead_change(other, {"code": ask["code"], "approve": True})[0], 403)
+        status, ask = peerlinkd.propose_lead_change(lead, {"op": "add", "text": "Ship on Tuesdays."})
+        self.assertEqual(peerlinkd.confirm_lead_change(lead, {"code": "nope", "approve": True})[0], 403)
+        status, out = peerlinkd.confirm_lead_change(lead, {"code": ask["code"], "approve": True})
+        rid = out["rule"]["id"]
+        self.assertEqual((status, out["rule"]["status"], out["rule"]["space"], out["rule"]["by"]), (200, "active", "*", "lead"))
+        self.assertEqual(peerlinkd.rules[rid]["via"], "terminal")
+        self.assertEqual(peerlinkd.confirm_lead_change(lead, {"code": ask["code"], "approve": True})[0], 403)
+        self.assertIn("Ship on Tuesdays.", [r["text"] for r in peerlinkd.client_config("s-other")["rules"]])
+        # A No drops it; edit, off and delete reach any rule, yours included.
+        mine = peerlinkd.add_rule({"text": "Answer in English.", "space": "*"})[1]["rule"]["id"]
+        ask = peerlinkd.propose_lead_change(lead, {"op": "off", "id": mine})[1]
+        self.assertIn(f'turn off rule {mine} for every space: "Answer in English."', ask["change"])
+        self.assertEqual(peerlinkd.confirm_lead_change(lead, {"code": ask["code"], "approve": False})[1], {"denied": True})
+        self.assertEqual(peerlinkd.rules[mine]["status"], "active")
+        ask = peerlinkd.propose_lead_change(lead, {"op": "edit", "id": mine, "text": "Answer in plain English.", "space": "elsewhere"})[1]
+        self.assertEqual(peerlinkd.confirm_lead_change(lead, {"code": ask["code"], "approve": True})[0], 200)
+        self.assertEqual((peerlinkd.rules[mine]["text"], peerlinkd.rules[mine]["space"]), ("Answer in plain English.", "elsewhere"))
+        ask = peerlinkd.propose_lead_change(lead, {"op": "delete", "id": rid})[1]
+        self.assertEqual(peerlinkd.confirm_lead_change(lead, {"code": ask["code"], "approve": True})[1], {"deleted": rid})
+        # A code older than ten minutes is gone; renaming the lead in Settings takes the right away at once.
+        ask = peerlinkd.propose_lead_change(lead, {"op": "on", "id": mine})[1]
+        peerlinkd.lead_changes[ask["code"]]["expires"] = 0
+        self.assertEqual(peerlinkd.confirm_lead_change(lead, {"code": ask["code"], "approve": True})[0], 403)
+        # While the lead is offline, another agent can't take its name, and one going by it anyway isn't the lead.
+        was = lead["last_seen"]
+        lead["last_seen"] = 0
+        self.assertIn("rules lead's name", peerlinkd.rename_self("s-other", "lead")[1]["error"])
+        other["name"] = "lead"
+        self.assertEqual(peerlinkd.propose_lead_change(other, {"op": "add", "text": "z"})[0], 403)
+        other["name"] = "other"
+        lead["last_seen"] = was
+        # The lead renaming itself keeps the role, and Settings follows the name.
+        self.assertEqual(peerlinkd.rename_self("s-lead", "chief")[0], 200)
+        self.addCleanup(lambda: peerlinkd.config["sessions"].get("s-lead", {}).pop("nickname", None))
+        self.assertEqual((peerlinkd.config["rules_lead"], peerlinkd.is_rules_lead(lead)), ("chief", True))
+        ask = peerlinkd.propose_lead_change(lead, {"op": "on", "id": mine})[1]
+        peerlinkd.config.update({"rules_lead": "other", "rules_lead_agent": "a-other"})
+        self.assertEqual(peerlinkd.confirm_lead_change(lead, {"code": ask["code"], "approve": True})[0], 403)
+        self.assertEqual(peerlinkd.propose_lead_change(lead, {"op": "add", "text": "y"})[0], 403)
+        self.assertEqual(peerlinkd.config_value("rules_lead", "alex")[0], "alex")
+        self.assertIn("rules_lead", peerlinkd.BROWSER_ONLY_SETTINGS)
+
     def test_a_task_nobody_touched_is_raised_with_its_owner_then_with_whoever_asked(self):
         top, _ = self.tree()
         t = peerlinkd.tasks[top]
