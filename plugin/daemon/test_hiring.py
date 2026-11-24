@@ -246,7 +246,8 @@ class HiringTest(unittest.TestCase):
 class HerdrLaunchTest(unittest.TestCase):
     def setUp(self):
         # No login shell to ask about an alias, unless a test says otherwise; no herdr app to name tabs.
-        for target, fake in (("user_shell", lambda: ""), ("name_herdr_tab", lambda *a: None)):
+        # Not on Windows either, whatever this runs on: that path has its own test.
+        for target, fake in (("user_shell", lambda: ""), ("name_herdr_tab", lambda *a: None), ("IS_WINDOWS", False)):
             p = unittest.mock.patch.object(d, target, fake)
             p.start()
             self.addCleanup(p.stop)
