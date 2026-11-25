@@ -86,6 +86,37 @@ PATCHES = [
 
 
 AGENTS_JS = LOAD_JS + r'''
+// Right-click an agent's row: a small menu to go to it or close it. Close ends its terminal, which also ends an agent
+// that has no pane of its own (a sub-agent that was never kept).
+function peerlinkAgentMenuOpen(addr, pane, name) {
+  openOverlay({ mod: "peerlink-agents", kind: "popup", width: 190, height: 104, props: { agentMenu: { addr, pane: pane || null, name: name || addr } } });
+}
+function peerlinkAgentMenu(t, p) {
+  const m = p.agentMenu;
+  const item = (id, icon, label, act, color) => h_flex()
+    .id(`agent-menu-${id}`)
+    .h(31)
+    .px(8)
+    .gap(9)
+    .rounded(7)
+    .items_center()
+    .text_color(color || t.foreground)
+    .hover((el) => el.bg(t.hover))
+    .on_click(() => {
+      closeOverlay(p.overlay);
+      act();
+    })
+    .child(svg(`mods/workspace-chrome/${icon}.svg`).size(14).flex_none().text_color(color || t.muted))
+    .child(div().flex_1().truncate().child(label));
+  return v_flex()
+    .w_full()
+    .p(5)
+    .bg(t.popover)
+    .text_size(12.8)
+    .child(div().px(8).pt(4).pb(6).text_size(11).text_color(t.dim).truncate().child(m.name))
+    .child(item("go", "terminal", "Go to agent", () => (m.pane ? run("pane.focus", { terminal: m.addr }) : run("terminal.peek", { terminal: m.addr }))))
+    .child(item("close", "x", "Close agent", () => run("terminal.kill", { terminal: m.addr }), t.ansi1));
+}
 // An agent's model and effort, after its name while its row is hovered: "Opus 5.5 med", colored by model family and
 // by effort level.
 const PEERLINK_FAMILY = { Opus: "ansi5", Sonnet: "ansi4", Haiku: "ansi2", Fable: "ansi3" };
@@ -195,7 +226,19 @@ AGENTS_PATCHES = [
     ("          .when(full && Boolean(more), el => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`\\u00b7 ${more}`))))",
      "          .when(full && Boolean(more), el => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`\\u00b7 ${more}`)))\n"
      "          .when(this.hovered === a.address && Boolean(peerlinkModel(a.address)), el => el.child(peerlinkTag(t, peerlinkModel(a.address)))))"),
-    # A sub-agent's row tracks the hover too, for its tag.
+    # A popup of this mod that is an agent's menu (opened by a right-click below) draws only the menu.
+    ("    if (props()?.sortMenu) return;\n", "    if (props()?.sortMenu || props()?.agentMenu) return;\n"),
+    ("    if (props()?.sortMenu) return this.sortMenu(t);",
+     "    if (props()?.sortMenu) return this.sortMenu(t);\n    if (props()?.agentMenu) return peerlinkAgentMenu(t, props());"),
+    ('        .on_click(() => run("pane.focus", { pane: a.pane }))\n        .when(Boolean(pic)',
+     '        .on_click(() => run("pane.focus", { pane: a.pane }))\n'
+     '        .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); peerlinkAgentMenuOpen(a.address, a.pane, name); })\n'
+     '        .when(Boolean(pic)'),
+    ('          .on_click(() => run("pane.focus", { pane: a.pane }))\n          .child(div().flex_1().min_w(0).whitespace_nowrap()',
+     '          .on_click(() => run("pane.focus", { pane: a.pane }))\n'
+     '          .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); peerlinkAgentMenuOpen(a.address, a.pane, label(a)); })\n'
+     '          .child(div().flex_1().min_w(0).whitespace_nowrap()'),
+    # A sub-agent's row tracks the hover too, for its tag, and opens the menu on a right-click.
     ("      .hover((s) => s.bg(t.hover))\n      .on_click(() => (this.listed.has(k.address)",
      "      .hover((s) => s.bg(t.hover))\n"
      "      .on_hover((on, cx) => {\n"
@@ -203,6 +246,7 @@ AGENTS_PATCHES = [
      "        else if (this.hovered === k.address) this.hovered = null;\n"
      "        cx.notify();\n"
      "      })\n"
+     "      .on_mouse_down(\"right\", (_e, cx) => { cx.stop_propagation(); peerlinkAgentMenuOpen(k.address, this.listed.has(k.address) ? k.address : null, (peerlinkTree.names || {})[k.address] || k.name || k.address); })\n"
      "      .on_click(() => (this.listed.has(k.address)"),
 ]
 
