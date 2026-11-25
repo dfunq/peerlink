@@ -186,6 +186,8 @@ class EndpointTest(unittest.TestCase):
         self.assertEqual([m["id"] for m in first], ["m5"])
         self.assertEqual(first, again)
         self.assertEqual(self.d.acked, [])
+        # Unread, it's named as held, so the daemon doesn't keep handing it out (an announcement was, 1,700 times).
+        self.assertTrue(wait_for(lambda: any("m5" in (b.get("holding") or []) for p, b in self.d.posted if p.endswith("/heartbeat"))))
         read = self.c.tool("inbox")[1]["messages"]
         self.assertEqual([m["id"] for m in read], ["m5"])
         self.assertEqual(self.c.tool("inbox")[1]["messages"], [])

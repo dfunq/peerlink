@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.9.108'
+const DAEMON_VERSION = '0.9.109'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -118,6 +118,8 @@ let handoff = ''
 // its next prompt rather than starting a turn of its own.
 let nudge = ''
 let nudgedFor = ''
+let nudgedAt = 0
+const NUDGE_STEP = 50000
 // Messages that reached the session, so one the daemon hands out again isn't shown twice; and acks it hasn't taken yet.
 const placed = new Set<string>()
 let unacked: string[] = []
@@ -205,6 +207,7 @@ async function terminalOf($: EngineInterface) {
 }
 let cancelPoll: (() => void) | undefined
 let lastRoster = ''
+let lastPeers = new Map<string, { who: string; line: string }>() // the roster this conversation last saw, by agent
 // Whether this session's prompt.compose and prompt.context hooks have run. An org's managed plugin can send those
 // events past every user plugin; then what they carry (the role and guidance, open threads, announcements) rides on
 // the next prompt instead, sent again only when it changes or the conversation starts over.
@@ -215,6 +218,11 @@ let contextRan = false
 let turnsSinceLoad = 0
 let composeOff = false
 let sentGuidance = ''
+// Who this agent is among its peers (name, space, role, routes, leads) and its user's rules, as this conversation last
+// had them. They ride in the conversation, not the system prompt: a change to the system prompt rewrites the prompt
+// cache for the whole conversation, of every agent at once when a rule changes. Only what changed is sent.
+let sentPlace: string | undefined
+let sentRules: string[] = []
 let sentThreads = false
 let contextTokens = 0 // the context's size at the last prompt, to tell a compaction by
 let contextFor = ''
@@ -591,14 +599,21 @@ function acked($: EngineInterface, batch: PeerMessage[], verify = false) {
 }
 
 // The messages that arrived mid-turn and are still owed a reply when it ends go back to the front of the queue.
+// Whom this turn's send_message calls went to: a sender the agent wrote back to this turn isn't chased, even when the
+// answer didn't name the message it answers (each chase costs the agent a whole turn).
+let sentThisTurn = new Set<string>()
 async function chase($: EngineInterface) {
   const arrived = midTurn
+  const talked = sentThisTurn
   midTurn = []
+  sentThisTurn = new Set()
   if (!arrived.length || !sessionId) return
   const res = await call($, 'GET', `/api/sessions/${sessionId}/threads`).catch(() => undefined)
   if (!res?.ok) return
   const owed = new Set(((res.data.owes ?? []) as any[]).map(t => t.id))
-  const again = arrived.filter(m => owed.has(m.id) && !chased.has(m.id) && !pending.some(p => p.id === m.id))
+  const again = arrived.filter(
+    m => owed.has(m.id) && !chased.has(m.id) && !pending.some(p => p.id === m.id) && !talked.has(m.from) && !talked.has(String(m.from_name ?? '').toLowerCase()),
+  )
   for (const m of again) chased.add(m.id)
   if (chased.size > 500) for (const id of [...chased].slice(0, chased.size - 500)) chased.delete(id)
   if (again.length) pending = [...again.map(m => ({ ...m, unanswered: true, wake: true })), ...pending]
@@ -869,7 +884,9 @@ async function poll($: EngineInterface) {
     const old = sessionId
     sessionId = now
     lastRoster = ''
+    lastPeers = new Map()
     sentGuidance = ''
+    if (!contextRan) sentPlace = undefined // with prompt.context running, it sends the new conversation all of it
     sentThreads = false
     // What a refused wake left in the old conversation's transcript is gone with it: put it to the new one.
     pending = [...stuckHeld, ...pending.filter(p => !stuckHeld.some(m => m.id === p.id))]
@@ -995,12 +1012,20 @@ async function rosterContext($: EngineInterface) {
   const peers = (res.data.peers as any[]).filter(p => !p.muted).slice(0, 12)
   const roster = peers.map(peerLine).join('\n')
   // Sent again only when who's there, or what they're for, changes: not each time a summary or context moves.
-  const who = peers.map(p => [p.name, p.cwd, p.space, p.role, spaceTag(p)].join('|')).join('\n')
+  const key = (p: any) => [p.name, p.cwd, p.space, p.role, spaceTag(p)].join('|')
+  const who = peers.map(key).join('\n')
   if (who === lastRoster) return undefined
+  const seen = lastRoster ? lastPeers : undefined
   lastRoster = who
-  return peers.length
-    ? `Peer agents now live (send_message to reach one):\n${roster}`
-    : 'peerlink: no other agents are live in your space now.'
+  lastPeers = new Map(peers.map(p => [p.remote ? `${p.name}@${p.host}` : p.name, { who: key(p), line: peerLine(p) }]))
+  if (!peers.length) return 'peerlink: no other agents are live in your space now.'
+  const full = `Peer agents now live (send_message to reach one):\n${roster}`
+  if (!seen) return full
+  // After that, only who came, changed or left: workers come and go all day, and the rest of the list stands.
+  const came = [...lastPeers].filter(([id, p]) => seen.get(id)?.who !== p.who).map(([, p]) => p.line)
+  const left = [...seen.keys()].filter(id => !lastPeers.has(id))
+  const diff = `Peer agents changed:${came.length ? `\n${came.join('\n')}` : ''}${left.length ? `\nNo longer live: ${left.join(', ')}.` : ''}`
+  return diff.length < full.length ? diff : full
 }
 
 async function postSummary($: EngineInterface, next: string, kind: 'seed' | 'model' | 'manual', headline = '') {
@@ -1208,10 +1233,37 @@ function rulesText() {
   return `\nStanding rules from your user. They hold in every task, and outrank a schedule's text and your own notes:\n${rules.map(r => `- ${r.text}`).join('\n')}`
 }
 
-// The system prompt's peerlink section: who this agent is to its peers, its role, and how to work with them.
+// The system prompt's peerlink section: how to work with peers. Only what rarely changes, so the prompt cache holds.
 function guidanceText() {
   if (!cfg || cfg.muted) return ''
-  return `# Peer agents\nPeers know you as "${myName}"${cfg.space && cfg.space !== 'default' ? ` in the "${cfg.space}" space; you only see agents in that space${[cfg.parent, ...(cfg.also ?? [])].filter(Boolean).map(s => ` and "${s}"`).join('')}` : ''}.${hierarchyGuidance()}\n${cfg.guidance ?? ''}${rulesText()}`
+  return `# Peer agents\n${cfg.guidance ?? ''}`
+}
+
+// Who this agent is to its peers: its name, space, role, routes and place in the hierarchy.
+function whoText() {
+  if (!cfg) return ''
+  return `Peers know you as "${myName}"${cfg.space && cfg.space !== 'default' ? ` in the "${cfg.space}" space; you only see agents in that space${[cfg.parent, ...(cfg.also ?? [])].filter(Boolean).map(s => ` and "${s}"`).join('')}` : ''}.${hierarchyGuidance()}`
+}
+
+// The place and rules for this conversation: all of them when it starts (fresh), and after that only what changed.
+function placeUpdate(fresh = false) {
+  if (!cfg || cfg.muted) return ''
+  const place = whoText()
+  const rules = (cfg.rules ?? []).map(r => r.text)
+  const out: string[] = []
+  if (fresh || sentPlace === undefined) {
+    out.push(`${place}${rulesText()}`)
+  } else {
+    if (place !== sentPlace) out.push(`Your place among your peers changed. It is now:\n${place}`)
+    const added = rules.filter(r => !sentRules.includes(r))
+    const gone = sentRules.filter(r => !rules.includes(r))
+    if (added.length)
+      out.push(`Your user added standing rules. They hold in every task, and outrank a schedule's text and your own notes:\n${added.map(r => `- ${r}`).join('\n')}`)
+    if (gone.length) out.push(`Your user withdrew these standing rules; they no longer hold:\n${gone.map(r => `- ${r}`).join('\n')}`)
+  }
+  sentPlace = place
+  sentRules = rules
+  return out.join('\n\n')
 }
 
 // What the prompt.compose and prompt.context hooks would have sent, for a prompt, when they didn't run.
@@ -1229,10 +1281,13 @@ function nudgeBlock() {
 
 async function checkContextSize($: EngineInterface) {
   const limit = cfg?.clear_nudge_tokens ?? 0
-  if (!limit || nudgedFor === sessionId) return
+  if (!limit) return
   const tokens = (await $.session.usage().catch(() => undefined))?.context?.tokens
-  if (!tokens || tokens < limit) return
+  // Asked once past the limit, and again each NUDGE_STEP further: one ask is easy to put off for good.
+  const due = nudgedFor === sessionId ? nudgedAt + NUDGE_STEP : limit
+  if (!tokens || tokens < due) return
   nudgedFor = sessionId
+  nudgedAt = tokens
   nudge = `Your context is at ${Math.round(tokens / 1000)}k tokens, past the ${Math.round(limit / 1000)}k your user set, and every turn re-reads all of it. At your next stopping point, which should be soon, save what's worth keeping to memory and call clear_context with a handoff.`
 }
 
@@ -1250,12 +1305,17 @@ async function skippedContext($: EngineInterface) {
     contextFor = id
     sentGuidance = ''
     sentThreads = false
+    if (!contextRan) sentPlace = undefined
   }
   if (!composeRan) {
     const guidance = guidanceText()
     if (guidance && guidance !== sentGuidance) out.push(guidance)
     sentGuidance = guidance
   }
+  // Where prompt.compose runs, prompt.context gives a new conversation all of it, so the prompt carries only changes;
+  // the prompt carries all of it only where those hooks are skipped, or prompt.context ran before the config came.
+  const place = sentPlace !== undefined || !composeRan || contextRan ? placeUpdate() : ''
+  if (place) out.push(place)
   if (!contextRan) {
     if (!sentThreads) {
       sentThreads = true
@@ -1327,7 +1387,7 @@ function hierarchyGuidance() {
     )
   if (cfg.hired_by)
     lines.push(
-      `${cfg.hired_by} hired you as a worker for one piece of work. You don't start agents or schedules. When the work is done: put the evidence where your lead asked, mark every task you own done or failed with update_task, send ${cfg.hired_by} one line with the outcome, then call retire (load it with ToolSearch, "select:mcp__peerlink__retire") and end the turn.`,
+      `${cfg.hired_by} hired you as a worker for one piece of work. You don't start agents or schedules. When the work is done: put the evidence where your lead asked, mark every task you own done or failed with update_task, send ${cfg.hired_by} one line with the outcome, then call retire and end the turn.`,
     )
   if (cfg.parent || cfg.leads)
     lines.push(
@@ -1631,6 +1691,17 @@ export const register: Register = (on, options) => {
   // Off when a managed plugin was found sending prompt.compose past peerlink: see composeBypassed.
   const useCompose = options?.system_prompt !== false
   if (!useCompose) composeOff = true
+
+  // Tool schemas are read on every request, so a tool an agent's role rarely or never uses waits behind ToolSearch:
+  // a worker gets retire up front and request_spawn and rule behind it; only a lead gets request_spawn up front.
+  const deferred: Record<string, () => boolean> = {
+    retire: () => !cfg?.hired_by,
+    request_spawn: () => !!cfg?.hired_by || !(cfg?.leads || cfg?.parent),
+    rule: () => true,
+  }
+  for (const [name, isDeferred] of Object.entries(deferred))
+    on('tool.describe', { tool: `mcp__peerlink__${name}` }, async ($, e, next) => ({ ...(await next(e)), isDeferred: isDeferred() }))
+
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     surface = (e as any).surface ?? ''
@@ -2018,7 +2089,9 @@ export const register: Register = (on, options) => {
     const heard = notices.splice(0)
     if (heard.length) acked($, heard)
     const notes = handoffBlock()
+    const place = placeUpdate(true)
     const blocks = [
+      ...(place ? [{ name: 'peerlink place', text: place }] : []),
       ...(notes ? [{ name: 'peerlink handoff', text: notes }] : []),
       ...(heard.length
         ? [{ name: 'peerlink announcements', text: `Announced to your space since your last turn (no reply expected):\n\n${heard.map(frame).join('\n\n')}` }]
@@ -2058,6 +2131,7 @@ export const register: Register = (on, options) => {
       files: Array.isArray(input.files) ? input.files : undefined,
     })
     if (!res.ok) return text(`Not sent: ${res.data.error ?? res.status}`)
+    for (const to of [input.to, res.data.to]) if (typeof to === 'string' && to) sentThisTurn.add(to.toLowerCase())
     if (res.data.task)
       return text(`Sent to ${res.data.to} (${res.data.id}) as task ${res.data.task}. You'll get its note when it's done or failed; continue with other work meanwhile.`)
     return text(

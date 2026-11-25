@@ -267,6 +267,44 @@ class RecordsTest(unittest.TestCase):
         peerlinkd.ack("s-core", [mid])
         self.assertEqual(peerlinkd.handed["s-core"], {})
 
+    def test_a_message_never_acked_is_handed_again_less_often_and_then_not_at_all(self):
+        mid = self.send("lead", to="core", text="FYI: nightly is green.")["id"]
+        self.assertEqual([m["id"] for m in peerlinkd.take_inbox("s-core", track=True)], [mid])
+        self.addCleanup(lambda: (peerlinkd.handed.pop("s-core", None), peerlinkd.redelivered.pop(mid, None)))
+        waits = []
+        for _ in range(peerlinkd.REDELIVER_TRIES):
+            m, ts = peerlinkd.handed["s-core"][mid]
+            wait = peerlinkd.redeliver_after(mid)
+            waits.append(wait)
+            peerlinkd.handed["s-core"][mid] = (m, ts - wait + 5)  # not quite long enough
+            self.assertEqual(peerlinkd.take_inbox("s-core", track=True), [])
+            peerlinkd.handed["s-core"][mid] = (m, ts - wait - 1)
+            self.assertEqual([x["id"] for x in peerlinkd.take_inbox("s-core", track=True)], [mid])
+        self.assertEqual(waits[:3], [peerlinkd.REDELIVER_S, 2 * peerlinkd.REDELIVER_S, 4 * peerlinkd.REDELIVER_S])
+        self.assertEqual(max(waits), peerlinkd.REDELIVER_MAX_S)
+        m, ts = peerlinkd.handed["s-core"][mid]
+        peerlinkd.handed["s-core"][mid] = (m, ts - peerlinkd.REDELIVER_MAX_S - 1)
+        self.assertEqual(peerlinkd.take_inbox("s-core", track=True), [])  # it gave up
+        self.assertNotIn(mid, peerlinkd.handed["s-core"])
+        self.assertNotIn(mid, peerlinkd.redelivered)
+
+    def test_an_ack_starts_the_wait_over(self):
+        mid = self.send("lead", to="core", text="Ship it?", expects_reply=True)["id"]
+        peerlinkd.take_inbox("s-core", track=True)
+        self.addCleanup(lambda: peerlinkd.handed.pop("s-core", None))
+        peerlinkd.redelivered[mid] = 3
+        peerlinkd.ack("s-core", [mid])
+        self.assertNotIn(mid, peerlinkd.redelivered)
+
+    def test_a_rewritten_message_log_ends_well_under_its_cap_and_keeps_what_is_undelivered(self):
+        entries = [{"id": f"m{i}", "ts": i, "text": "x" * 1000, "status": "delivered"} for i in range(100)]
+        entries[3]["status"] = "queued"
+        kept = peerlinkd.kept_messages(entries, budget=20 * 1100)
+        ids = [e["id"] for e in kept]
+        self.assertEqual(ids[0], "m3")
+        self.assertEqual(ids[-1], "m99")
+        self.assertLess(sum(len(peerlinkd.json.dumps(e)) + 1 for e in kept), 22 * 1100)
+        self.assertEqual(ids, sorted(ids, key=lambda i: int(i[1:])))
 
     def restart(self):
         """The daemon dies (kill -9: nothing in memory is saved) and starts again from its log."""
@@ -467,6 +505,37 @@ class PeerCountTest(unittest.TestCase):
         self.assertLess(new * 5, old)
 
 
+class WebPageTest(unittest.TestCase):
+    def test_the_page_runs_only_its_own_script(self):
+        import base64, hashlib, re
+        csp = peerlinkd.UI_CSP
+        script = re.search(r"<script>(.*?)</script>", peerlinkd.UI_HTML, re.S).group(1)
+        digest = base64.b64encode(hashlib.sha256(script.encode()).digest()).decode()
+        self.assertIn(f"script-src 'sha256-{digest}'", csp)
+        self.assertIn("default-src 'none'", csp)
+        self.assertIn("connect-src 'self'", csp)
+        self.assertNotIn("script-src 'unsafe-inline'", csp)
+        self.assertEqual(peerlinkd.UI_HTML.count("<script"), 1)  # a second script would be refused by the hash
+
+    def test_the_page_gets_open_tasks_whole_and_only_recent_ended_ones_clipped(self):
+        now = peerlinkd.time.time()
+        saved = dict(peerlinkd.tasks)
+        self.addCleanup(lambda: (peerlinkd.tasks.clear(), peerlinkd.tasks.update(saved)))
+        peerlinkd.tasks.clear()
+        long = "x" * 5000
+        peerlinkd.tasks.update({
+            "t1": {"id": "t1", "status": "open", "created": now - 90 * 86400, "text": long},
+            "t2": {"id": "t2", "status": "done", "created": now - 2 * 86400, "updated": now - 86400, "text": long, "note": long},
+            "t3": {"id": "t3", "status": "done", "created": now - 60 * 86400, "updated": now - 50 * 86400, "text": "old"},
+        })
+        shown = {t["id"]: t for t in peerlinkd.page_tasks(now)}
+        self.assertEqual(set(shown), {"t1", "t2"})
+        self.assertEqual(shown["t1"]["text"], long)
+        self.assertEqual(len(shown["t2"]["text"]), peerlinkd.SHOWN_TEXT)
+        self.assertEqual(len(shown["t2"]["note"]), peerlinkd.SHOWN_TEXT)
+        self.assertEqual(peerlinkd.tasks["t2"]["text"], long)  # the record itself is untouched
+
+
 class StateFileTest(unittest.TestCase):
     """State files are written whole or not at all, and a damaged one is kept and recovered, never just replaced."""
 
@@ -508,6 +577,15 @@ class StateFileTest(unittest.TestCase):
         with open(self.path + ".x.tmp", "w") as f:
             f.write("{half")
         self.assertEqual(peerlinkd.read_json(self.path), {"keep": "me"})
+
+    def test_a_backup_that_is_already_the_same_file_leaves_no_tmp_behind(self):
+        # Two writers at once can leave path.bak a second name of path itself; renaming a link over another link of the
+        # same file does nothing, so the tmp name used to stay for good (30 of them in one config folder).
+        peerlinkd.write_json(self.path, {"a": 1})
+        os.link(self.path, self.path + ".bak")
+        peerlinkd.write_json(self.path, {"a": 2})
+        self.assertEqual([n for n in os.listdir(self.dir) if ".tmp" in n], [])
+        self.assertEqual(peerlinkd.read_json(self.path), {"a": 2})
 
     def test_writers_at_once_never_share_a_tmp_file(self):
         import threading

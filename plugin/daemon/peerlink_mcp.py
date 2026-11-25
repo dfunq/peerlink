@@ -189,8 +189,10 @@ class Daemon:
     def heartbeat(self, hold=0):
         with self.lock:
             acks = list(self.to_ack)
+            holding = list(self.pending)
         # "ack" present tells the daemon to hand a message again until it is acked, so one never read is not lost.
-        body = {"busy": False, "ack": acks, **({"wait": hold} if hold else {})}
+        # "holding" names the ones received but not read yet: the daemon doesn't hand those again while we say so.
+        body = {"busy": False, "ack": acks, "holding": holding, **({"wait": hold} if hold else {})}
         code, out = self.call("POST", f"/api/sessions/{self.id}/heartbeat", body, timeout=5 + hold)
         if code == 404:
             self.register()

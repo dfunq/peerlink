@@ -48,7 +48,7 @@ if os.name == "nt":
 
     subprocess.Popen.__init__ = _no_window_init
 
-VERSION = "0.9.108"
+VERSION = "0.9.109"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -60,6 +60,20 @@ import slacklink  # noqa: E402
 import agentslink  # noqa: E402
 from cronlib import cron_next, parse_cron  # noqa: E402,F401
 from webui import UI_HTML  # noqa: E402
+
+
+def page_csp(html):
+    """A Content-Security-Policy for a page of ours: its one inline script by hash and nothing else, no outside requests
+    and no framing. Agents' and outside clients' text is shown on the page that holds the owner's powers, so a missed
+    escape must not be able to run script."""
+    import base64
+    m = re.search(r"<script>(.*?)</script>", html, re.S)
+    script = f"script-src 'sha256-{base64.b64encode(hashlib.sha256(m.group(1).encode()).digest()).decode()}'; " if m else ""
+    return (f"default-src 'none'; {script}style-src 'unsafe-inline'; img-src 'self' data:; manifest-src 'self'; connect-src 'self'; "
+            "base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+
+
+UI_CSP = page_csp(UI_HTML)
 import herdr_sync  # noqa: E402
 import herdr_mod  # noqa: E402
 import reboot  # noqa: E402
@@ -208,7 +222,7 @@ DEFAULT_CONFIG = {
     "auto_approve_all": False,  # every agent's requests to start an agent, or a schedule that may, go ahead without asking you
     "auto_approve_folders": [],  # the folders whose agents' requests do; set only from the web UI
     "max_live_spawns": 0,  # at most this many workers (agents started with worker: true) run at once, the rest queue; 0 is no cap; set only from the web UI
-    "night_guard": "",
+    "night_guard": "",  # hours no worker is started, like "22-8"; empty is off; set only from the web UI
     "herdr_sync": False,  # the herdr app's spaces mirror peerlink spaces, one tab per agent (peerlink -> herdr only)
     "herdr_spaces": {},  # peerlink space -> the herdr space id herdr sync shows it in
     "herdr_tab_names": {},  # herdr tab id -> the name herdr sync last left it showing: a tab renamed since renames its agent
@@ -217,7 +231,7 @@ DEFAULT_CONFIG = {
     "herdr_mods_source": "",  # a folder (a clone of your private mods repo) that Install herdr mods copies from; set only from the web UI
     "start_at_login": False,  # the daemon starts when you log in (a LaunchAgent, or a Run value on Windows); set only from the web UI
     "resume_after_reboot": True,  # after a reboot, ask you whether to resume the agents that were running; set only from the web UI
-    "use_herdr": True,  # start agents in herdr's terminals when herdr (hc) is installed; off, or without herdr, tmux or Terminal as before  # hours no worker is started, like "22-8"; empty is off; set only from the web UI
+    "use_herdr": True,  # start agents in herdr's terminals when herdr (hc) is installed; off, or without herdr, tmux or Terminal as before
     "task_nudge_h": 24,  # an open task with no update for this many hours is raised with its owner, then with whoever asked; 0 is off
     "ask_defaults": True,  # a question to you may name a default the agent goes with when you haven't answered in time
     "ask_default_min_m": 10,  # the shortest wait, in minutes, an agent may give you before its default applies
@@ -254,6 +268,15 @@ inboxes = Inboxes()
 handed = {}
 REDELIVER_S = float(os.environ.get("PEERLINK_REDELIVER_S", 45))
 HANDED_MAX_AGE_S = 86400
+# Each time a message is handed again unacked, the wait doubles (45 s, 90 s, 3 m, ... up to 6 h); after REDELIVER_TRIES
+# it isn't handed again. A plugin that acks does so within seconds, so one still unacked by then never will be.
+REDELIVER_TRIES = 10
+REDELIVER_MAX_S = 6 * 3600
+redelivered = {}  # message id -> times handed again, kept across the sessions it moves to
+
+
+def redeliver_after(mid):
+    return min(REDELIVER_S * (2 ** redelivered.get(mid, 0)), REDELIVER_MAX_S)
 messages = []   # recent log, newest last
 sent_times = {} # sender id -> [timestamps]
 next_msg = [1]
@@ -293,6 +316,12 @@ def write_file(path, text, backup=True, mode=0o600):
             try:
                 os.link(path, tmp + ".bak")  # the old file under a second name, then renamed into place: no gap
                 replace_file(tmp + ".bak", path + ".bak")
+            except OSError:
+                pass
+            # Two writers at once can leave both names as links to the same file, and renaming one link of a file over
+            # another is a no-op that reports success (POSIX): the tmp name would stay behind for good.
+            try:
+                os.unlink(tmp + ".bak")
             except OSError:
                 pass
         replace_file(tmp, path)
@@ -569,7 +598,7 @@ def write_launcher():
 
 
 def log(*parts):
-    print(time.strftime("%H:%M:%S"), *parts, flush=True)
+    print(time.strftime("%Y-%m-%d %H:%M:%S"), *parts, flush=True)
 
 
 # What Install herdr mods never copies: sign-ins and secrets each machine makes for itself, logs, and what herdr-app
@@ -697,7 +726,7 @@ def config_value(name, value):
     return (value, None) if isinstance(value, type(want)) else (None, f"{name} is a {type(want).__name__}")
 
 
-def load_config():
+def load_config(save=True):
     os.makedirs(HOME, exist_ok=True)
     data = read_json(CONFIG_PATH, {})
     if not isinstance(data, dict):
@@ -712,7 +741,8 @@ def load_config():
         merged["guidance"] = ""
     config.clear()
     config.update(merged)
-    save_config()
+    if save:
+        save_config()
 
 
 def save_config():
@@ -1565,13 +1595,40 @@ def snapshot():
                   "sessions": sum(1 for r in sessions.values() if is_live(r, now)), "queued": sum(len(b) for b in inboxes.values()),
                   "messages": len(messages), "browsers": sum(1 for e in web_sessions.values() if e > now), "home": HOME, "launcher": LAUNCHER_PATH}
         msgs = messages[-100:]
-        task_list = sorted(tasks.values(), key=lambda t: -t["created"])[:500]
+        task_list = page_tasks(now)
         issues = sorted(feedback.values(), key=lambda i: i["ts"])[-500:]
-        sched = sorted(schedules.values(), key=lambda c: -c["created"])[:200]
+        sched = [c for c in sorted(schedules.values(), key=lambda c: -c["created"])
+                 if c.get("status") in ("active", "pending") or recent(c, now)][:200]
         status["limit"] = limit_view()
         offline = offline_agents()
     return {"schedules": {"schedules": [sched_view(c) for c in sched]},"status": status, "peers": {"host": HOSTNAME, "peers": peers, "leads": leads_view(), "offline": offline}, "messages": {"messages": msgs},
             "tasks": {"tasks": task_list}, "issues": {"issues": issues, "path": ISSUES_PATH}, "inbox": {"items": inbox_items(), "user": USER_NAME}}
+
+
+# What the web UI is sent of what's done: the page is pushed whole on every change, and 500 finished tasks with their
+# full text and notes made it 1.7 MB. Open work goes in full; what ended goes for SHOWN_ENDED_S, its text clipped.
+SHOWN_ENDED_S = 14 * 86400
+SHOWN_ENDED_MAX = 150
+SHOWN_TEXT = 600
+
+
+def recent(item, now):
+    return now - (item.get("updated") or item.get("created") or item.get("ts") or now) < SHOWN_ENDED_S
+
+
+def page_tasks(now):
+    """The tasks the web UI shows: every open one, and those that ended lately, newest first. Called with the lock held."""
+    mine = sorted(tasks.values(), key=lambda t: -t["created"])
+    live = [t for t in mine if t["status"] in TASK_OPEN]
+    ended = [t for t in mine if t["status"] not in TASK_OPEN and recent(t, now)][:SHOWN_ENDED_MAX]
+    out = list(live)
+    for t in ended:
+        t = dict(t)
+        for k in ("text", "note"):
+            if isinstance(t.get(k), str) and len(t[k]) > SHOWN_TEXT:
+                t[k] = t[k][:SHOWN_TEXT - 1] + "…"
+        out.append(t)
+    return sorted(out, key=lambda t: -t["created"])
 
 
 def sent_last_hour(rec):
@@ -4766,10 +4823,20 @@ def take_inbox(sid, track=False):
             mine = handed.setdefault(sid, {})
             for mid in [mid for mid, (m, ts) in mine.items() if now - m["ts"] >= HANDED_MAX_AGE_S]:
                 mine.pop(mid)
+                redelivered.pop(mid, None)
             # While the usage limit holds, or until its turn after it lifts, an agent keeps what it was handed on purpose:
             # handing it out again is noise.
             held = usage_limit or (lifting and lifting["slots"].get(sid, 0) > now)
-            again = [] if held else [m for m, ts in mine.values() if now - ts >= REDELIVER_S]
+            again = [] if held else [m for m, ts in mine.values() if now - ts >= redeliver_after(m["id"])]
+            spent = [m for m in again if redelivered.get(m["id"], 0) >= REDELIVER_TRIES]
+            for m in spent:
+                mine.pop(m["id"])
+                redelivered.pop(m["id"], None)
+            if spent:
+                log("gave up redelivering", ", ".join(m["id"] for m in spent), "->", sid[:8], f"(never acked in {REDELIVER_TRIES} tries)")
+            again = [m for m in again if m not in spent]
+            for m in again:
+                redelivered[m["id"]] = redelivered.get(m["id"], 0) + 1
             for m in box + again:
                 mine[m["id"]] = (m, now)
             if again:
@@ -7225,6 +7292,7 @@ def ack(sid, ids, holding=None):
         mine = handed.get(sid, {})
         for mid in ids if isinstance(ids, list) else []:
             got = mine.pop(str(mid), None)
+            redelivered.pop(str(mid), None)
             if got:
                 got[0]["acked"] = True
                 entry = {"id": str(mid), "acked": True}
@@ -7336,6 +7404,18 @@ def rewrite_log(path, entries):
     write_file(path, "".join(json.dumps(e) + "\n" for e in entries), backup=False)
 
 
+def kept_messages(entries, budget=LOG_MAX_BYTES // 2):
+    """What a rewritten message log keeps: the newest messages up to half the cap, so it's well under the cap after,
+    and any still waiting to be delivered, whatever their size. In their order."""
+    keep, size = set(), 0
+    for i in range(len(entries) - 1, -1, -1):
+        size += len(json.dumps(entries[i])) + 1
+        if size > budget:
+            break
+        keep.add(i)
+    return [e for i, e in enumerate(entries) if i in keep or e.get("status") in ("queued", "waiting")]
+
+
 def ended_and_old(items, live, now):
     """Ids of records whose status isn't one of `live` and that last changed a month ago, never the newest one."""
     newest = max(items, key=lambda i: int(i[1:]) if i[1:].isdigit() else 0, default=None)
@@ -7441,7 +7521,7 @@ def tidy():
                         by_id[entry["id"]] = entry
                     elif entry.get("id") in by_id:
                         by_id[entry["id"]].update(entry)
-            rewrite_log(MESSAGES_PATH, by_id.values())
+            rewrite_log(MESSAGES_PATH, kept_messages(list(by_id.values())))
             dropped["messages.jsonl"] = "rewritten"
         if too_big(ISSUES_PATH, 1 << 20):
             rewrite_log(ISSUES_PATH, feedback.values())
@@ -7649,12 +7729,13 @@ class Handler(BaseHTTPRequestHandler):
         if rest == [] and method == "PUT":
             b = self.body()
             restart = False
+            if "token" in b:  # a call to Telegram: outside the lock, so a slow answer doesn't stall every agent
+                try:
+                    info = telegramlink.inspect_token(b["token"])
+                except telegramlink.TelegramError as err:
+                    return self.reply(400, {"error": str(err)})
             with lock:
                 if "token" in b:
-                    try:
-                        info = telegramlink.inspect_token(b["token"])
-                    except telegramlink.TelegramError as err:
-                        return self.reply(400, {"error": str(err)})
                     tg.update({"token": b["token"].strip(), "user": info["user"], "enabled": True})
                     restart = True
                 if "enabled" in b:
@@ -7754,15 +7835,16 @@ class Handler(BaseHTTPRequestHandler):
         if rest == [] and method == "PUT":
             b = self.body()
             restart = False
+            if "token" in b or "app_token" in b:
+                # Either token alone replaces that one; the pair is checked with Slack (outside the lock) before it's kept.
+                bot_token = str(b.get("token") or sl.get("token") or "").strip()
+                app_token = str(b.get("app_token") or sl.get("app_token") or "").strip()
+                try:
+                    info = slacklink.inspect_tokens(bot_token, app_token)
+                except slacklink.SlackError as err:
+                    return self.reply(400, {"error": str(err)})
             with lock:
                 if "token" in b or "app_token" in b:
-                    # Either token alone replaces that one; the pair is checked with Slack before it's kept.
-                    bot_token = str(b.get("token") or sl.get("token") or "").strip()
-                    app_token = str(b.get("app_token") or sl.get("app_token") or "").strip()
-                    try:
-                        info = slacklink.inspect_tokens(bot_token, app_token)
-                    except slacklink.SlackError as err:
-                        return self.reply(400, {"error": str(err)})
                     sl.update({"token": bot_token, "app_token": app_token, "user": info["user"], "team": info["team"], "enabled": True})
                     restart = True
                 if "enabled" in b:
@@ -7806,7 +7888,22 @@ class Handler(BaseHTTPRequestHandler):
 
     def page(self, code, title, text):
         html = PAGE_HTML.replace("{title}", title).replace("{text}", text)
-        return self.reply(code, html, "text/html; charset=utf-8")
+        return self.reply(code, html, "text/html; charset=utf-8", {"Content-Security-Policy": page_csp(html)})
+
+    stream_cache = {"at": 0.0, "body": ""}
+    stream_lock = threading.Lock()
+
+    @classmethod
+    def stream_body(cls):
+        """The page as JSON, built at most once a second however many browsers are watching."""
+        with cls.stream_lock:
+            if time.time() - cls.stream_cache["at"] >= 0.9:
+                snap = snapshot()
+                # Ages tick every second; they aren't a change worth sending.
+                for p in snap["peers"]["peers"]:
+                    p.pop("last_seen_s", None)
+                cls.stream_cache.update(at=time.time(), body=json.dumps(snap))
+            return cls.stream_cache["body"]
 
     def stream(self, browser):
         """Server-sent events: a fresh snapshot whenever what the page shows changes (checked each second), and a
@@ -7822,11 +7919,7 @@ class Handler(BaseHTTPRequestHandler):
                     with lock:
                         if not (web_sessions.get(browser, 0) > time.time()):
                             return
-                snap = snapshot()
-                # Ages tick every second; they aren't a change worth sending.
-                for p in snap["peers"]["peers"]:
-                    p.pop("last_seen_s", None)
-                body = json.dumps(snap)
+                body = self.stream_body()
                 if body != last:
                     self.wfile.write(f"data: {body}\n\n".encode())
                     self.wfile.flush()
@@ -7921,7 +8014,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(403, {"error": "cross-origin request refused"})
 
         if method == "GET" and url.path in ("/", "/index.html"):
-            return self.reply(200, UI_HTML, "text/html; charset=utf-8")
+            return self.reply(200, UI_HTML, "text/html; charset=utf-8", {"Content-Security-Policy": UI_CSP})
         if rest is None:
             return self.reply(404, {"error": "not found"})
 
@@ -8621,7 +8714,16 @@ def cli_start(args):
 
 
 def serve():
-    load_config()
+    # The port before anything is written: a daemon that loses it to another (several start at once after a reboot or
+    # an upgrade, one per agent) must touch nothing on its way out, not the config, the issues, the chat bots, the
+    # resume question or the Agents channel's port. Until serve_forever, connections wait in the listen backlog.
+    load_config(save=False)
+    try:
+        server = agentslink.Server((config["listen_host"], PORT), Handler)  # a listen backlog of 64, not 5
+    except OSError as err:
+        log("another daemon holds port", PORT, "-", err)
+        sys.exit(0)
+    save_config()
     load_key()
     load_web_sessions()
     load_messages()
@@ -8641,13 +8743,6 @@ def serve():
     ask_after_reboot(read_json(RUNNING_PATH, None))
     threading.Thread(target=reaction_worker, name="discord-reactions", daemon=True).start()
     clean_stale_reactions()
-    # The port first: a daemon that loses it to another (an older one an agent started mid-upgrade) must touch
-    # nothing on its way out, not the launcher, the chat bots or the Agents channel's port.
-    try:
-        server = agentslink.Server((config["listen_host"], PORT), Handler)  # a listen backlog of 64, not 5
-    except OSError as err:
-        log("another daemon holds port", PORT, "-", err)
-        sys.exit(0)
     start_discord()
     start_telegram()
     start_slack()
