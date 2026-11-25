@@ -2,6 +2,7 @@
 restart. Run: python3 -m unittest discover -s plugin/daemon"""
 import os
 import json
+import subprocess
 import sys
 import threading
 import time
@@ -10,7 +11,7 @@ import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from rig import Agent, Rig  # noqa: E402
+from rig import DAEMON, Agent, Rig  # noqa: E402
 
 
 class ScenarioTest(unittest.TestCase):
@@ -19,6 +20,16 @@ class ScenarioTest(unittest.TestCase):
         rig.__enter__()
         self.addCleanup(rig.__exit__, None, None, None)
         return rig
+
+    def test_a_second_daemon_that_finds_the_port_taken_leaves_every_state_file_alone(self):
+        # After a reboot or an upgrade, each agent's plugin may start a daemon at once: the losers must write nothing.
+        rig = self.rig()
+        before = {n: os.stat(os.path.join(rig.home, n)).st_mtime_ns for n in os.listdir(rig.home)}
+        out = subprocess.run([sys.executable, "-X", "utf8", DAEMON, "serve"], env=rig.env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 0)
+        self.assertIn("another daemon holds port", out.stdout)
+        after = {n: os.stat(os.path.join(rig.home, n)).st_mtime_ns for n in os.listdir(rig.home)}
+        self.assertEqual({n: t for n, t in after.items() if n != "rig.log"}, {n: t for n, t in before.items() if n != "rig.log"})
 
     def test_a_message_handed_out_but_not_acked_survives_kill_9(self):
         rig = self.rig()
