@@ -16,6 +16,9 @@ import reboot  # noqa: E402
 from rig import Agent, Rig  # noqa: E402
 
 
+SID = "5ad5fb3d-280a-400d-a0c1-c2b75da4f509"
+
+
 def read(path):
     with open(path) as f:
         return f.read()
@@ -104,12 +107,29 @@ class TheQuestion(unittest.TestCase):
             self.assertIn(part, text)
 
     def test_a_damaged_saved_question_is_asked_afresh(self):
-        saved = {"boot": 1, "ts": time.time(), "agents": [{"sid": "s1", "cwd": "/x/web", "name": "web"}], "ask": {"id": "bogus", "status": "denied"}}
+        saved = {"boot": 1, "ts": time.time(), "agents": [{"sid": SID, "cwd": "/x/web", "name": "web"}], "ask": {"id": "bogus", "status": "denied"}}
         kept = d.BOOT[0]
         self.addCleanup(d.BOOT.__setitem__, 0, kept)
         d.BOOT[0] = 10_000_000
         d.ask_after_reboot(saved)
         self.assertEqual(d.resume_ask["id"], "b1")
+
+    def test_a_session_id_that_isnt_one_is_never_typed_or_started(self):
+        bad = ["s1; rm -rf ~", "$(touch x)", "5ad5fb3d-280a-400d-a0c1-c2b75da4f509 --dangerously-skip-permissions", "ZZZZZZZZ-280a-400d-a0c1-c2b75da4f509"]
+        saved = {"boot": 1, "ts": time.time(), "agents": [{"sid": SID, "cwd": "/x/web", "name": "web"}]
+                 + [{"sid": b, "cwd": f"/x/bad{n}", "name": f"bad{n}"} for n, b in enumerate(bad)]}
+        kept = d.BOOT[0]
+        self.addCleanup(d.BOOT.__setitem__, 0, kept)
+        d.BOOT[0] = 10_000_000
+        d.ask_after_reboot(saved)
+        self.assertEqual([a["sid"] for a in d.resume_ask["agents"]], [SID])
+        self.assertEqual([a["name"] for a in d.resume_ask["skipped"]], [f"bad{n}" for n in range(len(bad))])
+        text = d.ask_view(d.resume_ask)
+        self.assertIn("Not resumed, because the saved session id isn't a valid one", text)
+        self.assertIn("bad0 in /x/bad0", text)
+        self.assertNotIn("rm -rf", text)
+        for b in bad + [""]:  # and resume_one refuses it outright, before any terminal or launch
+            self.assertEqual(d.resume_one({"sid": b, "cwd": HERE})[0], "")
 
     def test_no_answer_within_a_day_is_a_no(self):
         d.resume_ask.update({"id": "b1", "created": time.time() - d.SPAWN_TTL_S - 1, "status": "pending", "agents": [{"sid": "s", "cwd": "/x"}]})

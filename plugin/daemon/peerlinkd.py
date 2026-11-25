@@ -6327,6 +6327,12 @@ left_sessions = {}    # session id -> its last record, for a session that ended 
 resume_ask = {}       # the question after a reboot, while there is one: {"id", "created", "status", "agents", ...}
 running_saved = [None, 0.0]  # what running.json last said (without its time), and when it was written
 RUNNING_REWRITE_S = 3600
+# A Claude Code session id: the only thing a resume types into a shell besides "claude --resume", so nothing else passes.
+SESSION_ID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+
+def resumable(a):
+    return bool(SESSION_ID_RE.fullmatch(str(a.get("sid") or "")))
 
 
 def is_client(rec):
@@ -6375,7 +6381,10 @@ def ask_view(ask):
     lines = [f"- {a.get('name') or folder_name(a['cwd'])} in {tilde_path(a['cwd'])} (session {a['sid']})" for a in ask["agents"]]
     return (f"This machine restarted, and {len(ask['agents'])} agent{'s' if len(ask['agents']) != 1 else ''} were running before it did. "
             "Resume them? Each starts again with claude --resume <its session id>, through your own claude command, "
-            "in its herdr terminal when there is one, else a new terminal.\n" + "\n".join(lines))
+            "in its herdr terminal when there is one, else a new terminal.\n" + "\n".join(lines)
+            + ("\nNot resumed, because the saved session id isn't a valid one:\n" + "\n".join(
+                f"- {a.get('name') or folder_name(a.get('cwd') or '')} in {tilde_path(a.get('cwd') or '')}" for a in ask.get("skipped") or [])
+               if ask.get("skipped") else ""))
 
 
 def ask_after_reboot(saved, now=None):
@@ -6388,7 +6397,10 @@ def ask_after_reboot(saved, now=None):
             resume_ask.clear()
             resume_ask.update(old)
             return
-        agents_then = reboot.to_ask(saved, BOOT[0], now)
+        listed = reboot.to_ask(saved, BOOT[0], now)
+        agents_then, skipped = [a for a in listed if resumable(a)], [a for a in listed if not resumable(a)]
+        for a in skipped:
+            log("reboot", "not asking about", a.get("name") or "an agent", "in", a.get("cwd"), ": its saved session id isn't a valid one")
         if not agents_then or not config.get("resume_after_reboot", True):
             if agents_then:
                 log("reboot", len(agents_then), "agents were running before it; not asking (resume_after_reboot is off)")
@@ -6397,7 +6409,8 @@ def ask_after_reboot(saved, now=None):
         n = int(m.group(1)) + 1 if m else 1
         resume_ask.clear()
         resume_ask.update({"id": f"b{n}", "created": now, "updated": now, "status": "pending", "note": "",
-                           "agents": [{k: a.get(k, "") for k in ("agent", "sid", "name", "cwd", "terminal", "space")} for a in agents_then]})
+                           "agents": [{k: a.get(k, "") for k in ("agent", "sid", "name", "cwd", "terminal", "space")} for a in agents_then],
+                           "skipped": [{k: str(a.get(k) or "")[:300] for k in ("name", "cwd")} for a in skipped]})
     log("reboot", "asking whether to resume", len(resume_ask["agents"]), "agents:", ", ".join(a["name"] or a["sid"] for a in resume_ask["agents"]))
     threading.Thread(target=post_resume_ask, daemon=True).start()
 
@@ -6473,7 +6486,7 @@ def resume_in_terminal(a):
 
 def resume_one(a):
     """Bring one agent back: in its own herdr terminal if that's waiting, else a new one (herdr, tmux, Terminal)."""
-    if not re.fullmatch(r"[A-Za-z0-9-]{8,64}", a.get("sid") or "") or not os.path.isdir(a.get("cwd") or ""):
+    if not resumable(a) or not os.path.isdir(a.get("cwd") or ""):
         return "", "its session id or folder isn't usable"
     how, why = resume_in_terminal(a)
     if how:
