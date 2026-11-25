@@ -39,6 +39,7 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) first: layout, tests, rules for changes.
 - `daemon.log`: one line per event (spawns, messages, issues). `grep` it by message id (`m123`), spawn id (`s93`), agent id or name.
 - `agents.json`, `config.json`, `tasks.json`, `schedules.json`, `spawns.json`, `rules.json`: state files, written atomically through `write_json` (with `.bak` and `.corrupt` copies). Don't hand-edit them while the daemon runs; it will overwrite you.
 - `issues.jsonl`: the Feedback queue (`report_issue`). An issue is closed by appending a line with its id and `"status": "done"` plus a note.
+- `running.json`: the agents running now and the pending question after a reboot (rewritten when it changes, and hourly).
 - `messages.jsonl` (+ `.1` rotation), `terminations.jsonl`, `backups/` (what Install herdr mods replaced).
 - Several agents can share one folder: never look an agent up by folder alone.
 

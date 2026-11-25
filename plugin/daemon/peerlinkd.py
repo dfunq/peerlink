@@ -48,7 +48,7 @@ if os.name == "nt":
 
     subprocess.Popen.__init__ = _no_window_init
 
-VERSION = "0.9.107"
+VERSION = "0.9.108"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -62,11 +62,12 @@ from cronlib import cron_next, parse_cron  # noqa: E402,F401
 from webui import UI_HTML  # noqa: E402
 import herdr_sync  # noqa: E402
 import herdr_mod  # noqa: E402
+import reboot  # noqa: E402
 
 # A fingerprint of the daemon's code: this file and the modules beside it together.
 _h = hashlib.sha256()
 CODE_FILES = ("peerlinkd.py", "chatlink.py", "discordlink.py", "telegramlink.py", "slacklink.py", "teamslink.py", "agentslink.py",
-              "cronlib.py", "webui.py", "herdr_sync.py", "herdr_mod.py")
+              "cronlib.py", "webui.py", "herdr_sync.py", "herdr_mod.py", "reboot.py")
 for _name in CODE_FILES:
     with open(os.path.join(_here, _name), "rb") as _f:
         _h.update(_f.read())
@@ -84,6 +85,7 @@ AGENTS_PATH = os.path.join(HOME, "agents.json")
 SPAWNS_PATH = os.path.join(HOME, "spawns.json")
 SCHEDULES_PATH = os.path.join(HOME, "schedules.json")
 TERMINATIONS_PATH = os.path.join(HOME, "terminations.jsonl")
+RUNNING_PATH = os.path.join(HOME, "running.json")  # the agents running now, and the question after a reboot
 DISCORD_PATH = os.path.join(HOME, "discord.json")  # the bot token and the channel mapping, 0600
 # Reports an agent wrote while the daemon was down; the daemon files them when it starts.
 PENDING_ISSUES_DIR = os.path.join(HOME, "issues-pending")
@@ -213,6 +215,8 @@ DEFAULT_CONFIG = {
     "herdr_join_never": "",  # spaces a tab you open in herdr never joins on its own, comma separated (a space others nest in never does either); agents can add to it, only the web UI removes
     "rules_lead": "",  # the one agent, by name, that may add, change and remove any standing rule, each change on your Yes in its own terminal; set only from the web UI
     "herdr_mods_source": "",  # a folder (a clone of your private mods repo) that Install herdr mods copies from; set only from the web UI
+    "start_at_login": False,  # the daemon starts when you log in (a LaunchAgent, or a Run value on Windows); set only from the web UI
+    "resume_after_reboot": True,  # after a reboot, ask you whether to resume the agents that were running; set only from the web UI
     "use_herdr": True,  # start agents in herdr's terminals when herdr (hc) is installed; off, or without herdr, tmux or Terminal as before  # hours no worker is started, like "22-8"; empty is off; set only from the web UI
     "task_nudge_h": 24,  # an open task with no update for this many hours is raised with its owner, then with whoever asked; 0 is off
     "ask_defaults": True,  # a question to you may name a default the agent goes with when you haven't answered in time
@@ -667,7 +671,8 @@ CONFIG_MIN_1 = {"poll_interval_ms", "peer_ttl_s", "max_hops", "rate_limit_per_mi
 
 
 # What no agent changes for itself: who starts agents without asking, and how many workers run when.
-BROWSER_ONLY_SETTINGS = ("auto_approve_all", "auto_approve_folders", "max_live_spawns", "night_guard", "herdr_mods_source", "rules_lead")
+BROWSER_ONLY_SETTINGS = ("auto_approve_all", "auto_approve_folders", "max_live_spawns", "night_guard", "herdr_mods_source", "rules_lead",
+                         "start_at_login", "resume_after_reboot")
 
 
 def config_value(name, value):
@@ -3310,6 +3315,8 @@ def on_press(press):
         return on_spawn_press(press, decide_schedule, schedules)
     if press["custom_id"].startswith("pu:"):
         return on_spawn_press(press, decide_rule, rules)
+    if press["custom_id"].startswith("pb:"):
+        return on_spawn_press(press, decide_resume, {resume_ask["id"]: resume_ask} if resume_ask else {})
     if press["custom_id"].startswith("pa:"):
         return on_clear_all_press(press)
     if press["custom_id"].startswith("pd:"):
@@ -3479,6 +3486,10 @@ def inbox_items():
                  "title": f"Standing rule for {'every space' if r['space'] == '*' else r['space']}",
                  "text": f"{r['text']}\n\nApproving it: every agent in {'every space' if r['space'] == '*' else r['space'] + ' and the spaces inside it'} gets it in its instructions, and keeps it after a context clear."}
                 for r in rules.values() if r["status"] == "pending"]
+        if resume_ask.get("status") == "pending":
+            n = len(resume_ask["agents"])
+            out.append({"kind": "approval", "id": resume_ask["id"], "who": "peerlink", "since": resume_ask["created"],
+                        "title": f"Resume {n} agent{'s' if n != 1 else ''} after the restart", "text": ask_view(resume_ask)})
     order = {"approval": 0, "task": 1, "question": 2, "feedback": 3}
     return sorted(out, key=lambda x: (order[x["kind"]], x["since"]))
 
@@ -3499,7 +3510,8 @@ def inbox_act(body, discord_from=None):
     if kind == "approval":
         if action not in ("approve", "deny"):
             return 400, {"error": "a request to start an agent is approved or denied"}
-        decide = decide_schedule if iid in schedules else decide_rule if iid in rules else decide_spawn
+        decide = (decide_schedule if iid in schedules else decide_rule if iid in rules
+                  else decide_resume if iid and iid == resume_ask.get("id") else decide_spawn)
         return decide(iid, action == "approve", chatlink.name(discord_from["channel_id"]) if discord_from else "the web UI")
     if kind == "feedback":
         if action not in ("accepted", "dismissed"):
@@ -5624,7 +5636,10 @@ def launch_opts(sp):
 
 
 def launch_args(sp):
-    """The flags a spawn asked for, after any of your own alias's: Claude Code takes the last one given."""
+    """The flags a spawn asked for, after any of your own alias's: Claude Code takes the last one given. An agent
+    resumed after a reboot gets --resume and its session id, nothing else: it starts as your own claude would."""
+    if sp.get("resume"):
+        return ["--resume", sp["resume"]]
     return [a for k in ("model", "effort") if sp.get(k) for a in (f"--{k}", sp[k])]
 
 
@@ -6259,6 +6274,11 @@ def launch_hc(hc, claude, sp):
 def launch(sp):
     """Start Claude Code in the folder: (how, "") when it started, ("", why not) when it didn't. In a herdr terminal
     when hc is installed, else tmux, else (on a Mac) a Terminal window."""
+    sink = os.environ.get("PEERLINK_TEST_LAUNCH") if SCRATCH_HOME else None
+    if sink:  # a test's daemon: what would start is a line in a file the test reads
+        with open(sink, "a") as f:
+            f.write(json.dumps({"dir": sp["dir"], "args": launch_args(sp)}) + "\n")
+        return "in the test's launch file", ""
     claude = find_claude()
     if not claude:
         return "", "Claude Code (claude) isn't on this machine's PATH"
@@ -6296,6 +6316,217 @@ def launch(sp):
     except (OSError, subprocess.SubprocessError) as err:
         return "", f"could not start it: {err}"
     return "", "starting an agent needs tmux on this machine"
+
+
+# -- After a reboot ----------------------------------------------------------------------------------------------
+# A reboot ends every agent, and nothing starts them again. The daemon keeps the list of agents running now in
+# running.json; when it starts after a reboot, it asks you once (Inbox and Discord) whether to resume them, and does
+# so only on your yes. No answer within a day is a no. An agent you ended (Terminate, /exit) isn't on the list.
+BOOT = [0.0]          # when this machine started, read once
+left_sessions = {}    # session id -> its last record, for a session that ended without saying it was on purpose
+resume_ask = {}       # the question after a reboot, while there is one: {"id", "created", "status", "agents", ...}
+running_saved = [None, 0.0]  # what running.json last said (without its time), and when it was written
+RUNNING_REWRITE_S = 3600
+
+
+def is_client(rec):
+    """An MCP client outside Claude Code (peerlink_mcp.py): nothing to resume."""
+    return str(rec.get("plugin") or "").startswith("peerlink-mcp")
+
+
+def running_view(rec):
+    """A session as the running list keeps it. Called with the lock held."""
+    return {"id": rec["id"], "agent": rec.get("agent", ""), "name": display_name(rec), "cwd": rec.get("cwd", ""),
+            "terminal": rec.get("terminal", ""), "space": space_of(rec)[0], "last_seen": rec.get("last_seen", 0),
+            "plugin": rec.get("plugin", ""), "terminate": rec.get("terminate")}
+
+
+def session_left(sid, reason):
+    """A session said it ended. Kept on the running list a little longer unless it ended on purpose (/exit, /logout):
+    a shutdown ends agents a moment before the daemon. Called with the lock held."""
+    rec = sessions.get(sid)
+    if rec and str(reason or "") not in reboot.ON_PURPOSE:
+        left_sessions[sid] = {**running_view(rec), "left": time.time()}
+    else:
+        left_sessions.pop(sid, None)
+
+
+def save_running(now=None):
+    """Write the running list when it changes (and hourly, so its time says it's current)."""
+    now = now or time.time()
+    with lock:
+        for sid in [s for s, r in left_sessions.items() if now - r["left"] >= reboot.GRACE_S]:
+            left_sessions.pop(sid)
+        views = {s: running_view(r) for s, r in sessions.items()}
+        listed = reboot.running(views, left_sessions, now, is_client)
+        data = {"boot": BOOT[0], "agents": [{k: v for k, v in a.items() if k != "seen"} for a in listed],
+                "ask": json.loads(json.dumps(resume_ask)) if resume_ask else None}
+    if data == running_saved[0] and now - running_saved[1] < RUNNING_REWRITE_S:
+        return
+    try:
+        write_json(RUNNING_PATH, {**data, "ts": now}, indent=1, backup=False)
+        running_saved[0], running_saved[1] = data, now
+    except OSError as err:
+        log("could not save the running list:", err)
+
+
+def ask_view(ask):
+    """The question's text: each agent's name, folder and session id."""
+    lines = [f"- {a.get('name') or folder_name(a['cwd'])} in {tilde_path(a['cwd'])} (session {a['sid']})" for a in ask["agents"]]
+    return (f"This machine restarted, and {len(ask['agents'])} agent{'s' if len(ask['agents']) != 1 else ''} were running before it did. "
+            "Resume them? Each starts again with claude --resume <its session id>, through your own claude command, "
+            "in its herdr terminal when there is one, else a new terminal.\n" + "\n".join(lines))
+
+
+def ask_after_reboot(saved, now=None):
+    """On the daemon's start: when the machine has rebooted since the running list was written, ask you whether to
+    resume its agents. A question still pending from before carries on."""
+    now = now or time.time()
+    old = (saved or {}).get("ask") if isinstance(saved, dict) else None
+    with lock:
+        if isinstance(old, dict) and old.get("status") == "pending" and now - float(old.get("created") or 0) < SPAWN_TTL_S:
+            resume_ask.clear()
+            resume_ask.update(old)
+            return
+        agents_then = reboot.to_ask(saved, BOOT[0], now)
+        if not agents_then or not config.get("resume_after_reboot", True):
+            if agents_then:
+                log("reboot", len(agents_then), "agents were running before it; not asking (resume_after_reboot is off)")
+            return
+        n = int(str((old or {}).get("id") or "b0")[1:] or 0) + 1 if isinstance(old, dict) else 1
+        resume_ask.clear()
+        resume_ask.update({"id": f"b{n}", "created": now, "updated": now, "status": "pending", "note": "",
+                           "agents": [{k: a.get(k, "") for k in ("agent", "sid", "name", "cwd", "terminal", "space")} for a in agents_then]})
+    log("reboot", "asking whether to resume", len(resume_ask["agents"]), "agents:", ", ".join(a["name"] or a["sid"] for a in resume_ask["agents"]))
+    threading.Thread(target=post_resume_ask, daemon=True).start()
+
+
+def post_resume_ask(wait_s=90):
+    """Post the question on Discord (or the chat you use), once the bot is connected: in a channel of the first
+    agent's folder, else your first channel. Without one, it waits in the Inbox."""
+    with lock:
+        ask = dict(resume_ask)
+    if not ask or ask.get("status") != "pending" or ask.get("discord_out"):
+        return
+    chans = []
+    for a in ask["agents"]:
+        chans = [r for r in routes_for(a["cwd"], a.get("name") or "") if r["channel_id"] != "dm"]
+        if chans:
+            break
+    chans = chans or [r for r in discord.get("routes", []) if not external(r["channel_id"])]
+    if not chans:
+        return
+    channel = chans[0]["channel_id"]
+    for _ in range(wait_s):
+        if chat_ready(channel):
+            break
+        time.sleep(1)
+    else:
+        log("reboot", "the chat isn't connected: the question waits in the Inbox")
+        return
+    try:
+        sent = chat_post(channel, "🔁 **" + ask_view(ask).replace("\n", "**\n", 1), None, choices(["Resume all", "Don't resume"], f"pb:{ask['id']}"))
+        with lock:
+            if resume_ask.get("id") == ask["id"]:
+                resume_ask["discord_out"] = {"channel_id": channel, "message_id": sent}
+    except ChatError as err:
+        log("discord", "resume post failed:", err)
+
+
+def decide_resume(bid, approve, via):
+    """Your answer to the question after a reboot: only the web UI (your browser) and your own presses call this."""
+    with lock:
+        if resume_ask.get("id") != bid:
+            return 404, {"error": f"no question {bid}"}
+        if resume_ask["status"] != "pending":
+            return 409, {"error": f"{bid} is already {resume_ask['status']}"}
+        resume_ask["status"], resume_ask["updated"], resume_ask["via"] = ("approved" if approve else "denied"), time.time(), via
+        ask = json.loads(json.dumps(resume_ask))
+    save_running()
+    close_buttons(ask)
+    log("reboot", bid, ask["status"], "via", via)
+    if approve:
+        threading.Thread(target=resume_all, args=(ask,), daemon=True).start()
+    return 200, {"ask": ask}
+
+
+def resume_in_terminal(a):
+    """Type claude --resume <id> into the agent's own herdr terminal, when herdr brought it back after the reboot as a
+    shell in the agent's folder with nothing running in it: (how, "") or ("", why not)."""
+    addr = herdr_sync.hc_address(a.get("terminal") or "")
+    hc = find_hc() if config.get("use_herdr", True) else ""
+    if not addr or not hc:
+        return "", "no herdr terminal"
+    info = hc_terminal(addr)
+    fg = int((info.get("foreground") or {}).get("pid") or 0)
+    owner = (info.get("labels") or {}).get("peerlink.agent") or ""
+    if info.get("state") != "live" or os.path.normcase(info.get("cwd") or "") != os.path.normcase(a["cwd"]) \
+            or (fg and fg != int(info.get("pid") or 0)) or (owner and a.get("agent") and owner != a["agent"]):
+        return "", "its herdr terminal isn't a free shell of its own in its folder"
+    env = {k: v for k, v in os.environ.items() if k not in ("HC_TERMINAL_ID", "HC_SCOPE")}
+    r = subprocess.run([hc, "send", addr, f"claude --resume {a['sid']}"], timeout=20, capture_output=True, text=True, env=env)
+    if r.returncode != 0:
+        return "", (r.stderr or r.stdout).strip()[:300] or f"hc exited with {r.returncode}"
+    return f"in its herdr terminal {addr}", ""
+
+
+def resume_one(a):
+    """Bring one agent back: in its own herdr terminal if that's waiting, else a new one (herdr, tmux, Terminal)."""
+    if not re.fullmatch(r"[A-Za-z0-9-]{8,64}", a.get("sid") or "") or not os.path.isdir(a.get("cwd") or ""):
+        return "", "its session id or folder isn't usable"
+    how, why = resume_in_terminal(a)
+    if how:
+        return how, ""
+    sp = {"id": "resume-" + a["sid"][:8], "dir": a["cwd"], "name": a.get("name") or "", "space": a.get("space") or "",
+          "requester": {"name": "peerlink", "cwd": a["cwd"]}, "resume": a["sid"]}
+    return launch(sp)
+
+
+def resume_all(ask, gap_s=2):
+    done, failed = [], []
+    for a in ask["agents"]:
+        try:
+            how, err = resume_one(a)
+        except (OSError, subprocess.SubprocessError) as e:
+            how, err = "", str(e)
+        name = a.get("name") or a["sid"]
+        (failed if err else done).append(f"{name}: {err}" if err else name)
+        log("reboot", "resume", name, a["sid"], how or f"failed: {err}")
+        time.sleep(gap_s)
+    with lock:
+        if resume_ask.get("id") == ask["id"]:
+            resume_ask["note"] = f"resumed {len(done)}" + (f"; failed {len(failed)}: " + "; ".join(failed) if failed else "")
+    save_running()
+    out = (ask.get("discord_out") or {}).get("channel_id")
+    if out and chat_ready(out):
+        try:
+            chat_post(out, f"Resumed {len(done)} of {len(ask['agents'])} agents." + (" Didn't start: " + "; ".join(failed) if failed else ""), None)
+        except ChatError as err:
+            log("discord", "resume result post failed:", err)
+
+
+def expire_resume_ask(now):
+    """No answer within a day is a no. Called with the lock held; True when it expired."""
+    if resume_ask.get("status") == "pending" and now - float(resume_ask.get("created") or 0) > SPAWN_TTL_S:
+        resume_ask["status"], resume_ask["updated"] = "expired", now
+        log("reboot", resume_ask["id"], "expired: nobody answered within a day, so no agent was resumed")
+        return True
+    return False
+
+
+def sync_autostart():
+    """Make the start-at-login entry match the setting: there (pointing at this daemon) when on, gone when off.
+    '' when it does, else why not."""
+    if SCRATCH_HOME and not os.environ.get("PEERLINK_TEST_AUTOSTART_HOME"):
+        return ""  # a scratch or test daemon never touches your login items
+    home = os.environ.get("PEERLINK_TEST_AUTOSTART_HOME") or None
+    if config.get("start_at_login"):
+        why = reboot.autostart_install(reboot.start_command(best_python(), os.path.abspath(__file__)), home)
+    else:
+        why = reboot.autostart_remove(home)
+    if why:
+        log("start at login:", why)
+    return why
 
 
 def start_spawn(sp, via):
@@ -7251,6 +7482,7 @@ def reap():
     with lock:
         for sid in [s for s, r in sessions.items() if now - r["last_seen"] > config["peer_ttl_s"] * 10]:
             session_gone(sid)
+        expire_resume_ask(now)
         for sp in [x for x in spawns.values() if x["status"] == "pending"]:
             if now - sp["created"] > SPAWN_TTL_S:
                 sp["status"], sp["updated"] = "expired", now
@@ -7297,6 +7529,7 @@ def reap():
         start_for_schedule(c)
     if queued:
         start_queued()
+    save_running(now)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -7760,7 +7993,8 @@ class Handler(BaseHTTPRequestHandler):
                     config.update({k: v for k, (v, _) in checked.items()})
                     save_config()
                 forget_spaces()
-                return self.reply(200, config)
+                why = sync_autostart() if "start_at_login" in checked else ""
+                return self.reply(200, {**config, **({"start_at_login_error": why} if why else {})})
 
         if rest == ["peers"] and method == "GET":
             peers = local_peers()
@@ -7890,6 +8124,7 @@ class Handler(BaseHTTPRequestHandler):
                 if previous and previous["ts"] < time.time() - DIR_MEMORY_S:
                     previous = None
             log("agent", sid, rec.get("name"))
+            save_running()
             return self.reply(200, {"id": sid, "name": display_name(rec), "config": client_config(sid), "previous": previous})
 
         if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "heartbeat" and method == "POST":
@@ -7990,7 +8225,9 @@ class Handler(BaseHTTPRequestHandler):
 
         if len(rest) == 2 and rest[0] == "sessions" and method == "DELETE":
             with lock:
+                session_left(rest[1], (q.get("reason") or [""])[0])
                 session_gone(rest[1])
+            save_running()
             return self.reply(200, {"ok": True})
 
         if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "role" and method == "POST":
@@ -8385,6 +8622,9 @@ def serve():
     file_pending_issues()
     load_discord()
     seed_never_delegate()
+    # The agents running when this machine last went down: after a reboot, you're asked whether to resume them.
+    BOOT[0] = reboot.boot_time()
+    ask_after_reboot(read_json(RUNNING_PATH, None))
     threading.Thread(target=reaction_worker, name="discord-reactions", daemon=True).start()
     clean_stale_reactions()
     # The port first: a daemon that loses it to another (an older one an agent started mid-upgrade) must touch
@@ -8407,6 +8647,8 @@ def serve():
     with open(PID_PATH, "w") as f:
         f.write(str(os.getpid()))
     signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=server.shutdown).start())
+    save_running()
+    threading.Thread(target=sync_autostart, daemon=True).start()
     threading.Thread(target=reaper, daemon=True).start()
     threading.Thread(target=herdr_syncer, name="herdr-sync", daemon=True).start()
     named = publish_name()

@@ -6,7 +6,7 @@ const REPLY_HINT = '(Reply with send_message, reply_to the id, only if a reply i
 
 const DAEMON = 'http://127.0.0.1:7899'
 // The daemon this plugin ships; an older one running is replaced.
-const DAEMON_VERSION = '0.9.107'
+const DAEMON_VERSION = '0.9.108'
 // Recent work in this folder (Claude Code's own titles, commits) counts this far back.
 const HISTORY_DAYS = 14
 
@@ -1924,7 +1924,9 @@ export const register: Register = (on, options) => {
     cancelPoll?.()
     if (sessionId) {
       try {
-        await call($, 'DELETE', `/api/sessions/${sessionId}`)
+        // Why it ended: only /exit and /logout are on purpose. Any other end (a signal, a shutdown) keeps the agent
+        // on the list the daemon asks about after a reboot.
+        await call($, 'DELETE', `/api/sessions/${sessionId}?reason=${encodeURIComponent(String(e.reason ?? ''))}`)
       } catch {}
     }
     return next(e)
