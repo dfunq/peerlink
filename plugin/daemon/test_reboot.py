@@ -159,7 +159,7 @@ class AfterARestart(unittest.TestCase):
         q = self.question(rig)
         self.assertIsNotNone(q, "no question after the reboot")
         for name in ("web", "api", "shut"):
-            self.assertIn(f"{name} in {team[name].cwd} (session {team[name].sid})", q["text"])
+            self.assertIn(f"{name} in {d.tilde_path(team[name].cwd)} (session {team[name].sid})", q["text"])
         self.assertNotIn(team["done"].sid, q["text"])
         self.assertEqual(self.launched(), [], "nothing starts before you answer")
         rig.user("POST", "/api/inbox", {"kind": "approval", "id": q["id"], "action": "approve"})
