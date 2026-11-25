@@ -34,8 +34,41 @@ class Patch(unittest.TestCase):
         self.assertIn(".pl(15)", out)  # a sub-agent's line drops from the lead's icon
         self.assertIn("when(j > 0, el => el.ml(7))", out)  # and a deeper one's from the icon above it  # a nested row goes by its agent's name  # a loop in the tree can't recurse forever
         self.assertIn('readTextFile("/x/tree.json")', out)
+        # A right-click on a lead's row (wide or narrow) or a sub-agent's opens its menu; the menu popup skips the list.
+        self.assertEqual(out.count('.on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); peerlinkAgentMenuOpen('), 3)
+        self.assertIn("if (props()?.sortMenu || props()?.agentMenu) return;", out)
+        self.assertIn("if (props()?.agentMenu) return peerlinkAgentMenu(t, props());", out)
         self.assertEqual(hm.point_layout('{"mod": "agents"}', "peerlink-agents", "agents"), '{"mod": "peerlink-agents"}')
         self.assertEqual(hm.point_layout('{"mod": "agents"}', "peerlink-spaces", "spaces"), '{"mod": "agents"}')
+
+    @unittest.skipUnless(shutil.which("node"), "node isn't installed")
+    def test_an_agents_menu_goes_to_it_or_ends_its_terminal(self):
+        # The menu's two items, clicked, with herdr's calls recorded: Go focuses a pane (or peeks a sub-agent that has
+        # none), Close kills the terminal, and each closes the popup first.
+        stub = r'''
+const calls = [];
+const run = (c, a) => calls.push([c, a]);
+const closeOverlay = (o) => calls.push(["close", o]);
+const openOverlay = (o) => calls.push(["open", o.mod, o.props]);
+const el = () => new Proxy({}, { get: (_, k) => k === "on_click" ? (f) => { clicks.push(f); return el(); } : () => el() });
+let clicks = [];
+const h_flex = el, v_flex = el, div = el, svg = el;
+'''
+        script = stub + hm.AGENTS_JS.replace("readTextFile(PEERLINK_TREE)", "(async()=>null)()") + r'''
+for (const pane of ["p1", null]) {
+  clicks = [];
+  peerlinkAgentMenu({}, { overlay: "o1", agentMenu: { addr: "t4", pane, name: "web" } });
+  clicks.forEach((f) => f());
+}
+peerlinkAgentMenuOpen("t4", null, "");
+console.log(JSON.stringify(calls));
+'''
+        r = subprocess.run(["node", "-e", script], capture_output=True, text=True, encoding="utf-8", timeout=20)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), [
+            ["close", "o1"], ["pane.focus", {"terminal": "t4"}], ["close", "o1"], ["terminal.kill", {"terminal": "t4"}],
+            ["close", "o1"], ["terminal.peek", {"terminal": "t4"}], ["close", "o1"], ["terminal.kill", {"terminal": "t4"}],
+            ["open", "peerlink-agents", {"agentMenu": {"addr": "t4", "pane": None, "name": "t4"}}]])
 
     @unittest.skipUnless(shutil.which("node"), "node isn't installed")
     def test_peerlinks_parent_wins_else_hcs(self):
