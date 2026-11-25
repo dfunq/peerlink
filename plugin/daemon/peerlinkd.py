@@ -4812,6 +4812,28 @@ def hold_for_inbox(sid, wait, track):
             held_beats.pop(sid, None)
 
 
+def gave_up(sid, spent):
+    """Tell each live sender whose message was dropped unacked that it may not have arrived, so it can send it again
+    or ask another way. Notices from peerlink itself and chat messages are left alone. Called with the lock held."""
+    to = sessions.get(sid) or {}
+    for m in spent:
+        sender = sessions.get(m.get("from"))
+        if not sender or not is_live(sender) or sender.get("id") == sid:
+            continue
+        task_message(None, sender.get("cwd", ""),
+                     f"Your message {m['id']} to {display_name(to) if to else 'an agent'} was never confirmed as read after "
+                     f"{REDELIVER_TRIES} tries, so peerlink stopped handing it out. It may not have arrived: if it still "
+                     f"matters, send it again or check with them.", prefer=sender)
+
+
+def prune_redelivered():
+    """Forget the redelivery count of messages no session holds or waits for any more (expired, dropped with their
+    session). Called with the lock held."""
+    held = {mid for mine in handed.values() for mid in mine} | {m["id"] for box in inboxes.values() for m in box}
+    for mid in [mid for mid in redelivered if mid not in held]:
+        redelivered.pop(mid)
+
+
 def take_inbox(sid, track=False):
     """New messages for this agent, marked delivered. With track (a plugin that acks), each is handed again every
     REDELIVER_S until the plugin acks it, for up to a day."""
@@ -4834,6 +4856,7 @@ def take_inbox(sid, track=False):
                 redelivered.pop(m["id"], None)
             if spent:
                 log("gave up redelivering", ", ".join(m["id"] for m in spent), "->", sid[:8], f"(never acked in {REDELIVER_TRIES} tries)")
+                gave_up(sid, spent)
             again = [m for m in again if m not in spent]
             for m in again:
                 redelivered[m["id"]] = redelivered.get(m["id"], 0) + 1
@@ -7499,6 +7522,7 @@ def tidy():
                 agent_of.pop(sid)
         save_agents()
     with lock:
+        prune_redelivered()
         dropped = {}
         for name, items, live, save in (("tasks", tasks, TASK_OPEN, save_tasks), ("spawns", spawns, ("pending",), save_spawns),
                                         ("schedules", schedules, ("active", "pending"), save_schedules)):

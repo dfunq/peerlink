@@ -287,6 +287,26 @@ class RecordsTest(unittest.TestCase):
         self.assertEqual(peerlinkd.take_inbox("s-core", track=True), [])  # it gave up
         self.assertNotIn(mid, peerlinkd.handed["s-core"])
         self.assertNotIn(mid, peerlinkd.redelivered)
+        told = self.inbox("lead")
+        self.assertEqual(len(told), 1)
+        self.assertIn(f"Your message {mid} to core was never confirmed", told[0])
+
+    def test_a_redelivery_count_is_forgotten_once_no_one_holds_the_message(self):
+        mid = self.send("lead", to="core", text="FYI: staging is back.")["id"]
+        peerlinkd.take_inbox("s-core", track=True)
+        self.addCleanup(lambda: (peerlinkd.handed.pop("s-core", None), peerlinkd.inboxes.pop("s-core", None)))
+        peerlinkd.redelivered.update({mid: 2, "m-gone": 4})
+        with peerlinkd.lock:
+            peerlinkd.prune_redelivered()
+        self.assertEqual(peerlinkd.redelivered, {mid: 2})  # still handed out: kept
+        peerlinkd.inboxes["s-core"] = [peerlinkd.handed.pop("s-core")[mid][0]]  # its session ended: back in the queue
+        with peerlinkd.lock:
+            peerlinkd.prune_redelivered()
+        self.assertEqual(peerlinkd.redelivered, {mid: 2})  # waiting for the next agent there: kept
+        peerlinkd.inboxes.pop("s-core")
+        with peerlinkd.lock:
+            peerlinkd.prune_redelivered()
+        self.assertEqual(peerlinkd.redelivered, {})
 
     def test_an_ack_starts_the_wait_over(self):
         mid = self.send("lead", to="core", text="Ship it?", expects_reply=True)["id"]
