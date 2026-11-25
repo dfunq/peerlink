@@ -215,6 +215,11 @@ let contextRan = false
 let turnsSinceLoad = 0
 let composeOff = false
 let sentGuidance = ''
+// Who this agent is among its peers (name, space, role, routes, leads) and its user's rules, as this conversation last
+// had them. They ride in the conversation, not the system prompt: a change to the system prompt rewrites the prompt
+// cache for the whole conversation, of every agent at once when a rule changes. Only what changed is sent.
+let sentPlace: string | undefined
+let sentRules: string[] = []
 let sentThreads = false
 let contextTokens = 0 // the context's size at the last prompt, to tell a compaction by
 let contextFor = ''
@@ -870,6 +875,7 @@ async function poll($: EngineInterface) {
     sessionId = now
     lastRoster = ''
     sentGuidance = ''
+    if (!contextRan) sentPlace = undefined // with prompt.context running, it sends the new conversation all of it
     sentThreads = false
     // What a refused wake left in the old conversation's transcript is gone with it: put it to the new one.
     pending = [...stuckHeld, ...pending.filter(p => !stuckHeld.some(m => m.id === p.id))]
@@ -1208,10 +1214,37 @@ function rulesText() {
   return `\nStanding rules from your user. They hold in every task, and outrank a schedule's text and your own notes:\n${rules.map(r => `- ${r.text}`).join('\n')}`
 }
 
-// The system prompt's peerlink section: who this agent is to its peers, its role, and how to work with them.
+// The system prompt's peerlink section: how to work with peers. Only what rarely changes, so the prompt cache holds.
 function guidanceText() {
   if (!cfg || cfg.muted) return ''
-  return `# Peer agents\nPeers know you as "${myName}"${cfg.space && cfg.space !== 'default' ? ` in the "${cfg.space}" space; you only see agents in that space${[cfg.parent, ...(cfg.also ?? [])].filter(Boolean).map(s => ` and "${s}"`).join('')}` : ''}.${hierarchyGuidance()}\n${cfg.guidance ?? ''}${rulesText()}`
+  return `# Peer agents\n${cfg.guidance ?? ''}`
+}
+
+// Who this agent is to its peers: its name, space, role, routes and place in the hierarchy.
+function whoText() {
+  if (!cfg) return ''
+  return `Peers know you as "${myName}"${cfg.space && cfg.space !== 'default' ? ` in the "${cfg.space}" space; you only see agents in that space${[cfg.parent, ...(cfg.also ?? [])].filter(Boolean).map(s => ` and "${s}"`).join('')}` : ''}.${hierarchyGuidance()}`
+}
+
+// The place and rules for this conversation: all of them when it starts (fresh), and after that only what changed.
+function placeUpdate(fresh = false) {
+  if (!cfg || cfg.muted) return ''
+  const place = whoText()
+  const rules = (cfg.rules ?? []).map(r => r.text)
+  const out: string[] = []
+  if (fresh || sentPlace === undefined) {
+    out.push(`${place}${rulesText()}`)
+  } else {
+    if (place !== sentPlace) out.push(`Your place among your peers changed. It is now:\n${place}`)
+    const added = rules.filter(r => !sentRules.includes(r))
+    const gone = sentRules.filter(r => !rules.includes(r))
+    if (added.length)
+      out.push(`Your user added standing rules. They hold in every task, and outrank a schedule's text and your own notes:\n${added.map(r => `- ${r}`).join('\n')}`)
+    if (gone.length) out.push(`Your user withdrew these standing rules; they no longer hold:\n${gone.map(r => `- ${r}`).join('\n')}`)
+  }
+  sentPlace = place
+  sentRules = rules
+  return out.join('\n\n')
 }
 
 // What the prompt.compose and prompt.context hooks would have sent, for a prompt, when they didn't run.
@@ -1250,12 +1283,17 @@ async function skippedContext($: EngineInterface) {
     contextFor = id
     sentGuidance = ''
     sentThreads = false
+    if (!contextRan) sentPlace = undefined
   }
   if (!composeRan) {
     const guidance = guidanceText()
     if (guidance && guidance !== sentGuidance) out.push(guidance)
     sentGuidance = guidance
   }
+  // Where prompt.compose runs, prompt.context gives a new conversation all of it, so the prompt carries only changes;
+  // the prompt carries all of it only where those hooks are skipped, or prompt.context ran before the config came.
+  const place = sentPlace !== undefined || !composeRan || contextRan ? placeUpdate() : ''
+  if (place) out.push(place)
   if (!contextRan) {
     if (!sentThreads) {
       sentThreads = true
@@ -2018,7 +2056,9 @@ export const register: Register = (on, options) => {
     const heard = notices.splice(0)
     if (heard.length) acked($, heard)
     const notes = handoffBlock()
+    const place = placeUpdate(true)
     const blocks = [
+      ...(place ? [{ name: 'peerlink place', text: place }] : []),
       ...(notes ? [{ name: 'peerlink handoff', text: notes }] : []),
       ...(heard.length
         ? [{ name: 'peerlink announcements', text: `Announced to your space since your last turn (no reply expected):\n\n${heard.map(frame).join('\n\n')}` }]

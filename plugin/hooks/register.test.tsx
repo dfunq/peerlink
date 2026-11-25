@@ -166,6 +166,14 @@ function engine(on: any, { turns = 0, percent = 85, readme = '', claudeMd = '', 
   return { clock, calls, answer, writes, ids, pinned, git, where, woke, submits, limits, tools, ran, usage, proc, store, said }
 }
 
+
+// The system prompt's peerlink section and the place block the conversation starts with, as the model reads them.
+async function peerGuidance($: any, composed: any) {
+  const ctx: any = await $.prompt.context({ blocks: [] } as any)
+  const place = ctx.blocks.find((b: any) => b.name === 'peerlink place')?.text ?? ''
+  return `${composed.sections.find((s: any) => s.id === 'peerlink:guidance')?.text ?? ''}\n${place}`
+}
+
 test('the model is told about peers beside the prompt, again only when who is there changes', async ($, on) => {
   engine(on)
   const daemon = fakeDaemon(on)
@@ -754,9 +762,10 @@ test('an agent in a space is told so in its system prompt', async ($, on) => {
   engine(on)
   fakeDaemon(on, 1, null, [], { space: 'acme', space_source: 'file', space_from: '/Users/x/r/.peerlink', guidance: 'Be brief.' })
   on('prompt.compose', () => ({ sections: [] }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
   await $.session.start(START)
   const composed: any = await $.prompt.compose(COMPOSE)
-  const text = composed.sections.find((s: any) => s.id === 'peerlink:guidance').text
+  const text = (await peerGuidance($, composed))
   expect(text).toContain('Peers know you as "web" in the "acme" space')
 })
 
@@ -764,9 +773,10 @@ test('a lead is told it can link its agents with another space, and asks the oth
   engine(on)
   const daemon = fakeDaemon(on, 1, null, [], { space: 'acme', leads: 'set' })
   on('prompt.compose', () => ({ sections: [] }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
   await $.session.start(START)
   const composed: any = await $.prompt.compose(COMPOSE)
-  expect(composed.sections.find((s: any) => s.id === 'peerlink:guidance').text).toContain('select:mcp__peerlink__link')
+  expect((await peerGuidance($, composed))).toContain('select:mcp__peerlink__link')
   const asked = JSON.stringify(await $.tool.call({ tool: 'mcp__peerlink__link', mine: 'pg', theirs: 'pgs', why: 'share the SDK', task: 't3' } as any))
   expect(asked).toContain("Asked stripe, pgs's lead, to agree")
   expect(daemon.posted.find(p => p.path === '/api/sessions/me-session/link')!.body).toEqual({ mine: 'pg', theirs: 'pgs', why: 'share the SDK', task: 't3', remove: false })
@@ -779,9 +789,10 @@ test('a worker is told it was hired and how to finish, hires through request_spa
   engine(on)
   const daemon = fakeDaemon(on, 1, null, [], { space: 'acme', lead: 'acme', hired_by: 'acme' })
   on('prompt.compose', () => ({ sections: [] }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
   await $.session.start(START)
   const composed: any = await $.prompt.compose(COMPOSE)
-  const guidance = composed.sections.find((s: any) => s.id === 'peerlink:guidance').text
+  const guidance = (await peerGuidance($, composed))
   expect(guidance).toContain('acme hired you as a worker')
   expect(guidance).toContain('select:mcp__peerlink__retire')
   const queued = JSON.stringify(await $.tool.call({ tool: 'mcp__peerlink__request_spawn', dir: '/x/w', purpose: 'p', first_prompt: 'f', worker: true } as any))
@@ -797,19 +808,49 @@ test('the default space adds nothing to the system prompt', async ($, on) => {
   engine(on)
   fakeDaemon(on, 1, null, [], { space: 'default', space_source: 'default', space_from: '', guidance: 'Be brief.' })
   on('prompt.compose', () => ({ sections: [] }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
   await $.session.start(START)
   const composed: any = await $.prompt.compose(COMPOSE)
-  const text = composed.sections.find((s: any) => s.id === 'peerlink:guidance').text
-  expect(text).toBe('# Peer agents\nPeers know you as "web".\nBe brief.')
+  // The system prompt holds only what rarely changes; who the agent is comes with the conversation's first context.
+  expect(composed.sections.find((s: any) => s.id === 'peerlink:guidance').text).toBe('# Peer agents\nBe brief.')
+  const ctx: any = await $.prompt.context({ blocks: [] } as any)
+  expect(ctx.blocks.find((b: any) => b.name === 'peerlink place').text).toBe('Peers know you as "web".')
+})
+
+test('a rule added or withdrawn reaches a running conversation as a change, and the system prompt stays the same', async ($, on) => {
+  const { clock } = engine(on)
+  const conf: Record<string, unknown> = { space: 'acme', space_source: 'set', space_from: '', guidance: 'Be brief.', rules: [{ id: 'r1', text: 'Tests before merge.' }] }
+  fakeDaemon(on, 1, null, [], conf)
+  on('prompt.compose', () => ({ sections: [] }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  await $.session.start(START)
+  const before: any = await $.prompt.compose(COMPOSE)
+  const ctx: any = await $.prompt.context({ blocks: [] } as any)
+  expect(ctx.blocks.find((b: any) => b.name === 'peerlink place').text).toContain('- Tests before merge.')
+  const quiet: any = await $.prompt.submit({ text: 'go' })
+  expect((quiet.context ?? []).join('\n')).not.toContain('Tests before merge.')
+  Object.assign(conf, { rules: [{ id: 'r2', text: 'Dark mode screenshots.' }], role: 'Owns the docs.' })
+  await clock.advance(600000)
+  for (let i = 0; i < 5; i++) await settle()
+  const next: any = await $.prompt.submit({ text: 'again' })
+  const said = (next.context ?? []).join('\n')
+  expect(said).toContain('Your user added standing rules')
+  expect(said).toContain('- Dark mode screenshots.')
+  expect(said).toContain('Your user withdrew these standing rules; they no longer hold:\n- Tests before merge.')
+  expect(said).toContain('Your place among your peers changed. It is now:')
+  expect(said).toContain('Owns the docs.')
+  const after: any = await $.prompt.compose(COMPOSE)
+  expect(after.sections).toEqual(before.sections)
 })
 
 test('a lead is told to delegate down and report back up', async ($, on) => {
   engine(on)
   fakeDaemon(on, 1, null, [], { space: 'storefront', space_source: 'file', space_from: '/Users/x/r/web/.peerlink', parent: 'acme', guidance: 'Be brief.' })
   on('prompt.compose', () => ({ sections: [] }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
   await $.session.start(START)
   const composed: any = await $.prompt.compose(COMPOSE)
-  const text = composed.sections.find((s: any) => s.id === 'peerlink:guidance').text
+  const text = (await peerGuidance($, composed))
   expect(text).toContain('in the "storefront" space; you only see agents in that space and "acme"')
   expect(text).toContain('You lead the "storefront" space and speak for it in the "acme" space')
 })
@@ -818,9 +859,10 @@ test('a member of a space named after its lead is told it is not that agent', as
   engine(on)
   fakeDaemon(on, 1, null, [], { space: 'core', space_source: 'file', space_from: '/Users/x/r/.peerlink', lead: 'core', guidance: 'Be brief.' })
   on('prompt.compose', () => ({ sections: [] }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
   await $.session.start(START)
   const composed: any = await $.prompt.compose(COMPOSE)
-  const text = composed.sections.find((s: any) => s.id === 'peerlink:guidance').text
+  const text = (await peerGuidance($, composed))
   expect(text).toContain('core leads the "core" space')
   expect(text).toContain('The space is named after that agent: you are "web", not core.')
 })
@@ -833,11 +875,12 @@ test('a parent space sees its child leads, tagged, and is told to hand them outc
   })
   Object.assign(daemon.peers[0], { space: 'billing', parent: 'acme' })
   on('prompt.compose', () => ({ sections: [] }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
   await $.session.start(START)
   const first: any = await $.prompt.submit({ text: 'ship invoices' })
   expect(first.context?.join('\n')).toContain('billing-api [leads billing]: ~/r/billing')
   const composed: any = await $.prompt.compose(COMPOSE)
-  const text = composed.sections.find((s: any) => s.id === 'peerlink:guidance').text
+  const text = (await peerGuidance($, composed))
   expect(text).toContain('billing-api (leads "billing")')
 })
 
@@ -846,11 +889,12 @@ test('a lead of a top-level space is told work sent to the space comes to it, an
   const daemon = fakeDaemon(on, 1, null, [], { space: 'acme', space_source: 'file', space_from: '/Users/x/r/.peerlink', leads: 'only' })
   Object.assign(daemon.peers[0], { space: 'acme', leads: 'set' })
   on('prompt.compose', () => ({ sections: [] }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
   await $.session.start(START)
   const first: any = await $.prompt.submit({ text: 'go' })
   expect(first.context?.join('\n')).toContain('billing-api [leads acme]: ~/r/billing')
   const composed: any = await $.prompt.compose(COMPOSE)
-  const text = composed.sections.find((s: any) => s.id === 'peerlink:guidance').text
+  const text = (await peerGuidance($, composed))
   expect(text).toContain('You lead the "acme" space. Work sent to the space (to "space:acme") comes to you')
 })
 
@@ -1378,21 +1422,23 @@ test("an agent is given its role from .peerlink, and peers see a peer's role bes
   const daemon = fakeDaemon(on, 1, null, [], { space: 'acme', space_source: 'file', space_from: '/Users/x/r/.peerlink', role: 'Owns the web app: pages, styles, the build.' })
   Object.assign(daemon.peers[0], { role: 'Owns the billing API:\ninvoices and payments.' })
   on('prompt.compose', () => ({ sections: [] }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
   await $.session.start(START)
   const first: any = await $.prompt.submit({ text: 'go' })
   expect(first.context?.join('\n')).toContain('billing-api: ~/r/billing [main] — Owns the billing API: invoices and payments. · now: Owns the invoice schema')
   const composed: any = await $.prompt.compose(COMPOSE)
-  expect(composed.sections.find((s: any) => s.id === 'peerlink:guidance').text).toContain('Your role here, as your user set it (other agents see it too): Owns the web app: pages, styles, the build.')
+  expect((await peerGuidance($, composed))).toContain('Your role here, as your user set it (other agents see it too): Owns the web app: pages, styles, the build.')
 })
 
 async function chatGuidance($: any, on: any, discord: unknown[]) {
   engine(on)
   fakeDaemon(on, 1, null, [], { space: 'acme', space_source: 'set', space_from: '', discord })
   on('prompt.compose', () => ({ sections: [] }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
   await $.session.start(START)
   await $.prompt.submit({ text: 'go' })
   const composed: any = await $.prompt.compose(COMPOSE)
-  return composed.sections.find((s: any) => s.id === 'peerlink:guidance').text as string
+  return (await peerGuidance($, composed)) as string
 }
 
 test('an agent mapped into a Telegram chat is told it is on Telegram, and to send to "telegram"', async ($, on) => {
@@ -1412,10 +1458,11 @@ test('an agent you added to another space is told it is a member there, and sees
   engine(on)
   fakeDaemon(on, 1, null, [], { space: 'games', space_source: 'file', space_from: '/Users/x/games/.peerlink', also: ['acme'] })
   on('prompt.compose', () => ({ sections: [] }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
   await $.session.start(START)
   await $.prompt.submit({ text: 'go' })
   const composed: any = await $.prompt.compose(COMPOSE)
-  const text = composed.sections.find((s: any) => s.id === 'peerlink:guidance').text
+  const text = (await peerGuidance($, composed))
   expect(text).toContain('in the "games" space; you only see agents in that space and "acme"')
   expect(text).toContain('Your user also made you a member of "acme": you see and message the agents there, and they see you. Your own space is still "games".')
 })
@@ -1553,9 +1600,10 @@ test('a channel master is told how Discord reaches it', async ($, on) => {
   engine(on)
   fakeDaemon(on, 1, null, [], { discord: [{ channel_id: '1', channel: '#acme', master: true }, { channel_id: '2', channel: '#builds', master: false }] })
   on('prompt.compose', () => ({ sections: [] }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
   await $.session.start(START)
   const composed: any = await $.prompt.compose(COMPOSE)
-  const text = composed.sections.find((s: any) => s.id === 'peerlink:guidance').text
+  const text = (await peerGuidance($, composed))
   expect(text).toContain('Their messages in #acme come to you')
   expect(text).toContain('In #builds, they reach you by starting a message with your name')
   expect(text).toContain('send_message to "discord" plus the channel, like "discord#acme"')
@@ -1565,9 +1613,10 @@ test('an agent that only sends to a channel is told it can post there, not that 
   engine(on)
   fakeDaemon(on, 1, null, [], { discord: [{ channel_id: '1', channel: '#feed', master: false, receives: false, sends: true }, { channel_id: '2', channel: '#acme', master: true, receives: true, sends: false }] })
   on('prompt.compose', () => ({ sections: [] }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
   await $.session.start(START)
   const composed: any = await $.prompt.compose(COMPOSE)
-  const text = composed.sections.find((s: any) => s.id === 'peerlink:guidance').text
+  const text = (await peerGuidance($, composed))
   expect(text).toContain('Their messages in #acme come to you')
   expect(text).not.toContain('In #feed')
   expect(text).toContain('send_message to "discord".')
