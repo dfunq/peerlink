@@ -6393,7 +6393,8 @@ def ask_after_reboot(saved, now=None):
             if agents_then:
                 log("reboot", len(agents_then), "agents were running before it; not asking (resume_after_reboot is off)")
             return
-        n = int(str((old or {}).get("id") or "b0")[1:] or 0) + 1 if isinstance(old, dict) else 1
+        m = re.fullmatch(r"b(\d+)", str((old or {}).get("id") or "")) if isinstance(old, dict) else None
+        n = int(m.group(1)) + 1 if m else 1
         resume_ask.clear()
         resume_ask.update({"id": f"b{n}", "created": now, "updated": now, "status": "pending", "note": "",
                            "agents": [{k: a.get(k, "") for k in ("agent", "sid", "name", "cwd", "terminal", "space")} for a in agents_then]})

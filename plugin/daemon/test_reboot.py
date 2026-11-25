@@ -75,6 +75,9 @@ class StartAtLogin(unittest.TestCase):
             self.assertFalse(reboot.autostart_installed(self.home, platform))
             self.assertEqual(reboot.autostart_remove(self.home, platform), "")  # gone already: still fine
 
+    def test_a_linux_exec_line_quotes_as_the_desktop_spec_says(self):
+        self.assertEqual(reboot._desktop_quote('/opt/my apps/$x"q'), '"/opt/my apps/\\\\$x\\\\"q"')
+
     @unittest.skipUnless(sys.platform in ("darwin", "linux"), "the LaunchAgent and the autostart file")
     def test_the_setting_drives_the_entry(self):
         d.config["start_at_login"] = True
@@ -99,6 +102,14 @@ class TheQuestion(unittest.TestCase):
         text = d.ask_view(ask)
         for part in ("web in /x/web (session 5ad5fb3d-1111)", "api in /x/api (session 77adf96c-2222)", "2 agents"):
             self.assertIn(part, text)
+
+    def test_a_damaged_saved_question_is_asked_afresh(self):
+        saved = {"boot": 1, "ts": time.time(), "agents": [{"sid": "s1", "cwd": "/x/web", "name": "web"}], "ask": {"id": "bogus", "status": "denied"}}
+        kept = d.BOOT[0]
+        self.addCleanup(d.BOOT.__setitem__, 0, kept)
+        d.BOOT[0] = 10_000_000
+        d.ask_after_reboot(saved)
+        self.assertEqual(d.resume_ask["id"], "b1")
 
     def test_no_answer_within_a_day_is_a_no(self):
         d.resume_ask.update({"id": "b1", "created": time.time() - d.SPAWN_TTL_S - 1, "status": "pending", "agents": [{"sid": "s", "cwd": "/x"}]})

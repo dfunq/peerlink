@@ -123,6 +123,13 @@ def _win_quote(a):
     return '"' + str(a).replace('"', '\\"') + '"'
 
 
+def _desktop_quote(a):
+    """An Exec= argument, quoted as the desktop entry spec says: in double quotes, with " ` $ and \\ escaped by a
+    backslash, and each backslash doubled again for the string value the key is."""
+    inner = re.sub(r'(["`$\\])', r"\\\1", str(a))
+    return '"' + inner.replace("\\", "\\\\") + '"'
+
+
 def _winreg():
     import winreg
     return winreg
@@ -151,7 +158,7 @@ def autostart_install(argv, home=None, platform=None):
                 reg.SetValueEx(k, "peerlink", 0, reg.REG_SZ, " ".join(_win_quote(a) for a in argv))
             return ""
         path, text = ((_plist_path(home), plist_text(argv)) if platform == "darwin" else
-                      (_desktop_path(home), "[Desktop Entry]\nType=Application\nName=peerlink\nExec=" + " ".join(_win_quote(a) for a in argv)
+                      (_desktop_path(home), "[Desktop Entry]\nType=Application\nName=peerlink\nExec=" + " ".join(_desktop_quote(a) for a in argv)
                        + "\nX-GNOME-Autostart-enabled=true\n"))
         try:
             with open(path) as f:
