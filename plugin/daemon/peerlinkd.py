@@ -60,6 +60,20 @@ import slacklink  # noqa: E402
 import agentslink  # noqa: E402
 from cronlib import cron_next, parse_cron  # noqa: E402,F401
 from webui import UI_HTML  # noqa: E402
+
+
+def page_csp(html):
+    """A Content-Security-Policy for a page of ours: its one inline script by hash and nothing else, no outside requests
+    and no framing. Agents' and outside clients' text is shown on the page that holds the owner's powers, so a missed
+    escape must not be able to run script."""
+    import base64
+    m = re.search(r"<script>(.*?)</script>", html, re.S)
+    script = f"script-src 'sha256-{base64.b64encode(hashlib.sha256(m.group(1).encode()).digest()).decode()}'; " if m else ""
+    return (f"default-src 'none'; {script}style-src 'unsafe-inline'; img-src 'self' data:; manifest-src 'self'; connect-src 'self'; "
+            "base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+
+
+UI_CSP = page_csp(UI_HTML)
 import herdr_sync  # noqa: E402
 import herdr_mod  # noqa: E402
 import reboot  # noqa: E402
@@ -1581,13 +1595,40 @@ def snapshot():
                   "sessions": sum(1 for r in sessions.values() if is_live(r, now)), "queued": sum(len(b) for b in inboxes.values()),
                   "messages": len(messages), "browsers": sum(1 for e in web_sessions.values() if e > now), "home": HOME, "launcher": LAUNCHER_PATH}
         msgs = messages[-100:]
-        task_list = sorted(tasks.values(), key=lambda t: -t["created"])[:500]
+        task_list = page_tasks(now)
         issues = sorted(feedback.values(), key=lambda i: i["ts"])[-500:]
-        sched = sorted(schedules.values(), key=lambda c: -c["created"])[:200]
+        sched = [c for c in sorted(schedules.values(), key=lambda c: -c["created"])
+                 if c.get("status") in ("active", "pending") or recent(c, now)][:200]
         status["limit"] = limit_view()
         offline = offline_agents()
     return {"schedules": {"schedules": [sched_view(c) for c in sched]},"status": status, "peers": {"host": HOSTNAME, "peers": peers, "leads": leads_view(), "offline": offline}, "messages": {"messages": msgs},
             "tasks": {"tasks": task_list}, "issues": {"issues": issues, "path": ISSUES_PATH}, "inbox": {"items": inbox_items(), "user": USER_NAME}}
+
+
+# What the web UI is sent of what's done: the page is pushed whole on every change, and 500 finished tasks with their
+# full text and notes made it 1.7 MB. Open work goes in full; what ended goes for SHOWN_ENDED_S, its text clipped.
+SHOWN_ENDED_S = 14 * 86400
+SHOWN_ENDED_MAX = 150
+SHOWN_TEXT = 600
+
+
+def recent(item, now):
+    return now - (item.get("updated") or item.get("created") or item.get("ts") or now) < SHOWN_ENDED_S
+
+
+def page_tasks(now):
+    """The tasks the web UI shows: every open one, and those that ended lately, newest first. Called with the lock held."""
+    mine = sorted(tasks.values(), key=lambda t: -t["created"])
+    live = [t for t in mine if t["status"] in TASK_OPEN]
+    ended = [t for t in mine if t["status"] not in TASK_OPEN and recent(t, now)][:SHOWN_ENDED_MAX]
+    out = list(live)
+    for t in ended:
+        t = dict(t)
+        for k in ("text", "note"):
+            if isinstance(t.get(k), str) and len(t[k]) > SHOWN_TEXT:
+                t[k] = t[k][:SHOWN_TEXT - 1] + "…"
+        out.append(t)
+    return sorted(out, key=lambda t: -t["created"])
 
 
 def sent_last_hour(rec):
@@ -7847,7 +7888,22 @@ class Handler(BaseHTTPRequestHandler):
 
     def page(self, code, title, text):
         html = PAGE_HTML.replace("{title}", title).replace("{text}", text)
-        return self.reply(code, html, "text/html; charset=utf-8")
+        return self.reply(code, html, "text/html; charset=utf-8", {"Content-Security-Policy": page_csp(html)})
+
+    stream_cache = {"at": 0.0, "body": ""}
+    stream_lock = threading.Lock()
+
+    @classmethod
+    def stream_body(cls):
+        """The page as JSON, built at most once a second however many browsers are watching."""
+        with cls.stream_lock:
+            if time.time() - cls.stream_cache["at"] >= 0.9:
+                snap = snapshot()
+                # Ages tick every second; they aren't a change worth sending.
+                for p in snap["peers"]["peers"]:
+                    p.pop("last_seen_s", None)
+                cls.stream_cache.update(at=time.time(), body=json.dumps(snap))
+            return cls.stream_cache["body"]
 
     def stream(self, browser):
         """Server-sent events: a fresh snapshot whenever what the page shows changes (checked each second), and a
@@ -7863,11 +7919,7 @@ class Handler(BaseHTTPRequestHandler):
                     with lock:
                         if not (web_sessions.get(browser, 0) > time.time()):
                             return
-                snap = snapshot()
-                # Ages tick every second; they aren't a change worth sending.
-                for p in snap["peers"]["peers"]:
-                    p.pop("last_seen_s", None)
-                body = json.dumps(snap)
+                body = self.stream_body()
                 if body != last:
                     self.wfile.write(f"data: {body}\n\n".encode())
                     self.wfile.flush()
@@ -7962,7 +8014,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(403, {"error": "cross-origin request refused"})
 
         if method == "GET" and url.path in ("/", "/index.html"):
-            return self.reply(200, UI_HTML, "text/html; charset=utf-8")
+            return self.reply(200, UI_HTML, "text/html; charset=utf-8", {"Content-Security-Policy": UI_CSP})
         if rest is None:
             return self.reply(404, {"error": "not found"})
 

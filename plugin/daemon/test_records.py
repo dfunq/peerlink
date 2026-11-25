@@ -505,6 +505,37 @@ class PeerCountTest(unittest.TestCase):
         self.assertLess(new * 5, old)
 
 
+class WebPageTest(unittest.TestCase):
+    def test_the_page_runs_only_its_own_script(self):
+        import base64, hashlib, re
+        csp = peerlinkd.UI_CSP
+        script = re.search(r"<script>(.*?)</script>", peerlinkd.UI_HTML, re.S).group(1)
+        digest = base64.b64encode(hashlib.sha256(script.encode()).digest()).decode()
+        self.assertIn(f"script-src 'sha256-{digest}'", csp)
+        self.assertIn("default-src 'none'", csp)
+        self.assertIn("connect-src 'self'", csp)
+        self.assertNotIn("script-src 'unsafe-inline'", csp)
+        self.assertEqual(peerlinkd.UI_HTML.count("<script"), 1)  # a second script would be refused by the hash
+
+    def test_the_page_gets_open_tasks_whole_and_only_recent_ended_ones_clipped(self):
+        now = peerlinkd.time.time()
+        saved = dict(peerlinkd.tasks)
+        self.addCleanup(lambda: (peerlinkd.tasks.clear(), peerlinkd.tasks.update(saved)))
+        peerlinkd.tasks.clear()
+        long = "x" * 5000
+        peerlinkd.tasks.update({
+            "t1": {"id": "t1", "status": "open", "created": now - 90 * 86400, "text": long},
+            "t2": {"id": "t2", "status": "done", "created": now - 2 * 86400, "updated": now - 86400, "text": long, "note": long},
+            "t3": {"id": "t3", "status": "done", "created": now - 60 * 86400, "updated": now - 50 * 86400, "text": "old"},
+        })
+        shown = {t["id"]: t for t in peerlinkd.page_tasks(now)}
+        self.assertEqual(set(shown), {"t1", "t2"})
+        self.assertEqual(shown["t1"]["text"], long)
+        self.assertEqual(len(shown["t2"]["text"]), peerlinkd.SHOWN_TEXT)
+        self.assertEqual(len(shown["t2"]["note"]), peerlinkd.SHOWN_TEXT)
+        self.assertEqual(peerlinkd.tasks["t2"]["text"], long)  # the record itself is untouched
+
+
 class StateFileTest(unittest.TestCase):
     """State files are written whole or not at all, and a damaged one is kept and recovered, never just replaced."""
 
