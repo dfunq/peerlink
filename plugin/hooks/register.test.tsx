@@ -192,8 +192,13 @@ test('the model is told about peers beside the prompt, again only when who is th
 
   daemon.peers.push({ id: 'p2', name: 'search', host: 'Mac', cwd: '/Users/x/r/search', branch: 'main', summary: 'Indexing', busy: false, muted: false })
   const fourth: any = await $.prompt.submit({ text: 'and now' })
-  expect(fourth.context?.join('\n')).toContain('search: ~/r/search [main] — Indexing')
-  expect(fourth.context?.join('\n')).toContain('Migrating invoices to v2')
+  // Only who came: the rest of the list stands in the conversation already.
+  expect(fourth.context?.join('\n')).toContain('Peer agents changed:\n- search: ~/r/search [main] — Indexing')
+  expect(fourth.context?.join('\n')).not.toContain('billing-api')
+
+  daemon.peers.splice(1, 1)
+  const fifth: any = await $.prompt.submit({ text: 'and then' })
+  expect(fifth.context?.join('\n')).toContain('Peer agents changed:\nNo longer live: search.')
 })
 
 test("when an org plugin skips peerlink's compose and context hooks, the role, guidance and announcements ride on the prompt", async ($, on) => {
@@ -234,8 +239,8 @@ test("when the skipped hooks' guidance rode on a prompt, it is sent again once t
   expect(third.context.join('\n')).toContain('Owns the web app.')
 })
 
-test('past the context size the user set, the agent is asked once to save and clear, on its next prompt', async ($, on) => {
-  engine(on, { turns: 4, percent: 85 })
+test('past the context size the user set, the agent is asked to save and clear on its next prompt, and again 50k on', async ($, on) => {
+  const { usage } = engine(on, { turns: 4, percent: 85 })
   on('prompt.compose', () => ({ sections: [] }))
   on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
   fakeDaemon(on, 1, null, [], { clear_nudge_tokens: 100000 })
@@ -249,6 +254,11 @@ test('past the context size the user set, the agent is asked once to save and cl
   for (let i = 0; i < 5; i++) await settle()
   const after: any = await $.prompt.submit({ text: 'and again' })
   expect((after.context ?? []).join('\n')).not.toContain('past the 100k')
+  usage.percent = 111 // 222k: 52k on from the last ask
+  await $.turn.complete(TURN)
+  for (let i = 0; i < 5; i++) await settle()
+  const later: any = await $.prompt.submit({ text: 'and later' })
+  expect(later.context.join('\n')).toContain('Your context is at 222k tokens, past the 100k your user set')
 })
 
 test('below the context size, or with it off, nobody is asked to clear', async ($, on) => {
@@ -700,6 +710,25 @@ test('a message that arrives mid-turn and is left unanswered is put to the agent
   expect(woke.length).toBe(1)
 })
 
+test('a sender the agent wrote back to during the turn is not chased, even without reply_to', async ($, on) => {
+  const { clock, woke } = engine(on)
+  mock.session(on)
+  on('turn.start', (_: any, e: any) => ({ turnId: e.turnId }))
+  const inbox: any[] = []
+  const daemon = fakeDaemon(on, 1, null, inbox, { wake_delay_s: 0 })
+  await $.session.start(START)
+  await settle()
+  await $.turn.start({ text: 'start the dev servers', turnId: 't1' } as any)
+  inbox.push({ id: 'm26', from: 'api-id', from_name: 'api', from_host: 'Mac', text: 'Which port?', expects_reply: true, reply_to: null, hops: 0 })
+  await clock.advance(600000)
+  for (let i = 0; i < 10; i++) await settle()
+  await $.tool.call({ tool: 'mcp__peerlink__send_message', to: 'api', text: 'Port 3000.' } as any)
+  daemon.state.threads = { owes: [{ id: 'm26', with: 'api', ago_s: 30, text: 'Which port?' }], waiting: [] }
+  await $.turn.complete(TURN)
+  for (let i = 0; i < 10; i++) await settle()
+  expect(woke).toEqual([])
+})
+
 test('deliveries asked for at once, by the wake timer and turns ending, submit a message once', async ($, on) => {
   const { clock, woke } = engine(on)
   mock.session(on)
@@ -794,7 +823,7 @@ test('a worker is told it was hired and how to finish, hires through request_spa
   const composed: any = await $.prompt.compose(COMPOSE)
   const guidance = (await peerGuidance($, composed))
   expect(guidance).toContain('acme hired you as a worker')
-  expect(guidance).toContain('select:mcp__peerlink__retire')
+  expect(guidance).toContain('then call retire and end the turn')
   const queued = JSON.stringify(await $.tool.call({ tool: 'mcp__peerlink__request_spawn', dir: '/x/w', purpose: 'p', first_prompt: 'f', worker: true } as any))
   expect(queued).toContain('s4 is queued')
   expect(daemon.posted.find(p => p.path === '/api/spawns')!.body.worker).toBe(true)
@@ -802,6 +831,28 @@ test('a worker is told it was hired and how to finish, hires through request_spa
   expect(self).toContain('You retire when this turn ends; acme is told')
   const other = JSON.stringify(await $.tool.call({ tool: 'mcp__peerlink__retire', agent: 'w2' } as any))
   expect(other).toContain('You retired w2')
+})
+
+test("a worker gets retire up front and spawning behind ToolSearch; a lead the other way round", async ($, on) => {
+  engine(on)
+  on('tool.describe', (_: any, e: any) => ({ description: e.description }))
+  const conf: Record<string, unknown> = { space: 'acme', lead: 'acme', hired_by: 'acme' }
+  fakeDaemon(on, 1, null, [], conf)
+  await $.session.start(START)
+  const describe = async (name: string) => ((await $.tool.describe({ tool: `mcp__peerlink__${name}`, description: 'd' } as any)) as any).isDeferred
+  expect(await describe('retire')).toBe(false)
+  expect(await describe('request_spawn')).toBe(true)
+  expect(await describe('rule')).toBe(true)
+})
+
+test('a lead gets request_spawn up front and retire behind ToolSearch', async ($, on) => {
+  engine(on)
+  on('tool.describe', (_: any, e: any) => ({ description: e.description }))
+  fakeDaemon(on, 1, null, [], { space: 'acme', leads: 'set' })
+  await $.session.start(START)
+  const describe = async (name: string) => ((await $.tool.describe({ tool: `mcp__peerlink__${name}`, description: 'd' } as any)) as any).isDeferred
+  expect(await describe('retire')).toBe(true)
+  expect(await describe('request_spawn')).toBe(false)
 })
 
 test('the default space adds nothing to the system prompt', async ($, on) => {

@@ -118,6 +118,8 @@ let handoff = ''
 // its next prompt rather than starting a turn of its own.
 let nudge = ''
 let nudgedFor = ''
+let nudgedAt = 0
+const NUDGE_STEP = 50000
 // Messages that reached the session, so one the daemon hands out again isn't shown twice; and acks it hasn't taken yet.
 const placed = new Set<string>()
 let unacked: string[] = []
@@ -205,6 +207,7 @@ async function terminalOf($: EngineInterface) {
 }
 let cancelPoll: (() => void) | undefined
 let lastRoster = ''
+let lastPeers = new Map<string, { who: string; line: string }>() // the roster this conversation last saw, by agent
 // Whether this session's prompt.compose and prompt.context hooks have run. An org's managed plugin can send those
 // events past every user plugin; then what they carry (the role and guidance, open threads, announcements) rides on
 // the next prompt instead, sent again only when it changes or the conversation starts over.
@@ -596,14 +599,21 @@ function acked($: EngineInterface, batch: PeerMessage[], verify = false) {
 }
 
 // The messages that arrived mid-turn and are still owed a reply when it ends go back to the front of the queue.
+// Whom this turn's send_message calls went to: a sender the agent wrote back to this turn isn't chased, even when the
+// answer didn't name the message it answers (each chase costs the agent a whole turn).
+let sentThisTurn = new Set<string>()
 async function chase($: EngineInterface) {
   const arrived = midTurn
+  const talked = sentThisTurn
   midTurn = []
+  sentThisTurn = new Set()
   if (!arrived.length || !sessionId) return
   const res = await call($, 'GET', `/api/sessions/${sessionId}/threads`).catch(() => undefined)
   if (!res?.ok) return
   const owed = new Set(((res.data.owes ?? []) as any[]).map(t => t.id))
-  const again = arrived.filter(m => owed.has(m.id) && !chased.has(m.id) && !pending.some(p => p.id === m.id))
+  const again = arrived.filter(
+    m => owed.has(m.id) && !chased.has(m.id) && !pending.some(p => p.id === m.id) && !talked.has(m.from) && !talked.has(String(m.from_name ?? '').toLowerCase()),
+  )
   for (const m of again) chased.add(m.id)
   if (chased.size > 500) for (const id of [...chased].slice(0, chased.size - 500)) chased.delete(id)
   if (again.length) pending = [...again.map(m => ({ ...m, unanswered: true, wake: true })), ...pending]
@@ -874,6 +884,7 @@ async function poll($: EngineInterface) {
     const old = sessionId
     sessionId = now
     lastRoster = ''
+    lastPeers = new Map()
     sentGuidance = ''
     if (!contextRan) sentPlace = undefined // with prompt.context running, it sends the new conversation all of it
     sentThreads = false
@@ -1001,12 +1012,20 @@ async function rosterContext($: EngineInterface) {
   const peers = (res.data.peers as any[]).filter(p => !p.muted).slice(0, 12)
   const roster = peers.map(peerLine).join('\n')
   // Sent again only when who's there, or what they're for, changes: not each time a summary or context moves.
-  const who = peers.map(p => [p.name, p.cwd, p.space, p.role, spaceTag(p)].join('|')).join('\n')
+  const key = (p: any) => [p.name, p.cwd, p.space, p.role, spaceTag(p)].join('|')
+  const who = peers.map(key).join('\n')
   if (who === lastRoster) return undefined
+  const seen = lastRoster ? lastPeers : undefined
   lastRoster = who
-  return peers.length
-    ? `Peer agents now live (send_message to reach one):\n${roster}`
-    : 'peerlink: no other agents are live in your space now.'
+  lastPeers = new Map(peers.map(p => [p.remote ? `${p.name}@${p.host}` : p.name, { who: key(p), line: peerLine(p) }]))
+  if (!peers.length) return 'peerlink: no other agents are live in your space now.'
+  const full = `Peer agents now live (send_message to reach one):\n${roster}`
+  if (!seen) return full
+  // After that, only who came, changed or left: workers come and go all day, and the rest of the list stands.
+  const came = [...lastPeers].filter(([id, p]) => seen.get(id)?.who !== p.who).map(([, p]) => p.line)
+  const left = [...seen.keys()].filter(id => !lastPeers.has(id))
+  const diff = `Peer agents changed:${came.length ? `\n${came.join('\n')}` : ''}${left.length ? `\nNo longer live: ${left.join(', ')}.` : ''}`
+  return diff.length < full.length ? diff : full
 }
 
 async function postSummary($: EngineInterface, next: string, kind: 'seed' | 'model' | 'manual', headline = '') {
@@ -1262,10 +1281,13 @@ function nudgeBlock() {
 
 async function checkContextSize($: EngineInterface) {
   const limit = cfg?.clear_nudge_tokens ?? 0
-  if (!limit || nudgedFor === sessionId) return
+  if (!limit) return
   const tokens = (await $.session.usage().catch(() => undefined))?.context?.tokens
-  if (!tokens || tokens < limit) return
+  // Asked once past the limit, and again each NUDGE_STEP further: one ask is easy to put off for good.
+  const due = nudgedFor === sessionId ? nudgedAt + NUDGE_STEP : limit
+  if (!tokens || tokens < due) return
   nudgedFor = sessionId
+  nudgedAt = tokens
   nudge = `Your context is at ${Math.round(tokens / 1000)}k tokens, past the ${Math.round(limit / 1000)}k your user set, and every turn re-reads all of it. At your next stopping point, which should be soon, save what's worth keeping to memory and call clear_context with a handoff.`
 }
 
@@ -1365,7 +1387,7 @@ function hierarchyGuidance() {
     )
   if (cfg.hired_by)
     lines.push(
-      `${cfg.hired_by} hired you as a worker for one piece of work. You don't start agents or schedules. When the work is done: put the evidence where your lead asked, mark every task you own done or failed with update_task, send ${cfg.hired_by} one line with the outcome, then call retire (load it with ToolSearch, "select:mcp__peerlink__retire") and end the turn.`,
+      `${cfg.hired_by} hired you as a worker for one piece of work. You don't start agents or schedules. When the work is done: put the evidence where your lead asked, mark every task you own done or failed with update_task, send ${cfg.hired_by} one line with the outcome, then call retire and end the turn.`,
     )
   if (cfg.parent || cfg.leads)
     lines.push(
@@ -1669,6 +1691,17 @@ export const register: Register = (on, options) => {
   // Off when a managed plugin was found sending prompt.compose past peerlink: see composeBypassed.
   const useCompose = options?.system_prompt !== false
   if (!useCompose) composeOff = true
+
+  // Tool schemas are read on every request, so a tool an agent's role rarely or never uses waits behind ToolSearch:
+  // a worker gets retire up front and request_spawn and rule behind it; only a lead gets request_spawn up front.
+  const deferred: Record<string, () => boolean> = {
+    retire: () => !cfg?.hired_by,
+    request_spawn: () => !!cfg?.hired_by || !(cfg?.leads || cfg?.parent),
+    rule: () => true,
+  }
+  for (const [name, isDeferred] of Object.entries(deferred))
+    on('tool.describe', { tool: `mcp__peerlink__${name}` }, async ($, e, next) => ({ ...(await next(e)), isDeferred: isDeferred() }))
+
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     surface = (e as any).surface ?? ''
@@ -2098,6 +2131,7 @@ export const register: Register = (on, options) => {
       files: Array.isArray(input.files) ? input.files : undefined,
     })
     if (!res.ok) return text(`Not sent: ${res.data.error ?? res.status}`)
+    for (const to of [input.to, res.data.to]) if (typeof to === 'string' && to) sentThisTurn.add(to.toLowerCase())
     if (res.data.task)
       return text(`Sent to ${res.data.to} (${res.data.id}) as task ${res.data.task}. You'll get its note when it's done or failed; continue with other work meanwhile.`)
     return text(
