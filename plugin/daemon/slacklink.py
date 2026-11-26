@@ -185,6 +185,11 @@ def section(text):
     return {"type": "section", "text": {"type": "mrkdwn", "text": text[:3000]}}
 
 
+def sections(text):
+    """Text as section blocks: one holds 3000 characters, and escaping can push a part past that."""
+    return [section(part) for part in chunks(text, 3000)] or [section("")]
+
+
 def without_buttons(blocks, note=""):
     """A message's blocks with the buttons gone, and a small line in their place when there's something to say."""
     out = [b for b in blocks or [] if b.get("type") != "actions"]
@@ -203,7 +208,7 @@ def post(token, channel_id, text, reply_to=None, buttons=None, files=None):
         body = to_mrkdwn(part)
         params = {"channel": chat, "text": body, "thread_ts": thread or None, "unfurl_links": False, "unfurl_media": False}
         if buttons and i == len(parts) - 1:
-            params["blocks"] = [section(body), actions(buttons)]
+            params["blocks"] = [*sections(body), actions(buttons)]
         sent = call(token, "chat.postMessage", params)
         if "blocks" in params:
             posted[(chat, sent.get("ts", ""))] = (body, params["blocks"])
@@ -550,4 +555,4 @@ class Bot:
             if err.code not in ("not_in_channel", "channel_not_found"):
                 raise
             body = to_mrkdwn(text or "Done.")[:PART]
-            respond(url, {"response_type": "ephemeral", "text": body, **({"blocks": [section(body), actions(rows)]} if rows else {})})
+            respond(url, {"response_type": "ephemeral", "text": body, **({"blocks": [*sections(body), actions(rows)]} if rows else {})})

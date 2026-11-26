@@ -17,6 +17,7 @@ an admin of the group.
 Chats are `tg:<chat id>` to the daemon; the token lives in discord.json, 0600, and is never echoed back.
 """
 import html
+import http.client
 import json
 import os
 import queue
@@ -88,8 +89,10 @@ def call(token, method, params=None, files=None, timeout=15, retried=False):
             out = json.loads(err.read() or b"{}")
         except ValueError:
             out = {"ok": False, "error_code": err.code, "description": str(err)}
-    except (urllib.error.URLError, OSError) as err:
+    except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as err:
         raise TelegramError(f"couldn't reach Telegram: {err}")
+    if not isinstance(out, dict):
+        raise TelegramError("Telegram's answer couldn't be read")
     if out.get("ok"):
         return out.get("result")
     code, desc, extra = out.get("error_code", 0), out.get("description", "?"), out.get("parameters") or {}
@@ -333,11 +336,26 @@ class Bot:
                     self.log("telegram", "couldn't set the command list:", err)
                 self.state, self.error = "online", ""
                 self.log("telegram", "online as", self.user)
-                backoff = 2
+                backoff, misses = 2, 0
                 while not self.stop.is_set():
-                    updates = call(self.token, "getUpdates", {"offset": self.offset, "timeout": POLL_S,
-                                                              "allowed_updates": ["message", "callback_query", "my_chat_member"]},
-                                   timeout=POLL_S + 15)
+                    try:
+                        updates = call(self.token, "getUpdates", {"offset": self.offset, "timeout": POLL_S,
+                                                                  "allowed_updates": ["message", "callback_query", "my_chat_member"]},
+                                       timeout=POLL_S + 15)
+                        misses = 0
+                    except TelegramError as err:
+                        # A long poll that timed out or was reset (sleep, an idle NAT) is ordinary: ask again, and
+                        # only a run of them is a dropped connection worth a line in the log and a fresh start.
+                        if err.code == 429 and err.retry_after:
+                            if self.stop.wait(min(err.retry_after, 300)):
+                                return
+                            continue
+                        misses += 1
+                        if err.code or misses >= 4:
+                            raise
+                        if self.stop.wait(min(2 ** misses, 30)):
+                            return
+                        continue
                     for u in updates or []:
                         self.offset = max(self.offset, u["update_id"] + 1)
                         try:
@@ -354,6 +372,9 @@ class Bot:
                 self.state = "error" if err.code else "connecting"
                 self.error = ("another program is reading this bot's updates; stop it, or use another bot"
                               if err.code == 409 else str(err))
+            except Exception as err:  # never the end of the thread: the channel would say online and hear nothing
+                self.log("telegram", "connection failed:", repr(err))
+                self.state, self.error = "connecting", "reconnecting"
             if self.stop.wait(backoff):
                 return
             backoff = min(backoff * 2, 120)

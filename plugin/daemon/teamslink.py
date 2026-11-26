@@ -221,6 +221,9 @@ def browser_sign_in(client_id, tenant, on_tokens, on_error, timeout=600):
     return {"auth_url": url, "expires_at": expires_at, "close": close}
 
 
+SIGNED_OUT = ("invalid_grant", "interaction_required", "invalid_client", "unauthorized_client")
+
+
 class Auth:
     """A refresh token, and the access token it buys, renewed a few minutes before it runs out. `on_refresh` gets each
     new refresh token Microsoft hands back, to keep."""
@@ -244,7 +247,9 @@ class Auth:
                     "grant_type": "refresh_token", "client_id": self.client_id, "refresh_token": self.refresh_token, "scope": SCOPES})
                 if "access_token" not in out:
                     err = _auth_error(out)
-                    err.code = 401
+                    # Only a refused sign-in ends the channel; a busy or unreachable Microsoft is tried again.
+                    if str(out.get("error") or "") in SIGNED_OUT:
+                        err.code = 401
                     raise err
                 self.take(out)
             return self.access
@@ -255,6 +260,8 @@ class Auth:
 def graph(auth, method, path, body=None, raw=False, limit=None, retried=False):
     """One Graph call, as JSON (or bytes with `raw`); a 401 renews the token once, a short 429 waits once."""
     url = path if path.startswith("http") else GRAPH + path
+    if not url.startswith(GRAPH + "/"):
+        raise TeamsError("not a Teams address")  # the sign-in token goes to Graph and nowhere else
     data = None if body is None else json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, method=method, headers={
         "Authorization": f"Bearer {auth.token(fresh=retried == 'auth')}", **({"Content-Type": "application/json"} if data else {})})
@@ -449,6 +456,8 @@ class Bot:
         self.since = {}  # chat id -> the newest change read there
         self.began = {}  # chat id -> when it was first read: what was written before is history, not news
         self.seen = {}  # message id -> when, so an edited message isn't read again
+        self.floor = 0.0  # messages written before this have been forgotten from `seen`
+        self.bad = {}  # channel id -> {code, wait, until}: a chat that can't be read, and when to try it again
         self.posted = {}  # message id -> when, the posts peerlink made
         self.asks = {}  # (channel id, message id) -> [(label, id)]: open questions, answered by number
         self.stop = threading.Event()
@@ -493,12 +502,19 @@ class Bot:
                     for cid in list(self.watch()):
                         if self.stop.is_set():
                             return
+                        bad = self.bad.get(cid)
+                        if bad and time.time() < bad["until"]:
+                            continue  # a chat that can't be read is tried less and less often, up to every 10 minutes
                         try:
                             self._poll(chat_of(cid))
+                            self.bad.pop(cid, None)
                         except TeamsError as err:
                             if err.code in (401, 429) or not err.code:
                                 raise
-                            self.log("teams", "couldn't read", cid, err)
+                            wait = min((bad or {}).get("wait", POLL_S) * 2, 600)
+                            if not bad or bad["code"] != err.code:
+                                self.log("teams", "couldn't read", cid, err)
+                            self.bad[cid] = {"code": err.code, "wait": wait, "until": time.time() + wait}
                     self._forget()
                     if self.stop.wait(POLL_S):
                         return
@@ -539,7 +555,7 @@ class Bot:
                 self.on_chat(cid, title)
 
     def _forget(self):
-        old = time.time() - 6 * 3600
+        old = self.floor = time.time() - 6 * 3600
         for d in (self.seen, self.posted):
             for k in [k for k, t in d.items() if t < old]:
                 d.pop(k, None)
@@ -565,7 +581,8 @@ class Bot:
             return
         self.seen[mid] = time.time()
         # An edit to a message from before peerlink started, or a post of its own, isn't news.
-        if when(m.get("createdDateTime")) < start or mid in self.posted or ours(m):
+        # Nor is an edit to one old enough that `seen` has let go of it.
+        if when(m.get("createdDateTime")) < max(start, self.floor - 120) or mid in self.posted or ours(m):
             return
         user = (m.get("from") or {}).get("user") or {}
         if not user.get("id"):
@@ -583,7 +600,8 @@ class Bot:
             elif a.get("contentType") == "reference":
                 shared.append(a.get("name") or "a file")
         for i, src in enumerate(re.findall(r'<img[^>]+src="([^"]+/hostedContents/[^"]+)"', (m.get("body") or {}).get("content", ""))):
-            files.append({"url": html.unescape(src), "filename": f"image-{mid}-{i + 1}.png", "size": 0})
+            if html.unescape(src).startswith(GRAPH + "/"):
+                files.append({"url": html.unescape(src), "filename": f"image-{mid}-{i + 1}.png", "size": 0})
         if shared:
             text = (text + "\n\n" if text else "") + f"(Shared from OneDrive or SharePoint, which peerlink can't open: {', '.join(shared)})"
         command = parse_command(text)

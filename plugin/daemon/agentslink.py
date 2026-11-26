@@ -686,7 +686,8 @@ class Bot:
             limits = [(READS_PER_MIN, 60)]
         bucket = "post" if posting else name
         everyone = [(ALL_POSTS_PER_MIN if posting else ALL_READS_PER_MIN, 60)]
-        if not self.limiter.allow(f"all:{bucket}", everyone) or not self.limiter.allow(f"{client}:{bucket}", limits):
+        # The client's own allowance first: one client over its limit must not use up everyone's.
+        if not self.limiter.allow(f"{client}:{bucket}", limits) or not self.limiter.allow(f"all:{bucket}", everyone):
             self.audit(client=client, ip=ip, method=method, tool=name, result="rate-limited")
             return tool_error("rate limited: wait a minute and try again")
         try:
@@ -709,6 +710,7 @@ def handler(bot):
     class H(BaseHTTPRequestHandler):
         server_version = "peerlink-agents"
         sys_version = ""
+        timeout = 30  # a client that connects and sends nothing doesn't hold a thread for good
 
         def log_message(self, *a):
             pass

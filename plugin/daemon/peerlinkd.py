@@ -4627,20 +4627,26 @@ def windows_parents():
         return {}
 
 
+def posix_parents():
+    """Every process's parent, pid -> parent pid, from one ps."""
+    out = subprocess.run(["ps", "-axo", "pid=,ppid="], timeout=5, capture_output=True, text=True).stdout
+    pairs = (line.split() for line in out.splitlines())
+    return {int(p[0]): int(p[1]) for p in pairs if len(p) == 2 and p[0].isdigit() and p[1].isdigit()}
+
+
 def descends_from(pid, ancestor):
     """Whether process `pid` is `ancestor` or runs under it."""
     try:
         pid = int(pid or 0)
-        parents = windows_parents() if os.name == "nt" else None
+        if pid == ancestor:
+            return True
+        parents = windows_parents() if os.name == "nt" else posix_parents()  # one listing, not a ps per generation
         for _ in range(12):
             if pid == ancestor:
                 return True
             if pid <= 1:
                 return False
-            if parents is not None:
-                pid = parents.get(pid, 0)
-            else:
-                pid = int(subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)], timeout=5, capture_output=True, text=True).stdout.strip() or 0)
+            pid = parents.get(pid, 0)
     except (OSError, subprocess.SubprocessError, ValueError):
         pass
     return False
@@ -5859,7 +5865,9 @@ def request_spawn(body):
         spawns[sp["id"]] = sp
         save_spawns()
         channel = approval_channel(by)
-        auto = auto_approved(by)
+        # Auto-approve covers the spaces the asker can already message. A space it can't reach is yours to open to it:
+        # that request waits for you like any other.
+        auto = auto_approved(by) and (sp["space"] == space_of(by)[0] or sp["space"] in reach(by))
     log("spawn asked", sp["id"], sp["requester"]["name"], folder)
     if auto:
         decide_spawn(sp["id"], True, "auto-approve")
@@ -6301,8 +6309,13 @@ def herdr_copy_mod(app_home, base, mod, patches, path):
         return
     patched, missing = herdr_mod.patch(src, path, patches)
     if patched is None:
-        if not made:  # no copy to show: the layouts show herdr's own
-            herdr_point_layouts(app_home, base, base)
+        # No copy that fits this herdr: the layouts show herdr's own, not a copy of an older release's mod.
+        if made:
+            try:
+                os.remove(os.path.join(dst_dir, ".peerlink"))
+            except OSError:
+                pass
+        herdr_point_layouts(app_home, base, base)
         if herdr_nest_warned.get(base) != stamp:
             herdr_nest_warned[base] = stamp
             log(f"herdr nest: the herdr app's {base} mod changed and peerlink's patch no longer fits ({missing}); it stays flat")
