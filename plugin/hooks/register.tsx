@@ -1726,7 +1726,7 @@ export const register: Register = (on, options) => {
               'Peer agent name or id; "space:<name>" for that space\'s lead (or "space" for your own); or "user" for your user (it waits in their Inbox). Leave it out when replying, the reply goes back to the sender',
           },
           text: { type: 'string', description: 'The message: what you need and why, briefly' },
-          expects_reply: { type: 'boolean', description: 'True if you need an answer' },
+          expects_reply: { type: 'boolean', description: 'True if you need an answer. It also starts a turn at once for an idle agent, while a plain message from anyone but its lead waits for its next turn: set it for anything time-boxed' },
           reply_to: { type: 'string', description: 'Id of the peer message you are answering; the reply goes to its sender' },
           kind: {
             type: 'string',

@@ -818,3 +818,58 @@ class FolderNameTest(unittest.TestCase):
         with unittest.mock.patch.object(peerlinkd.os, "path", ntpath):
             self.assertEqual([peerlinkd.folder_name(c) for c in ("C:\\Users\\me\\api\\", "C:\\Users\\me\\api", "C:/x/infra/")], ["api", "api", "infra"])
         self.assertEqual(peerlinkd.folder_name("/Users/me/web/"), "web")
+
+
+class BossWakeTest(unittest.TestCase):
+    """Under wake_for "needed", a plain message from the agent's lead or the agent that started it starts a turn; a
+    peer's plain message still waits for the next one."""
+
+    NAMES = ("lead", "boss", "worker", "peer")
+
+    def setUp(self):
+        d = peerlinkd
+        d.load_config()
+        d.load_discord()
+        kept = (json.loads(json.dumps(d.config)), dict(d.spawns), list(d.messages))
+        def restore():
+            d.config.clear(), d.config.update(kept[0])
+            d.spawns.clear(), d.spawns.update(kept[1])
+            d.messages[:] = kept[2]
+            d.inboxes.clear()
+            for n in self.NAMES:
+                d.sessions.pop("s-" + n, None)
+        self.addCleanup(restore)
+        d.config.update({"rate_limit_per_min": 100, "wake_for": "needed",
+                         "agent_spaces": {"a-lead": "acme", "a-worker": "acme", "a-peer": "acme", "a-boss": "acme"},
+                         "space_leads": {"acme": {"cwd": "/x/lead", "agent": "a-lead", "how": "set"}}})
+        now = time.time()
+        for n in self.NAMES:
+            d.sessions["s-" + n] = {"id": "s-" + n, "agent": "a-" + n, "name": n, "cwd": "/x/" + n, "last_seen": now}
+        d.spawns.clear()
+        d.spawns["s1"] = {"id": "s1", "worker": True, "status": "started", "agent_id": "s-worker", "dir": "/x/worker",
+                          "created": now, "requester": {"id": "s-boss", "agent": "a-boss", "name": "boss", "cwd": "/x/boss"}}
+        d.messages.clear()
+        d.inboxes.clear()
+
+    def wakes(self, frm, **body):
+        status, out = peerlinkd.send({"from": "s-" + frm, "to": "worker", "text": "Run the checks now.", **body})
+        self.assertEqual(status, 200, out)
+        return peerlinkd.inboxes["s-worker"][-1]["wake"]
+
+    def test_the_lead_and_the_agent_that_started_it_wake_it(self):
+        self.assertTrue(self.wakes("lead"))
+        self.assertTrue(self.wakes("boss"))
+
+    def test_a_peers_plain_message_still_waits(self):
+        self.assertFalse(self.wakes("peer"))
+        self.assertTrue(self.wakes("peer", expects_reply=True))  # a question from anyone still wakes it
+
+    def test_the_agent_that_started_it_still_wakes_it_after_a_clear(self):
+        d = peerlinkd
+        d.sessions["s-boss2"] = {**d.sessions.pop("s-boss"), "id": "s-boss2"}  # /clear: a new session, same agent
+        self.addCleanup(d.sessions.pop, "s-boss2", None)
+        self.assertTrue(self.wakes("boss2"))
+
+    def test_wake_for_all_is_unchanged(self):
+        peerlinkd.config["wake_for"] = "all"
+        self.assertTrue(self.wakes("peer"))

@@ -3968,7 +3968,9 @@ def send(body):
             msg["text"] += f"\n\n(peerlink: this thread reached its {limit}-reply limit with this answer, so it can't be answered. If more is needed, tell your user.)"
         # Worth starting a turn for: a question, a task, or the answer to a question this agent asked. An FYI, or a
         # reply to a reply, waits for the agent's next turn (wake_for "all" wakes for everything, as before 0.8.11).
-        msg["wake"] = config.get("wake_for", "needed") == "all" or msg["expects_reply"] or bool(parent and parent.get("expects_reply"))
+        # A plain message from the agent's lead or the agent that started it is a directive, so it wakes too.
+        msg["wake"] = (config.get("wake_for", "needed") == "all" or msg["expects_reply"] or bool(parent and parent.get("expects_reply"))
+                       or is_boss(sender_rec, target))
         next_msg[0] += 1
         if kind == "task":
             if not parent_task and sender_rec:
@@ -5646,6 +5648,21 @@ def worker_spawn(rec):
     return max(theirs, key=lambda sp: sp.get("created", 0)) if theirs else None
 
 
+def is_boss(sender_rec, target):
+    """Whether the sender leads the target's space or started the target as a worker: its plain messages are
+    directives, so they start a turn even under wake_for "needed". Matched by agent, so it holds across /clear."""
+    if not sender_rec or not target:
+        return False
+    def same(rec_id, agent=""):
+        agent = agent or (sessions.get(rec_id) or {}).get("agent")
+        return rec_id == sender_rec["id"] or bool(sender_rec.get("agent") and agent == sender_rec["agent"])
+    lead = lead_rec(space_of(target)[0])
+    if lead and lead["id"] != target["id"] and same(lead["id"]):
+        return True
+    req = (worker_spawn(target) or {}).get("requester") or {}
+    return bool(req.get("id")) and same(req["id"], req.get("agent", ""))  # spawns before 0.9.112 have no agent
+
+
 def worker_live(sp, now):
     """Whether a started worker takes a slot: its agent runs, or it started lately and hasn't registered yet."""
     aid = spawn_agent(sp)
@@ -5852,7 +5869,7 @@ def request_spawn(body):
             role = purpose[:ROLE_MAX]  # not the folder's role: that one is the running agent's
         sp = {"id": f"s{n}", "dir": folder, "purpose": purpose[:1000], "prompt": prompt[:8000], "name": name, "role": role,
               "space": clean_space(body.get("space") or "") or space_of(by)[0],
-              "requester": {"id": by["id"], "name": display_name(by), "cwd": by.get("cwd", "")},
+              "requester": {"id": by["id"], "agent": by.get("agent") or "", "name": display_name(by), "cwd": by.get("cwd", "")},
               "status": "pending", "created": time.time(), "updated": time.time(), "note": ""}
         if worker:
             sp["worker"] = True
