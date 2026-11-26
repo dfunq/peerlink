@@ -5768,6 +5768,11 @@ def claude_trusts(path):
         p = up
 
 
+def claude_config_in(path):
+    """Whether a folder holds Claude Code settings, hooks or MCP servers of its own, which trusting it would run."""
+    return any(os.path.exists(os.path.join(path, n)) for n in (".claude", ".mcp.json", ".claude.json", "CLAUDE.local.md"))
+
+
 def trust_folder(path):
     """Mark a folder trusted for Claude Code, as answering its "trust this folder" question would, so an agent
     started there with nobody watching doesn't stop at it. Only when no folder above it is trusted already, and never
@@ -6754,9 +6759,10 @@ def start_spawn(sp, via):
             return
     sid = sp["id"]
     why = make_worktree(sp)
-    if not why:
-        # Approved means its folder may be trusted: a new one would otherwise stop at Claude Code's trust question
-        # with nobody watching, and never join.
+    if not why and (sp.get("worktree") or not claude_config_in(sp["dir"])):
+        # A folder Claude Code doesn't trust stops the new agent at its trust question with nobody watching, so it
+        # never joins. Trusted for it: a worktree peerlink made, or a folder with no Claude settings, hooks or MCP
+        # servers of its own (trusting one that has them would run them with nobody having looked).
         trust_folder(sp["dir"])
     if why:
         with lock:

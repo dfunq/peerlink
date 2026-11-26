@@ -118,6 +118,12 @@ class HiringTest(unittest.TestCase):
         # A folder Claude Code hasn't been told to trust stops the new agent at a question nobody is there to answer.
         sp = self.hire()
         self.assertEqual(self.trusted, [d.spawns[sp]["dir"]])
+        # Never one with settings, hooks or MCP servers of its own: trusting it would run them unseen.
+        for i, name in ((1, ".mcp.json"), (2, ".claude")):
+            path = os.path.join(self.dirs[i], name)
+            os.mkdir(path) if name == ".claude" else open(path, "w").close()
+            self.hire(i)
+        self.assertEqual(self.trusted, [d.spawns[sp]["dir"]])
 
     def test_trusting_never_covers_the_home_folder(self):
         home = tempfile.mkdtemp(prefix="home-")
