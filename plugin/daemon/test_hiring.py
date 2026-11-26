@@ -87,6 +87,21 @@ class HiringTest(unittest.TestCase):
         self.assertEqual(d.client_config(sid)["hired_by"], "lead")
         self.assertEqual(d.client_config("s-lead")["hired_by"], "")
 
+    def test_a_started_worker_that_never_joins_is_reported_once(self):
+        sp = self.hire()
+        d.reap()
+        self.assertFalse([t for t in self.told("lead") if "hasn't joined" in t])
+        d.spawns[sp]["updated"] -= d.SPAWN_LATE_S + 5
+        d.reap()
+        d.reap()
+        self.assertEqual(len([t for t in self.told("lead") if f"({sp})" in t and "hasn't joined" in t]), 1)
+        # One whose agent joined in time is never reported.
+        other = self.hire(1)
+        self.register(other, "w1")
+        d.spawns[other]["updated"] -= d.SPAWN_LATE_S + 5
+        d.reap()
+        self.assertFalse([t for t in self.told("lead") if f"({other})" in t])
+
     def test_past_the_cap_a_hire_queues_and_starts_when_a_worker_is_gone(self):
         d.config["max_live_spawns"] = 1
         first = self.hire(0)

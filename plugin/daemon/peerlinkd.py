@@ -228,7 +228,7 @@ DEFAULT_CONFIG = {
     "herdr_tab_names": {},  # herdr tab id -> the name herdr sync last left it showing: a tab renamed since renames its agent
     "herdr_join_never": "",  # spaces a tab you open in herdr never joins on its own, comma separated (a space others nest in never does either); agents can add to it, only the web UI removes
     "rules_lead": "",  # the one agent, by name, that may add, change and remove any standing rule, each change on your Yes in its own terminal; set only from the web UI
-    "herdr_mods_source": "",  # a folder (a clone of your private mods repo) that Install herdr mods copies from; set only from the web UI
+    "herdr_mods_source": "",  # a folder (a clone of your mods repo) that Install herdr mods copies from; set only from the web UI
     "start_at_login": False,  # the daemon starts when you log in (a LaunchAgent, or a Run value on Windows); set only from the web UI
     "resume_after_reboot": True,  # after a reboot, ask you whether to resume the agents that were running; set only from the web UI
     "use_herdr": True,  # start agents in herdr's terminals when herdr (hc) is installed; off, or without herdr, tmux or Terminal as before
@@ -5530,6 +5530,7 @@ def when_wait(s):
 # Starting an agent: an agent asks, you approve (web UI or Discord, never an agent or a bot), and only then
 # does the daemon start Claude Code in that folder, in tmux when it's there, else a Terminal window.
 SPAWN_TTL_S = 24 * 3600
+SPAWN_LATE_S = 180  # a started agent that hasn't joined by then is worth a look: whoever asked is told once
 
 
 def load_spawns():
@@ -7610,6 +7611,18 @@ def reap():
                 sp["reminded"] = remind(sp)
             else:
                 continue
+            save_spawns()
+        late = [x for x in spawns.values() if x["status"] == "started" and not x.get("late_told") and not spawn_agent(x)
+                and SPAWN_LATE_S < now - x["updated"] < SPAWN_TTL_S]
+        for sp in late:
+            # Started, and no agent has joined from it: say so once, while whoever asked can still look at its terminal.
+            sp["late_told"] = now
+            where = f" (hc attach {sp['hc']})" if sp.get("hc") else f" (tmux attach -t {sp['tmux']})" if sp.get("tmux") else ""
+            log("spawn", sp["id"], "started", int(now - sp["updated"]), "s ago and no agent has joined from it" + where)
+            spawn_told(sp, f"The agent you asked for ({sp['id']}) was started {int((now - sp['updated']) / 60)} minutes ago and hasn't "
+                           f"joined peerlink yet. It may be waiting at a prompt in its terminal{where}: ask your user to look "
+                           "before you ask for another.")
+        if late:
             save_spawns()
         for c in [x for x in schedules.values() if x["status"] == "pending"]:
             if now - c["created"] > SPAWN_TTL_S:
