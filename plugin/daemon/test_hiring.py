@@ -203,7 +203,7 @@ class HiringTest(unittest.TestCase):
         d.sessions[sid].update(busy=False, busy_since=time.time() - s, last_msg_in=time.time() - s)
 
     def nudges(self):
-        return [t for t in self.told("lead") if "has been idle 15m: retire it or give it work." in t]
+        return [t for t in self.told("lead") if "has been idle 15m: retire it, give it work, or message it if it's waiting." in t]
 
     def test_an_idle_worker_s_lead_is_nudged_once_at_15m(self):
         sid = self.register(self.hire(), "w0")
@@ -213,7 +213,7 @@ class HiringTest(unittest.TestCase):
         self.idle_for(sid, d.IDLE_NUDGE_S + 5)
         d.reap()
         d.reap()
-        self.assertEqual(self.nudges(), ["w0 has been idle 15m: retire it or give it work."])
+        self.assertEqual(self.nudges(), ["w0 has been idle 15m: retire it, give it work, or message it if it's waiting."])
         self.assertTrue(d.inboxes["s-lead"][-1].get("wake"))
         self.assertFalse(d.sessions[sid].get("terminate"))
 

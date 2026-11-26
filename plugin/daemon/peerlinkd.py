@@ -7460,7 +7460,7 @@ def sweep_idle_workers(now):
             rec["idle_nudged"] = since
             who = display_name(rec)
             log("worker", who, "idle", int(idle), "s: lead nudged")
-            tell_hirer(sp, f"{who} has been idle {idle_text(IDLE_NUDGE_S)}: retire it or give it work.", wake=True)
+            tell_hirer(sp, f"{who} has been idle {idle_text(IDLE_NUDGE_S)}: retire it, give it work, or message it if it's waiting.", wake=True)
     return out
 
 
