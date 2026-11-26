@@ -55,7 +55,7 @@ TOOLS = [
             "properties": {
                 "to": {"type": "string", "description": "Peer agent name or id, as list_peers shows it. Leave it out when replying: the reply goes to the sender"},
                 "text": {"type": "string", "description": "The message: what you need and why, briefly"},
-                "expects_reply": {"type": "boolean", "description": "True if you need an answer"},
+                "expects_reply": {"type": "boolean", "description": "True if you need an answer. It also starts a turn at once for an idle agent, while a plain message from anyone but its lead waits for its next turn: set it for anything time-boxed"},
                 "reply_to": {"type": "string", "description": "Id of a message you received or sent, which you are answering"},
             },
             "required": ["text"],
