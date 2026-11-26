@@ -29,7 +29,7 @@ def parse_cron(expr):
     if 7 in fields[4]:
         fields[4] = (fields[4] - {7}) | {0}
     # As cron reads it: with both day fields restricted, a day matching either runs.
-    fields.append((parts[2] == "*", parts[4] == "*"))
+    fields.append((parts[2].startswith("*"), parts[4].startswith("*")))
     return fields
 
 
@@ -50,5 +50,10 @@ def cron_next(expr, after):
         elif t.minute not in minute:
             t += dt.timedelta(minutes=1)
         else:
-            return t.timestamp()
+            # When the clocks go back an hour comes twice: take the first reading of it that's still ahead.
+            for fold in (0, 1):
+                at = t.replace(fold=fold).timestamp()
+                if at > after:
+                    return at
+            t += dt.timedelta(minutes=1)
     raise ValueError(f"{expr!r} never runs")

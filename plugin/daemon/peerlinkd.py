@@ -92,6 +92,7 @@ PID_PATH = os.path.join(HOME, "daemon.pid")
 NAME_PID_PATH = os.path.join(HOME, "local-name.pid")
 LOG_PATH = os.path.join(HOME, "daemon.log")
 MESSAGES_PATH = os.path.join(HOME, "messages.jsonl")
+COUNTERS_PATH = os.path.join(HOME, "counters.json")  # the next message and task numbers, kept when Start clean empties their files
 ISSUES_PATH = os.path.join(HOME, "issues.jsonl")
 TASKS_PATH = os.path.join(HOME, "tasks.json")
 RULES_PATH = os.path.join(HOME, "rules.json")
@@ -228,7 +229,7 @@ DEFAULT_CONFIG = {
     "herdr_tab_names": {},  # herdr tab id -> the name herdr sync last left it showing: a tab renamed since renames its agent
     "herdr_join_never": "",  # spaces a tab you open in herdr never joins on its own, comma separated (a space others nest in never does either); agents can add to it, only the web UI removes
     "rules_lead": "",  # the one agent, by name, that may add, change and remove any standing rule, each change on your Yes in its own terminal; set only from the web UI
-    "herdr_mods_source": "",  # a folder (a clone of your private mods repo) that Install herdr mods copies from; set only from the web UI
+    "herdr_mods_source": "",  # a folder (a clone of your mods repo) that Install herdr mods copies from; set only from the web UI
     "start_at_login": False,  # the daemon starts when you log in (a LaunchAgent, or a Run value on Windows); set only from the web UI
     "resume_after_reboot": True,  # after a reboot, ask you whether to resume the agents that were running; set only from the web UI
     "use_herdr": True,  # start agents in herdr's terminals when herdr (hc) is installed; off, or without herdr, tmux or Terminal as before
@@ -545,7 +546,7 @@ def redeem(token):
             used_nonces.pop(n)
         if exp < now or nonce in used_nonces:
             return None
-        if not hmac.compare_digest(sign(f"{nonce}.{exp}", ADMIN_SECRET), sig):
+        if not hmac.compare_digest(sign(f"{nonce}.{exp}", ADMIN_SECRET).encode(), sig.encode()):
             return None
         used_nonces[nonce] = exp
         cookie = secrets.token_urlsafe(32)
@@ -714,7 +715,7 @@ def config_value(name, value):
     if isinstance(want, int):
         try:
             value = int(float(value))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return None, f"{name} is a number"
         floor = 1 if name in CONFIG_MIN_1 else 0
         return (value, None) if value >= floor else (None, f"{name} is at least {floor}")
@@ -1531,6 +1532,7 @@ def owned_task_ids(rec):
 
 def public_peer(rec):
     space, source, where = space_of(rec)
+    owned = owned_task_ids(rec)  # one pass over the tasks, not three: this runs for every agent on every snapshot
     return {
         "id": rec["id"],
         "agent": rec.get("agent", ""),  # the same through every session this agent has
@@ -1552,10 +1554,10 @@ def public_peer(rec):
         "space_parent": space_parent(space),
         # Without ages, which change every second and would redraw the page each poll.
         "threads": {k: [{f: t[f] for f in ("id", "with", "text")} for t in v] for k, v in open_threads(rec, limit=5).items()},
-        "open_tasks": len(owned_task_ids(rec)),
-        "task_ids": owned_task_ids(rec),
+        "open_tasks": len(owned),
+        "task_ids": owned,
         # When each was handed over and last moved, so a peer list shows a task nobody has touched in days.
-        "task_times": {i: [int(tasks[i]["created"]), int(tasks[i]["updated"])] for i in owned_task_ids(rec)[:20]},
+        "task_times": {i: [int(tasks[i]["created"]), int(tasks[i]["updated"])] for i in owned[:20]},
         "reach": sorted(reach(rec)),
         "also": also_in(rec),
         "links": sorted(agent_label(a) for a in links_of(rec)),
@@ -1747,9 +1749,27 @@ def append_log(entry):
         pass
 
 
+ASK_KEPT_S = 7 * 86400
+
+
+def recent_messages(msgs, now=None):
+    """What stays in memory of a list of messages, oldest first: the newest 500, and before them any question to you
+    still open (its default, its Inbox row and its buttons are found here), for a week."""
+    now = now or time.time()
+
+    def open_ask(m):
+        if now - m.get("ts", 0) > ASK_KEPT_S or m.get("task") or not m.get("expects_reply"):
+            return False
+        if not (m.get("to") == "user" or str(m.get("to", "")).startswith("discord:")) or (m.get("default_at") and m.get("default_done")):
+            return False
+        return not ask_settled(m, msgs)  # an answered one is found by its answer, which is still in msgs
+    return [m for m in msgs[:-500] if open_ask(m)] + msgs[-500:]
+
+
 def record(msg):
     messages.append(msg)
-    del messages[:-500]
+    if len(messages) > 500:
+        messages[:] = recent_messages(messages)
     append_log(msg)
 
 
@@ -1863,8 +1883,18 @@ def conversation(a, b, limit=500):
     return sorted(out, key=lambda m: m.get("ts", 0))[-limit:]
 
 
+def kept_counter(name):
+    """The next number Start clean left for messages ("msg") or tasks ("task"): an id is never handed out twice, since
+    running agents remember the ids they were given and tasks and approvals name messages by id."""
+    try:
+        return max(1, int((read_json(COUNTERS_PATH, {}) or {}).get(name) or 1))
+    except (TypeError, ValueError, AttributeError):
+        return 1
+
+
 def load_messages():
     """Replay the log so ids keep counting and undelivered messages survive a restart."""
+    next_msg[0] = max(next_msg[0], kept_counter("msg"))
     try:
         with open(MESSAGES_PATH) as f:
             lines = f.readlines()[-5000:]
@@ -1885,7 +1915,7 @@ def load_messages():
             next_msg[0] = max(next_msg[0], int(m["id"][1:]) + 1)
         except ValueError:
             pass
-    messages.extend(list(by_id.values())[-500:])
+    messages.extend(recent_messages(list(by_id.values())))
     for m in messages:
         # Handed to an agent that acks, and never acked: the daemon stopped before the agent said it had it. It's
         # queued again; the plugin skips one it already has, so a message is never lost and never shown twice.
@@ -2622,7 +2652,8 @@ def judge_approval(d, claim, entry):
 
 def approval_fyi(rec, target):
     """Tells you about an approval a client gave for you, with Undo + revoke, where that agent asks you for approvals."""
-    channel = approval_channel(target or {"id": "", "cwd": rec.get("to_cwd", ""), "name": rec.get("to_name", "")}) if chat_ready() else ""
+    with lock:
+        channel = approval_channel(target or {"id": "", "cwd": rec.get("to_cwd", ""), "name": rec.get("to_name", "")}) if chat_ready() else ""
     if not channel:
         log("agents", "approval", rec["id"], "has no channel to tell you in; it shows on the Agents channel page")
         return
@@ -2678,8 +2709,9 @@ def approval_misused(rec, message, by):
     if by is None:
         return ""  # your browser or the CLI, looking it up: no agent is about to act on it
     holder = approval_holder(rec)
-    me, them = sessions.get(by), sessions.get(holder)
-    if by == holder or (me and them and me.get("agent") and me.get("agent") == them.get("agent")):
+    # By agent, which outlives a session: after /clear the message's session is gone, and its agent is still the holder.
+    mine, theirs = (sessions.get(by) or {}).get("agent") or agent_of.get(by), (sessions.get(holder) or {}).get("agent") or agent_of.get(holder)
+    if by == holder or (mine and mine == theirs):
         return ""
     return f"{rec['id']} was given to {rec.get('to_name') or 'another agent'}, not to you"
 
@@ -2937,7 +2969,8 @@ def save_discord_files(d):
               else os.path.join(HOME, "files", chatlink.platform(cid), re.sub(r"[^\w.-]", "_", f"{cid.split(':', 1)[1]}-{d['message_id']}")))
     lines = []
     for f in d["files"][:10]:
-        name = os.path.basename(f["filename"]) or "file"
+        # A name any system takes: no path, no characters Windows refuses, never "." or "..".
+        name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", os.path.basename(str(f.get("filename") or ""))).strip(". ") or "file"
         try:
             data = chat_download(d["channel_id"], f, limit)
         except (OSError, ChatError) as err:
@@ -2946,10 +2979,18 @@ def save_discord_files(d):
         if data is None:
             lines.append(f"- {name}: over the {discord.get('max_file_mb', 10)} MB limit, not saved")
             continue
-        os.makedirs(folder, exist_ok=True)
-        path = os.path.join(folder, name)
-        with open(path, "wb") as out:
-            out.write(data)
+        try:
+            os.makedirs(folder, exist_ok=True)
+            stem, ext = os.path.splitext(name)
+            path, n = os.path.join(folder, name), 1
+            while os.path.exists(path):  # two pasted screenshots are both image.png: the second doesn't replace the first
+                n += 1
+                path = os.path.join(folder, f"{stem}-{n}{ext}")
+            with open(path, "wb") as out:
+                out.write(data)
+        except OSError as err:  # a full disk loses the file, not the message it came with
+            lines.append(f"- {name}: couldn't save it ({err})")
+            continue
         lines.append(f"- {path} ({len(data):,} bytes)")
     return f"\n\nAttached on {chatlink.name(d['channel_id'])}:\n" + "\n".join(lines)
 
@@ -3018,14 +3059,15 @@ def on_slash(cmd):
                 + (f": {oneline(r.get('summary') or '')[:90]}" if r.get("summary") else "") for r in live_agents()]
         return "\n".join(rows) or "No agents are running.", None
     if sub == "spaces":
-        leads, by_space = leads_view(), {}
-        for r in live_agents():
-            by_space.setdefault(space_of(r)[0], []).append(display_name(r))
         lines = []
-        for space in sorted(set(by_space) | set(leads), key=lambda x: (x == DEFAULT_SPACE, x)):
-            lead, parent = leads.get(space) or {}, space_parent(space)
-            head = f"**{'unassigned' if space == DEFAULT_SPACE else space}**" + (f" (in {parent})" if parent else "") + (f" · lead {lead['name']}" if lead else "")
-            lines.append(f"{head}: {', '.join(by_space.get(space, [])) or 'nobody running'}")
+        with lock:  # on a chat bot's thread, while agents come and go
+            leads, by_space = leads_view(), {}
+            for r in live_agents():
+                by_space.setdefault(space_of(r)[0], []).append(display_name(r))
+            for space in sorted(set(by_space) | set(leads), key=lambda x: (x == DEFAULT_SPACE, x)):
+                lead, parent = leads.get(space) or {}, space_parent(space)
+                head = f"**{'unassigned' if space == DEFAULT_SPACE else space}**" + (f" (in {parent})" if parent else "") + (f" · lead {lead['name']}" if lead else "")
+                lines.append(f"{head}: {', '.join(by_space.get(space, [])) or 'nobody running'}")
         return "\n".join(lines) or "No spaces yet.", None
     if sub == "schedules":
         with lock:
@@ -3230,14 +3272,15 @@ def set_reaction(msg, emoji):
     """One message's reaction. Several messages can share one post (a chat message every receiver got its copy of):
     the post shows each one's, and a reaction comes off only when none of them still has it."""
     d = msg.get("discord")
-    if not d or d.get("quiet") or reactions.get(msg["id"]) == emoji:
-        return
-    old = reactions.get(msg["id"])
-    reactions[msg["id"]] = emoji
-    post = (d["channel_id"], d["message_id"])
-    reaction_posts[msg["id"]] = post
-    shown = {reactions.get(i) for i, p in reaction_posts.items() if p == post and i != msg["id"]}
-    reaction_jobs.append((d["channel_id"], d["message_id"], None if old in shown else old, None if emoji in shown else emoji))
+    with lock:  # called from the chat bots' threads as well as from requests
+        if not d or d.get("quiet") or reactions.get(msg["id"]) == emoji:
+            return
+        old = reactions.get(msg["id"])
+        reactions[msg["id"]] = emoji
+        post = (d["channel_id"], d["message_id"])
+        reaction_posts[msg["id"]] = post
+        shown = {reactions.get(i) for i, p in reaction_posts.items() if p == post and i != msg["id"]}
+        reaction_jobs.append((d["channel_id"], d["message_id"], None if old in shown else old, None if emoji in shown else emoji))
     reaction_wake.set()
 
 
@@ -3688,6 +3731,7 @@ def inbox_command(d):
     kind, iid = listed[1][n - 1]
     verb, _, note = rest.partition(":")
     want = INBOX_VERBS.get(verb.strip().lower())
+    action = "answer sent"
     if want and want[0] in (None, kind):
         action = want[1] if want[1] != "dismiss" else ("dismissed" if kind == "feedback" else "dismiss")
         if kind == "task" and action == "dismiss":
@@ -3699,7 +3743,7 @@ def inbox_command(d):
         code, out = inbox_act({"kind": kind, "id": iid, "action": "reply", "text": rest}, discord_from=d)
     else:
         return False  # no verb it takes: a message for the agent that happens to start with a number
-    say(f"{iid}: {out.get('error')}" if code != 200 else f"{iid}: {action if want else 'answer sent'}.")
+    say(f"{iid}: {out.get('error')}" if code != 200 else f"{iid}: {action}.")
     return True
 
 
@@ -3764,7 +3808,7 @@ def send(body):
             recent = [t for t in sent_times.get(sender, []) if now - t < 60]
             if len(recent) >= config["rate_limit_per_min"]:
                 return 429, {"error": f"rate limit: {config['rate_limit_per_min']} messages/min"}
-            sent_times[sender] = recent
+            sent_times[sender] = recent + [now]  # every send counts, to the user and to chat too, not only agent to agent
 
     options = [str(o) for o in body.get("options") or []][:25]
     files = [str(f) for f in body.get("files") or []][:10]
@@ -3933,8 +3977,6 @@ def send(body):
                 parent_task = mine.pop() if len(mine) == 1 else ""
             new_task(msg, {"id": sender, "name": msg["from_name"], "cwd": msg["from_cwd"]}, parent_task)
         inboxes.setdefault(target["id"], []).append(msg)
-        if sender in sent_times:
-            sent_times[sender].append(now)
         record(msg)
     log("msg", msg["id"], msg["from_name"], "->", msg["to_name"])
     out = {"id": msg["id"], "to": msg["to_name"], "status": "queued", "task": msg.get("task")}
@@ -4010,7 +4052,7 @@ def report_issue(body):
             "type": kind,
             "status": "new",
             "note": "",
-            "ts": body.get("ts") or time.time(),
+            "ts": issue_ts(body.get("ts")),
             "from": body.get("from", ""),
             "from_name": body.get("from_name") or (display_name(sender) if sender else ""),
             "space": space_of(sender)[0] if sender else body.get("space", ""),
@@ -4081,9 +4123,11 @@ def load_feedback():
             entry = json.loads(line)
         except ValueError:
             continue
+        if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+            continue
         if "text" in entry:
-            feedback[entry["id"]] = {"type": "bug", "status": "new", "note": "", **entry}
-        elif entry.get("id") in feedback:
+            feedback[entry["id"]] = {"type": "bug", "status": "new", "note": "", **entry, "ts": issue_ts(entry.get("ts"))}
+        elif entry["id"] in feedback:
             feedback[entry["id"]].update(entry)
 
 
@@ -4137,6 +4181,14 @@ def append_log_to(path, entry):
         pass
 
 
+def issue_ts(value):
+    """When a report was written: its own time when that's a number, else now. Sorting and ages need a number."""
+    try:
+        return float(value) or time.time()
+    except (TypeError, ValueError):
+        return time.time()
+
+
 def file_pending_issues():
     try:
         names = sorted(os.listdir(PENDING_ISSUES_DIR))
@@ -4149,8 +4201,13 @@ def file_pending_issues():
                 body = json.load(f)
             report_issue({**body, "context": f"(written while the daemon was down) {body.get('context') or ''}".strip()})
             os.remove(path)
-        except (OSError, ValueError) as err:
+        except (OSError, ValueError, TypeError, AttributeError, KeyError) as err:
+            # One that can't be read is set aside, so it can't stop this start or the next.
             log("pending issue", name, "unreadable:", err)
+            try:
+                os.replace(path, path + ".bad")
+            except OSError:
+                pass
 
 
 REMOTE_TRIES = 3
@@ -4162,6 +4219,8 @@ def forward(body, hops, spaces, parent=None, sender_rec=None):
     being answered. A send that fails is tried again, and the other machine drops a second copy of one that got there."""
     to = body["to"]
     name, _, host = to.partition("@")
+    if not name:
+        return 404, {"error": f"no live peer '{to}': name the agent before the @; call list_peers"}
     for fresh in (False, True):  # a peer that just started isn't in the cache yet
         for p in remote_peers(0 if fresh else REMOTE_CACHE_S):
             if (host and p["host"].lower() != host.lower()):
@@ -4169,7 +4228,8 @@ def forward(body, hops, spaces, parent=None, sender_rec=None):
             shared = peer_reach(p) & spaces if spaces is not None else None
             if spaces is not None and not shared:
                 continue
-            if name.lower() in (p["id"].lower(), p["name"].lower()) or p["id"].lower().startswith(name.lower()):
+            # An id may be shortened, to eight characters or more: a short hex-looking name must not match some id.
+            if name.lower() in (p["id"].lower(), p["name"].lower()) or (len(name) >= 8 and p["id"].lower().startswith(name.lower())):
                 return forward_to(p, body, hops, spaces, shared, parent, sender_rec)
     return 404, {"error": f"no live peer '{to}'; call list_peers"}
 
@@ -4567,20 +4627,26 @@ def windows_parents():
         return {}
 
 
+def posix_parents():
+    """Every process's parent, pid -> parent pid, from one ps."""
+    out = subprocess.run(["ps", "-axo", "pid=,ppid="], timeout=5, capture_output=True, text=True).stdout
+    pairs = (line.split() for line in out.splitlines())
+    return {int(p[0]): int(p[1]) for p in pairs if len(p) == 2 and p[0].isdigit() and p[1].isdigit()}
+
+
 def descends_from(pid, ancestor):
     """Whether process `pid` is `ancestor` or runs under it."""
     try:
         pid = int(pid or 0)
-        parents = windows_parents() if os.name == "nt" else None
+        if pid == ancestor:
+            return True
+        parents = windows_parents() if os.name == "nt" else posix_parents()  # one listing, not a ps per generation
         for _ in range(12):
             if pid == ancestor:
                 return True
             if pid <= 1:
                 return False
-            if parents is not None:
-                pid = parents.get(pid, 0)
-            else:
-                pid = int(subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)], timeout=5, capture_output=True, text=True).stdout.strip() or 0)
+            pid = parents.get(pid, 0)
     except (OSError, subprocess.SubprocessError, ValueError):
         pass
     return False
@@ -4890,9 +4956,13 @@ TASK_CLOSED = ("done", "failed", "cancelled")
 
 
 def load_tasks():
+    next_task[0] = max(next_task[0], kept_counter("task"))
     for t in read_json(TASKS_PATH, []) or []:
-        tasks[t["id"]] = t
-        next_task[0] = max(next_task[0], int(t["id"][1:]) + 1)
+        try:  # one damaged record is skipped, not the reason the daemon can't start
+            next_task[0] = max(next_task[0], int(t["id"][1:]) + 1)
+            tasks[t["id"]] = t
+        except (KeyError, TypeError, ValueError):
+            log("tasks: skipped a record with no usable id")
 
 
 def save_tasks():
@@ -4958,6 +5028,9 @@ def update_task(tid, body, web=False):
             owns = owns_task(by, t)
             asked = by["id"] == t["requester"].get("id") or (by.get("cwd") and by.get("cwd") == t["requester"].get("cwd"))
             allowed = ({"in_progress", "done", "failed"} if owns else set()) | ({"cancelled"} if asked else set())
+            if allowed and t["status"] in TASK_CLOSED:
+                # Closed is closed: an owner finishing a task its requester just cancelled must not turn it to done unheard.
+                return 409, {"error": f"{tid} is already {t['status']}: nothing was changed. Your user can reopen it in the web UI"}
             if status not in allowed:
                 if not allowed:
                     return 403, {"error": f"{tid} belongs to {t['owner']}; only its owner can update it (and whoever asked can cancel it)"}
@@ -5017,6 +5090,8 @@ def task_closed(t, web=False):
         if t["status"] == "cancelled" and t["owner_cwd"]:
             # The owner stops; whoever cancelled it already knows.
             task_message(t, t["owner_cwd"], f"Task {t['id']} was cancelled{' in the web UI' if web else ' by ' + req.get('name', 'whoever asked')}: stop work on it. {t['title']}")
+            if web and req.get("cwd") and req["cwd"] != t["owner_cwd"]:
+                task_message(t, req["cwd"], f"Task {t['id']} was cancelled by your user in the web UI: {t['title']}", reply_to=t["msg"], prefer=asker)
         elif d:
             posts.append((d["channel_id"], f"**{t['owner']}**: {line}", d["message_id"]))
             orig = next((m for m in messages if m["id"] == t["msg"]), None)
@@ -5479,12 +5554,12 @@ def ask_default(body, options):
     return default[:300], min(wait, 7 * 86400)
 
 
-def ask_settled(m):
+def ask_settled(m, among=None):
     """Whether you've dealt with a question: answered it, dismissed it, or written to its agent or channel since.
     Called with the lock held."""
     if m.get("handled") or m.get("inbox_done"):
         return True
-    for x in reversed(messages):
+    for x in reversed(messages if among is None else among):
         if x["ts"] < m["ts"]:
             break
         if x.get("reply_to") == m["id"]:
@@ -5530,6 +5605,7 @@ def when_wait(s):
 # Starting an agent: an agent asks, you approve (web UI or Discord, never an agent or a bot), and only then
 # does the daemon start Claude Code in that folder, in tmux when it's there, else a Terminal window.
 SPAWN_TTL_S = 24 * 3600
+SPAWN_LATE_S = 180  # a started agent that hasn't joined by then is worth a look: whoever asked is told once
 
 
 def load_spawns():
@@ -5789,7 +5865,9 @@ def request_spawn(body):
         spawns[sp["id"]] = sp
         save_spawns()
         channel = approval_channel(by)
-        auto = auto_approved(by)
+        # Auto-approve covers the spaces the asker can already message. A space it can't reach is yours to open to it:
+        # that request waits for you like any other.
+        auto = auto_approved(by) and (sp["space"] == space_of(by)[0] or sp["space"] in reach(by))
     log("spawn asked", sp["id"], sp["requester"]["name"], folder)
     if auto:
         decide_spawn(sp["id"], True, "auto-approve")
@@ -6231,8 +6309,13 @@ def herdr_copy_mod(app_home, base, mod, patches, path):
         return
     patched, missing = herdr_mod.patch(src, path, patches)
     if patched is None:
-        if not made:  # no copy to show: the layouts show herdr's own
-            herdr_point_layouts(app_home, base, base)
+        # No copy that fits this herdr: the layouts show herdr's own, not a copy of an older release's mod.
+        if made:
+            try:
+                os.remove(os.path.join(dst_dir, ".peerlink"))
+            except OSError:
+                pass
+        herdr_point_layouts(app_home, base, base)
         if herdr_nest_warned.get(base) != stamp:
             herdr_nest_warned[base] = stamp
             log(f"herdr nest: the herdr app's {base} mod changed and peerlink's patch no longer fits ({missing}); it stays flat")
@@ -6782,7 +6865,10 @@ def when_text(c):
     import datetime as dt
     if c.get("cron"):
         return f"cron {c['cron']}"
-    at = dt.datetime.fromtimestamp(c.get("at") or 0)
+    try:
+        at = dt.datetime.fromtimestamp(c.get("at") or 0)
+    except (ValueError, OverflowError, OSError):  # one saved with a time no calendar holds must not blank every page that lists it
+        return "once, at a time that can't be read"
     return f"once, {at:%a %b} {at.day} {at:%H:%M}"  # not %-d: Windows has no such format
 
 
@@ -6830,6 +6916,8 @@ def schedule_when(body, now):
     next_run = cron_next(cron, now) if cron else parse_at(at, now)
     if not cron and next_run <= now:
         raise ValueError("that time has passed")
+    if not cron and next_run > now + 5 * 366 * 86400:
+        raise ValueError("that time is more than five years off")
     return cron, None if cron else next_run, next_run
 
 
@@ -7375,7 +7463,8 @@ def hard_stop(sid, grace=60):
     except OSError:
         pass
     with lock:
-        sessions.pop(sid, None)
+        session_gone(sid)  # what it held and never acked goes back in its queue, for the next agent in its folder
+    save_running()
     log("terminate", sid, "process", pid, "ended")
 
 
@@ -7494,8 +7583,12 @@ def start_clean(parts):
         if "spaces" in parts or "agents" in parts:
             save_config()
             forget_spaces()
+        if "history" in parts or "tasks" in parts:
+            write_json(COUNTERS_PATH, {"msg": next_msg[0], "task": next_task[0]})
         if "history" in parts:
-            waiting = [m for m in messages if m.get("status") == "queued"]
+            # Still to be delivered: queued, or held for an agent that's stuck (the docstring's promise, and what
+            # kept_messages keeps).
+            waiting = [m for m in messages if m.get("status") in ("queued", "waiting")]
             cleared["history"] = len(messages) - len(waiting)
             messages[:] = waiting
             if os.path.exists(MESSAGES_PATH + ".1"):
@@ -7521,6 +7614,15 @@ def tidy():
             for sid in [k for k, v in agent_of.items() if v == aid]:
                 agent_of.pop(sid)
         save_agents()
+        # Settings kept per session: every /clear and every worker leaves an entry behind. Only a running session's,
+        # and the last session of an agent still known (where its role and nickname are read from), are ever read again.
+        used = set(sessions) | set(inboxes) | set(handed) | {a.get("sid") for a in agents.values()}
+        stale = [sid for sid in config["sessions"] if sid not in used]
+        for sid in stale:
+            config["sessions"].pop(sid)
+        if stale:
+            save_config()
+            log("tidy: dropped the settings of", len(stale), "sessions that are gone")
     with lock:
         prune_redelivered()
         dropped = {}
@@ -7551,8 +7653,14 @@ def tidy():
             rewrite_log(ISSUES_PATH, feedback.values())
             dropped["issues.jsonl"] = "rewritten"
         if too_big(TERMINATIONS_PATH, 1 << 20):
+            kept = []
             with open(TERMINATIONS_PATH) as f:
-                rewrite_log(TERMINATIONS_PATH, [json.loads(line) for line in f.readlines()[-1000:] if line.strip()])
+                for line in f.readlines()[-1000:]:
+                    try:  # a line cut short by a kill mid-write is dropped, not the reason tidy never finishes again
+                        kept.append(json.loads(line))
+                    except ValueError:
+                        continue
+            rewrite_log(TERMINATIONS_PATH, kept)
             dropped["terminations.jsonl"] = "rewritten"
         shown = {m["id"] for m in messages}
         for mid in [m for m in reactions if m not in shown]:
@@ -7560,15 +7668,21 @@ def tidy():
             reaction_posts.pop(mid, None)
     # The daemon's own output: started in the background, its stdout is daemon.log, which moves aside for a new one.
     try:
-        if too_big(LOG_PATH) and os.fstat(1).st_ino == os.stat(LOG_PATH).st_ino:
+        if too_big(LOG_PATH) and os.name == "nt":
+            # Windows won't rename a file that's open, and this one is the daemon's own output: copy it, then empty it.
+            shutil.copyfile(LOG_PATH, LOG_PATH + ".1")
+            sys.stdout.flush()
+            os.ftruncate(1, 0)
+            dropped["daemon.log"] = "rotated"
+        elif too_big(LOG_PATH) and os.fstat(1).st_ino == os.stat(LOG_PATH).st_ino:
             os.replace(LOG_PATH, LOG_PATH + ".1")
             out = os.open(LOG_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             os.dup2(out, 1)
             os.dup2(out, 2)
             os.close(out)
             dropped["daemon.log"] = "rotated"
-    except OSError:
-        pass
+    except OSError as err:
+        dropped["daemon.log"] = f"not rotated ({err})"
     try:
         for d in os.listdir(DISCORD_FILES):
             path = os.path.join(DISCORD_FILES, d)
@@ -7611,6 +7725,18 @@ def reap():
             else:
                 continue
             save_spawns()
+        late = [x for x in spawns.values() if x["status"] == "started" and not x.get("late_told") and not spawn_agent(x)
+                and SPAWN_LATE_S < now - x["updated"] < SPAWN_TTL_S]
+        for sp in late:
+            # Started, and no agent has joined from it: say so once, while whoever asked can still look at its terminal.
+            sp["late_told"] = now
+            where = f" (hc attach {sp['hc']})" if sp.get("hc") else f" (tmux attach -t {sp['tmux']})" if sp.get("tmux") else ""
+            log("spawn", sp["id"], "started", int(now - sp["updated"]), "s ago and no agent has joined from it" + where)
+            spawn_told(sp, f"The agent you asked for ({sp['id']}) was started {int((now - sp['updated']) / 60)} minutes ago and hasn't "
+                           f"joined peerlink yet. It may be waiting at a prompt in its terminal{where}: ask your user to look "
+                           "before you ask for another.")
+        if late:
+            save_spawns()
         for c in [x for x in schedules.values() if x["status"] == "pending"]:
             if now - c["created"] > SPAWN_TTL_S:
                 c["status"], c["updated"], c["next_run"] = "expired", now, None
@@ -7635,6 +7761,9 @@ def reap():
         starts = [fire_schedule(c, now) for c in due]
         # Messages to an agent that has gone for an hour are not coming back.
         for sid in [s for s in inboxes if s not in sessions]:
+            started = spawns.get(sid[6:]) if sid.startswith("spawn:") else None
+            if started and started["status"] == "started" and not spawn_agent(started) and now - started["updated"] < SPAWN_TTL_S:
+                continue  # a first prompt waits as long as its agent may still join: a trust or login prompt can take hours
             kept = [m for m in inboxes[sid] if now - m["ts"] < 3600]
             expire([m for m in inboxes[sid] if now - m["ts"] >= 3600])
             if kept:
@@ -7648,6 +7777,9 @@ def reap():
     if queued:
         start_queued()
     save_running(now)
+
+
+BODY_MAX = 32 << 20  # no request is near this: messages are capped at 20,000 characters, files go by path
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -7958,9 +8090,14 @@ class Handler(BaseHTTPRequestHandler):
             return
 
     def body(self):
-        n = int(self.headers.get("Content-Length") or 0)
-        if not n:
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = 0
+        if n <= 0:  # a negative length would read until the sender hangs up
             return {}
+        if n > BODY_MAX:
+            raise ValueError(f"request body over {BODY_MAX >> 20} MB")
         try:
             out = json.loads(self.rfile.read(n))
         except ValueError:
@@ -8050,8 +8187,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(*ask_then("Open the peerlink web UI in your browser?", "Open", lambda: open_url(mint_link(host=link_host()))))
 
         if rest == ["web", "logout"] and method == "POST":
+            everywhere = self.body().get("all")  # read before the lock: a slow sender must not hold every agent up
             with lock:
-                if self.body().get("all"):
+                if everywhere:
                     web_sessions.clear()
                 elif browser:
                     web_sessions.pop(browser, None)
@@ -8098,7 +8236,9 @@ class Handler(BaseHTTPRequestHandler):
 
         if rest == ["config"]:
             if method == "GET":
-                return self.reply(200, {**config, "default_guidance": default_guidance()})
+                with lock:  # serialised under the lock: its nested settings change as agents register
+                    out = json.dumps({**config, "default_guidance": default_guidance()})
+                return self.reply(200, out)
             if method in ("PUT", "POST"):
                 checked = {k: config_value(k, v) for k, v in self.body().items() if k in DEFAULT_CONFIG}
                 # Only you, in the browser: no agent lets itself start agents without asking.
@@ -8256,7 +8396,9 @@ class Handler(BaseHTTPRequestHandler):
                     previous = None
             log("agent", sid, rec.get("name"))
             save_running()
-            return self.reply(200, {"id": sid, "name": display_name(rec), "config": client_config(sid), "previous": previous})
+            with lock:  # client_config walks the sessions, which every other agent registering now is changing
+                out = {"id": sid, "name": display_name(rec), "config": client_config(sid), "previous": previous}
+            return self.reply(200, out)
 
         if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "heartbeat" and method == "POST":
             sid = rest[1]
@@ -8415,8 +8557,9 @@ class Handler(BaseHTTPRequestHandler):
             if browser and not self.key_ok():
                 code, out = cancel_schedule(rest[1])
             else:
+                asker = str(self.body().get("by") or "")
                 with lock:
-                    by = sessions.get(str(self.body().get("by") or ""))
+                    by = sessions.get(asker)
                 if by is None:
                     return self.reply(403, {"error": "unknown agent; register again"})
                 code, out = cancel_schedule(rest[1], by)
@@ -8969,10 +9112,8 @@ def cli_session_flag(args, field, value):
     hits = [p for p in peers if want in (p["name"].lower(), p["id"].lower())]
     if len(hits) != 1:
         sys.exit(f"peerlink: no single live agent named '{args[0]}'")
-    cfg = local_call("GET", "/api/config")
-    sessions_cfg = dict(cfg.get("sessions", {}))
-    sessions_cfg[hits[0]["id"]] = {**sessions_cfg.get(hits[0]["id"], {}), field: value}
-    local_call("PUT", "/api/config", {"sessions": sessions_cfg})
+    # This agent's setting alone: putting back every agent's settings would undo any change made in between.
+    local_call("POST", f"/api/sessions/{hits[0]['id']}/config", {field: value})
     print(f"{hits[0]['name']}: {field} = {value}")
 
 
@@ -9001,6 +9142,8 @@ def cli_stop(args):
     try:
         local_call("POST", "/api/shutdown", {})
         print("Asked on your screen: say Stop there. Agents start it again when they next need it.")
+    except urllib.error.HTTPError:
+        raise  # it's running and said no (a question is already on screen): the caller prints why
     except Exception:
         print("not running")
 
@@ -9195,4 +9338,14 @@ if __name__ == "__main__":
     if name in ("help", "-h", "--help") or name not in COMMANDS:
         cli_help()
         sys.exit(0 if name in ("help", "-h", "--help") else 2)
-    sys.exit(COMMANDS[name][0](argv[1:]) or 0)
+    try:
+        code = COMMANDS[name][0](argv[1:]) or 0
+    except urllib.error.HTTPError as err:  # the daemon said no: its reason, not a traceback
+        try:
+            why = json.loads(err.read() or b"{}").get("error")
+        except (ValueError, AttributeError, OSError):
+            why = ""
+        sys.exit(f"peerlink: {why or err.reason}")
+    except (urllib.error.URLError, ConnectionError) as err:
+        sys.exit(f"peerlink: couldn't reach the daemon ({getattr(err, 'reason', err)})")
+    sys.exit(code)

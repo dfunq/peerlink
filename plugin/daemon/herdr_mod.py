@@ -62,11 +62,14 @@ NEST_JS = LOAD_JS + r'''function peerlinkNest(out) {
 }
 '''
 
+# As a patch's "what to find": herdr's own import line, whatever it imports this release. It gains readTextFile and
+# the patch's code follows it.
+IMPORT = "import:herdr"
+IMPORT_RE = re.compile(r'^import \{([^}]*)\} from "herdr";[ \t]*$', re.M)
+
 # (what to find in herdr's spaces mod, what it becomes). Each must be found exactly once, or the copy isn't made.
 PATCHES = [
-    ('import { spaces, machines, panes, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window, layout } from "herdr";',
-     'import { spaces, machines, panes, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window, layout, readTextFile } from "herdr";'
-     + NEST_JS),
+    (IMPORT, NEST_JS),
     ("    const out = [];\n    const placed = new Set();", "    let out = [];\n    const placed = new Set();"),
     ("    // Simulate the batch so later indexes include earlier moves.", "    out = peerlinkNest(out);\n    // Simulate the batch so later indexes include earlier moves."),
     ("  row({ w, i, g, tree }, t) {", "  row({ w, i, g, tree, lines }, t) {"),
@@ -188,9 +191,7 @@ function peerlinkParent(k) {
 '''
 
 AGENTS_PATCHES = [
-    ('import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout } from "herdr";',
-     'import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout, readTextFile } from "herdr";'
-     + AGENTS_JS),
+    (IMPORT, AGENTS_JS),
     ("  tree(all, addr, lead = []) {\n", "  tree(all, addr, lead = []) {\n    if (lead.length > 6) return [];\n"),
     ('    const kids = all.filter((k) => k.parent === addr && k.state === "live");',
      '    const kids = all.filter((k) => peerlinkParent(k) === addr && k.state === "live");'),
@@ -258,6 +259,14 @@ def patch(src, tree_path, patches=PATCHES):
     """herdr's mod made into peerlink's, reading the tree at tree_path: (patched source, None), or (None, the first
     piece it couldn't find)."""
     for old, new in patches:
+        if old == IMPORT:
+            found = IMPORT_RE.findall(src)
+            if len(found) != 1:
+                return None, 'import { ... } from "herdr";'
+            names = [n.strip() for n in found[0].split(",") if n.strip()]
+            line = "import { " + ", ".join(names + ["readTextFile"] * ("readTextFile" not in names)) + ' } from "herdr";'
+            src = IMPORT_RE.sub(lambda m: line + new, src)
+            continue
         if src.count(old) != 1:
             return None, old.strip().splitlines()[0][:80]
         src = src.replace(old, new)

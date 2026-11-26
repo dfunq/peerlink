@@ -12,7 +12,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import herdr_mod as hm  # noqa: E402
 
 # Stands in for herdr's spaces mod: every place the patch touches, once.
-FAKE = "\n".join(old for old, _ in hm.PATCHES) + "\n"
+def fake(patches):
+    return "\n".join('import { spaces, run } from "herdr";' if old == hm.IMPORT else old for old, _ in patches) + "\n"
+
+
+FAKE = fake(hm.PATCHES)
 
 
 class Patch(unittest.TestCase):
@@ -25,8 +29,7 @@ class Patch(unittest.TestCase):
         self.assertNotIn("PEERLINK_TREE", out)
 
     def test_the_agents_mod_takes_peerlinks_parent_first(self):
-        fake = "\n".join(old for old, _ in hm.AGENTS_PATCHES) + "\n"
-        out, missing = hm.patch(fake, "/x/tree.json", hm.AGENTS_PATCHES)
+        out, missing = hm.patch(fake(hm.AGENTS_PATCHES), "/x/tree.json", hm.AGENTS_PATCHES)
         self.assertIsNone(missing)
         self.assertIn("peerlinkParent(k) === addr", out)
         self.assertIn("if (lead.length > 6) return [];", out)
@@ -181,9 +184,14 @@ class Daemon(unittest.TestCase):
         self.d.herdr_nest({}, {})
         with open(os.path.join(self.app, "mods", "spaces", "main.js"), "w") as f:
             f.write("something else entirely")
-        self.d.herdr_nest({}, {})  # the patch no longer fits: the old copy stays, nothing breaks
-        with open(os.path.join(self.app, "mods", "peerlink-spaces", "main.js")) as f:
-            self.assertIn("peerlinkNest", f.read())
+        self.d.herdr_nest({}, {})  # the patch no longer fits: herdr's own mod shows, not a copy of its old one
+        with open(os.path.join(self.app, "layouts", "mine.json")) as f:
+            self.assertEqual(f.read(), '{"id": "spaces", "content": {"mod": "spaces"}}')
+        with open(os.path.join(self.app, "mods", "spaces", "main.js"), "w") as f:
+            f.write(FAKE)
+        self.d.herdr_nest({}, {})  # it fits again: the copy is made from the new mod and shown
+        with open(os.path.join(self.app, "layouts", "mine.json")) as f:
+            self.assertEqual(f.read(), '{"id": "spaces", "content": {"mod": "peerlink-spaces"}}')
 
 
 if __name__ == "__main__":

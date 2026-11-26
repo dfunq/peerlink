@@ -320,7 +320,9 @@ class Daemon:
 
 def handle(daemon, msg):
     """One JSON-RPC message in, its response out (None for a notification)."""
-    mid, method, params = msg.get("id"), msg.get("method", ""), msg.get("params") or {}
+    mid, method, params = msg.get("id"), msg.get("method", ""), msg.get("params")
+    if not isinstance(params, dict):
+        params = {}
 
     def ok(result):
         return {"jsonrpc": "2.0", "id": mid, "result": result}
@@ -343,8 +345,10 @@ def handle(daemon, msg):
         return ok({"tools": TOOLS})
     if method == "tools/call":
         name, args = params.get("name"), params.get("arguments") or {}
-        if name not in {t["name"] for t in TOOLS}:
+        if not isinstance(name, str) or name not in {t["name"] for t in TOOLS}:
             return err(-32602, f"unknown tool {name}")
+        if not isinstance(args, dict):
+            return err(-32602, "arguments must be an object")
         if daemon.wrong:
             return ok({"content": [{"type": "text", "text": daemon.wrong}], "isError": True})
         try:
@@ -352,6 +356,8 @@ def handle(daemon, msg):
             return ok({"content": [{"type": "text", "text": json.dumps(out, ensure_ascii=False)}]})
         except Refused as e:
             return ok({"content": [{"type": "text", "text": str(e)}], "isError": True})
+        except Exception as e:  # noqa: BLE001 - one bad call answers with an error; the server stays up
+            return ok({"content": [{"type": "text", "text": f"{name} failed: {type(e).__name__}: {str(e)[:300]}"}], "isError": True})
     return err(-32601, f"method not found: {method}")
 
 
@@ -374,6 +380,8 @@ def serve_http(daemon, port):
     local = {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}
 
     class H(BaseHTTPRequestHandler):
+        timeout = 30 + WAIT_MAX_S  # a client that connects and sends nothing doesn't hold a thread for good
+
         def log_message(self, *a):
             pass
 

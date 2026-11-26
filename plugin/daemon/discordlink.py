@@ -423,6 +423,9 @@ class Bot:
                 self._session()
                 backoff = 2
             except ConnectionError as err:
+                if self.state == "online":
+                    backoff = 2  # it was up: Discord's routine "reconnect" isn't a failure to back off from
+
                 code = str(err)
                 self.log("discord", "connection dropped:", code)
                 if any(c in code for c in ("4007", "4009", "op 9 False")):
@@ -435,8 +438,13 @@ class Bot:
                     self.reads_messages = False
                 self.state, self.error = "connecting", f"reconnecting ({code})"
             except (DiscordError, OSError, ValueError) as err:
+                if self.state == "online":
+                    backoff = 2
                 self.log("discord", "connection dropped:", err)
                 self.state, self.error = "error", str(err)
+            except Exception as err:  # anything else (a reply cut short, a malformed hello) reconnects too: the thread never ends
+                self.log("discord", "connection failed:", repr(err))
+                self.state, self.error = "connecting", "reconnecting"
             if self.stop.wait(backoff):
                 return
             backoff = min(backoff * 2, 120)
@@ -446,6 +454,9 @@ class Bot:
         self.ws = ws = WebSocket(resume[1] if resume else GATEWAY)
         hello = ws.recv()
         interval = hello["d"]["heartbeat_interval"] / 1000
+        # A healthy gateway acks a heartbeat every interval: silence for longer is a dead connection that sent no close,
+        # which a blocked read would wait on for ever.
+        ws.sock.settimeout(interval + 30)
         seq = [resume[2] if resume else None]
         acked = [True]
 
