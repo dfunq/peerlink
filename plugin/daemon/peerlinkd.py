@@ -5771,8 +5771,9 @@ def claude_trusts(path):
 def claude_config_in(path):
     """Whether a folder has Claude Code settings, hooks or MCP servers of its own, which trusting it would run: in it
     or any folder above it that Claude Code reads them from, up to its repo's root (or, outside a repo, up to but not
-    including the home folder, whose settings are your own)."""
-    home, p = os.path.abspath(os.path.expanduser("~")), os.path.abspath(path)
+    including the home folder, whose settings are your own). It walks the real folder, so a symlink into a repo counts
+    that repo's settings."""
+    home, p = os.path.realpath(os.path.expanduser("~")), os.path.realpath(path)
     while p != home:
         if any(os.path.exists(os.path.join(p, n)) for n in (".claude", ".mcp.json", ".claude.json", "CLAUDE.local.md")):
             return True
@@ -5786,11 +5787,12 @@ def claude_config_in(path):
 def trust_folder(path):
     """Mark a folder trusted for Claude Code, as answering its "trust this folder" question would, so an agent
     started there with nobody watching doesn't stop at it. Only when no folder above it is trusted already, and never
-    the home folder or one above it: that would trust every folder under it."""
+    the home folder or one above it, even through a symlink: that would trust every folder under it."""
     if claude_trusts(path):
         return
     try:
-        if os.path.commonpath([os.path.abspath(path), os.path.expanduser("~")]) == os.path.abspath(path):
+        real = os.path.realpath(path)
+        if os.path.commonpath([real, os.path.realpath(os.path.expanduser("~"))]) == real:
             log("not marking", path, "trusted for Claude Code: it holds the home folder")
             return
     except ValueError:  # another drive than home's
