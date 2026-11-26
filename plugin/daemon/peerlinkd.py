@@ -48,7 +48,7 @@ if os.name == "nt":
 
     subprocess.Popen.__init__ = _no_window_init
 
-VERSION = "0.9.112"
+VERSION = "0.9.113"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -5768,11 +5768,33 @@ def claude_trusts(path):
         p = up
 
 
+def claude_config_in(path):
+    """Whether a folder has Claude Code settings, hooks or MCP servers of its own, which trusting it would run: in it
+    or any folder above it that Claude Code reads them from, up to its repo's root (or, outside a repo, up to but not
+    including the home folder, whose settings are your own)."""
+    home, p = os.path.abspath(os.path.expanduser("~")), os.path.abspath(path)
+    while p != home:
+        if any(os.path.exists(os.path.join(p, n)) for n in (".claude", ".mcp.json", ".claude.json", "CLAUDE.local.md")):
+            return True
+        up = os.path.dirname(p)
+        if os.path.exists(os.path.join(p, ".git")) or up == p:
+            return False
+        p = up
+    return False
+
+
 def trust_folder(path):
     """Mark a folder trusted for Claude Code, as answering its "trust this folder" question would, so an agent
-    started there with nobody watching doesn't stop at it. Only when no folder above it is trusted already."""
+    started there with nobody watching doesn't stop at it. Only when no folder above it is trusted already, and never
+    the home folder or one above it: that would trust every folder under it."""
     if claude_trusts(path):
         return
+    try:
+        if os.path.commonpath([os.path.abspath(path), os.path.expanduser("~")]) == os.path.abspath(path):
+            log("not marking", path, "trusted for Claude Code: it holds the home folder")
+            return
+    except ValueError:  # another drive than home's
+        pass
     conf = os.path.expanduser("~/.claude.json")
     try:
         with open(conf) as f:
@@ -5805,7 +5827,6 @@ def make_worktree(sp):
         code, out = git(repo, "worktree", "add", path, branch) if exists else git(repo, "worktree", "add", "-b", branch, path, base)
         if code != 0:
             return f"git couldn't add the worktree: {out[:300]}"
-    trust_folder(path)
     wt["created"], wt["created_ts"] = True, time.time()
     log("worktree", sp["id"], path, branch)
     return ""
@@ -6748,6 +6769,11 @@ def start_spawn(sp, via):
             return
     sid = sp["id"]
     why = make_worktree(sp)
+    if not why and (sp.get("worktree") or not claude_config_in(sp["dir"])):
+        # A folder Claude Code doesn't trust stops the new agent at its trust question with nobody watching, so it
+        # never joins. Trusted for it: a worktree peerlink made, or a folder with no Claude settings, hooks or MCP
+        # servers of its own (trusting one that has them would run them with nobody having looked).
+        trust_folder(sp["dir"])
     if why:
         with lock:
             sp["status"], sp["note"] = "failed", why
@@ -7752,6 +7778,13 @@ def reap():
             spawn_told(sp, f"The agent you asked for ({sp['id']}) was started {int((now - sp['updated']) / 60)} minutes ago and hasn't "
                            f"joined peerlink yet. It may be waiting at a prompt in its terminal{where}: ask your user to look "
                            "before you ask for another.")
+            # The space's lead hears too when someone else asked: it is the one watching for idle hires.
+            lead = lead_rec(sp["space"])
+            if lead and lead["id"] != sp["requester"].get("id") and lead.get("cwd") != sp["requester"].get("cwd"):
+                task_message({"id": sp["id"]}, lead["cwd"],
+                             f"{sp['requester']['name']} asked for an agent in {sp['dir']} ({sp['id']}). It was started "
+                             f"{int((now - sp['updated']) / 60)} minutes ago and hasn't joined peerlink yet. It may be waiting "
+                             f"at a prompt in its terminal{where}.", prefer=lead)
         if late:
             save_spawns()
         for c in [x for x in schedules.values() if x["status"] == "pending"]:

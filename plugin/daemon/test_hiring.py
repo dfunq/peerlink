@@ -102,6 +102,57 @@ class HiringTest(unittest.TestCase):
         d.reap()
         self.assertFalse([t for t in self.told("lead") if f"({other})" in t])
 
+    def test_the_space_lead_hears_of_a_hire_someone_else_asked_for_that_never_joins(self):
+        d.config["auto_approve_folders"] = ["/x/lead", "/x/other"]
+        space = d.space_of(d.sessions["s-other"])[0]
+        with unittest.mock.patch.dict(d.config, {"space_leads": {space: {"cwd": "/x/lead", "how": "set"}}}):
+            status, out = d.request_spawn({"by": "s-other", "dir": self.dirs[0], "purpose": "one ticket",
+                                           "first_prompt": "Do the ticket", "name": "w0"})
+            self.assertEqual(status, 200, out)
+            d.spawns[out["id"]]["updated"] -= d.SPAWN_LATE_S + 5
+            d.reap()
+        self.assertEqual(len([t for t in self.told("other") if "hasn't joined" in t]), 1)
+        self.assertEqual(len([t for t in self.told("lead") if f"other asked for an agent in {self.dirs[0]}" in t]), 1)
+
+    def test_every_hire_folder_is_trusted_before_its_agent_starts(self):
+        # A folder Claude Code hasn't been told to trust stops the new agent at a question nobody is there to answer.
+        sp = self.hire()
+        self.assertEqual(self.trusted, [d.spawns[sp]["dir"]])
+        # Never one with settings, hooks or MCP servers of its own: trusting it would run them unseen.
+        for i, name in ((1, ".mcp.json"), (2, ".claude")):
+            path = os.path.join(self.dirs[i], name)
+            os.mkdir(path) if name == ".claude" else open(path, "w").close()
+            self.hire(i)
+        self.assertEqual(self.trusted, [d.spawns[sp]["dir"]])
+
+    def test_claude_config_counts_from_the_folders_above_up_to_the_repo_root(self):
+        home = tempfile.mkdtemp(prefix="home-")
+        repo = os.path.join(home, "repo")
+        sub = os.path.join(repo, "pkg", "scratch")
+        os.makedirs(sub)
+        with unittest.mock.patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}):
+            os.mkdir(os.path.join(home, ".claude"))  # your own settings: never a reason not to trust
+            self.assertFalse(d.claude_config_in(sub))
+            open(os.path.join(repo, ".mcp.json"), "w").close()  # the repo's, read for any folder in it
+            self.assertTrue(d.claude_config_in(sub))
+            os.mkdir(os.path.join(repo, "pkg", ".git"))  # a repo of its own below it: the walk stops at its root
+            self.assertFalse(d.claude_config_in(sub))
+
+    def test_trusting_never_covers_the_home_folder(self):
+        home = tempfile.mkdtemp(prefix="home-")
+        conf = os.path.join(home, ".claude.json")
+        with open(conf, "w") as f:
+            json.dump({"projects": {}}, f)
+        with unittest.mock.patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}):
+            self.real_trust(home)
+            self.real_trust(os.path.dirname(home))
+            inside = os.path.join(home, "scratch")
+            self.real_trust(inside)
+            with open(conf) as f:
+                self.assertEqual(list(json.load(f)["projects"]), [d.claude_project_key(inside)])
+            self.assertTrue(d.claude_trusts(inside))
+            self.assertFalse(d.claude_trusts(home))
+
     def test_past_the_cap_a_hire_queues_and_starts_when_a_worker_is_gone(self):
         d.config["max_live_spawns"] = 1
         first = self.hire(0)
