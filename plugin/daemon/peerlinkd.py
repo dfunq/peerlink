@@ -5769,8 +5769,18 @@ def claude_trusts(path):
 
 
 def claude_config_in(path):
-    """Whether a folder holds Claude Code settings, hooks or MCP servers of its own, which trusting it would run."""
-    return any(os.path.exists(os.path.join(path, n)) for n in (".claude", ".mcp.json", ".claude.json", "CLAUDE.local.md"))
+    """Whether a folder has Claude Code settings, hooks or MCP servers of its own, which trusting it would run: in it
+    or any folder above it that Claude Code reads them from, up to its repo's root (or, outside a repo, up to but not
+    including the home folder, whose settings are your own)."""
+    home, p = os.path.abspath(os.path.expanduser("~")), os.path.abspath(path)
+    while p != home:
+        if any(os.path.exists(os.path.join(p, n)) for n in (".claude", ".mcp.json", ".claude.json", "CLAUDE.local.md")):
+            return True
+        up = os.path.dirname(p)
+        if os.path.exists(os.path.join(p, ".git")) or up == p:
+            return False
+        p = up
+    return False
 
 
 def trust_folder(path):

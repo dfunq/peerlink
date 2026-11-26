@@ -125,6 +125,19 @@ class HiringTest(unittest.TestCase):
             self.hire(i)
         self.assertEqual(self.trusted, [d.spawns[sp]["dir"]])
 
+    def test_claude_config_counts_from_the_folders_above_up_to_the_repo_root(self):
+        home = tempfile.mkdtemp(prefix="home-")
+        repo = os.path.join(home, "repo")
+        sub = os.path.join(repo, "pkg", "scratch")
+        os.makedirs(sub)
+        with unittest.mock.patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}):
+            os.mkdir(os.path.join(home, ".claude"))  # your own settings: never a reason not to trust
+            self.assertFalse(d.claude_config_in(sub))
+            open(os.path.join(repo, ".mcp.json"), "w").close()  # the repo's, read for any folder in it
+            self.assertTrue(d.claude_config_in(sub))
+            os.mkdir(os.path.join(repo, "pkg", ".git"))  # a repo of its own below it: the walk stops at its root
+            self.assertFalse(d.claude_config_in(sub))
+
     def test_trusting_never_covers_the_home_folder(self):
         home = tempfile.mkdtemp(prefix="home-")
         conf = os.path.join(home, ".claude.json")
