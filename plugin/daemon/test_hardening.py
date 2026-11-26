@@ -172,6 +172,8 @@ class DaemonTest(unittest.TestCase):
         self.assertNotIn("s-long-gone", d.config["sessions"])
 
     def test_ids_are_not_handed_out_again_after_start_clean(self):
+        if not os.path.realpath(d.HOME).startswith(os.path.realpath(tempfile.gettempdir())):
+            self.skipTest("PEERLINK_HOME is exported and isn't a temp folder: Start clean would wipe it")
         was = d.next_msg[0], d.next_task[0]
         self.addCleanup(lambda: (d.next_msg.__setitem__(0, was[0]), d.next_task.__setitem__(0, was[1])))
         d.next_msg[0], d.next_task[0] = 41, 7
