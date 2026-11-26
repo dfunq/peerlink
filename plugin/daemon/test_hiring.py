@@ -198,6 +198,92 @@ class HiringTest(unittest.TestCase):
         self.assertEqual(status, 200, out)
         self.assertTrue(d.sessions[sid].get("terminate"))
 
+    def idle_for(self, sid, s):
+        """The worker's last turn ended, and the last message came to it, s seconds ago."""
+        d.sessions[sid].update(busy=False, busy_since=time.time() - s, last_msg_in=time.time() - s)
+
+    def nudges(self):
+        return [t for t in self.told("lead") if "has been idle 15m: retire it or give it work." in t]
+
+    def test_an_idle_worker_s_lead_is_nudged_once_at_15m(self):
+        sid = self.register(self.hire(), "w0")
+        self.idle_for(sid, d.IDLE_NUDGE_S - 30)
+        d.reap()
+        self.assertEqual(self.nudges(), [])
+        self.idle_for(sid, d.IDLE_NUDGE_S + 5)
+        d.reap()
+        d.reap()
+        self.assertEqual(self.nudges(), ["w0 has been idle 15m: retire it or give it work."])
+        self.assertTrue(d.inboxes["s-lead"][-1].get("wake"))
+        self.assertFalse(d.sessions[sid].get("terminate"))
+
+    def test_a_worker_idle_30m_is_retired_with_its_summary_left_on_its_task(self):
+        sp = self.hire()
+        sid = self.register(sp, "w0")
+        status, out = d.send({"from": "s-lead", "to": "w0", "kind": "task", "text": "Fix the login copy"})
+        self.assertEqual(status, 200, out)
+        d.take_inbox(sid)
+        d.sessions[sid]["summary"] = "Login copy fixed on branch login-copy; PR not opened yet"
+        self.idle_for(sid, d.IDLE_RETIRE_S + 5)
+        with unittest.mock.patch.object(d, "terminate", wraps=d.terminate) as ended:
+            d.reap()
+            ended.assert_called_once()
+        self.assertEqual(d.spawns[sp]["status"], "retired")
+        self.assertTrue(d.sessions[sid].get("terminate"))
+        note = d.tasks[out["task"]]["log"][-1]
+        self.assertEqual((note["by"], note["kind"]), ("w0", "note"))
+        self.assertIn("Handoff from w0, retired after 30m idle: Login copy fixed on branch login-copy", note["text"])
+        self.assertIn(f"w0 was idle 30m, so peerlink retired it; it still owns {out['task']}: reassign or cancel them.", self.told("lead"))
+        d.reap()  # retired once, never again
+        self.assertEqual(len([t for t in self.told("lead") if "so peerlink retired it" in t]), 1)
+
+    def test_a_turn_or_a_message_resets_the_idle_clock_and_arms_the_nudge_again(self):
+        sp = self.hire()
+        sid = self.register(sp, "w0")
+        self.idle_for(sid, d.IDLE_NUDGE_S + 5)
+        d.reap()
+        self.assertEqual(len(self.nudges()), 1)
+        # A turn: busy, then idle again just now.
+        d.set_busy(d.sessions[sid], True)
+        d.reap()
+        d.set_busy(d.sessions[sid], False)
+        d.reap()
+        self.assertEqual(len(self.nudges()), 1)
+        self.idle_for(sid, d.IDLE_NUDGE_S + 5)
+        d.reap()
+        self.assertEqual(len(self.nudges()), 2)
+        # A message to it, read without a turn: the clock starts again from it.
+        self.idle_for(sid, d.IDLE_RETIRE_S + 5)
+        self.assertEqual(d.send({"from": "s-lead", "to": "w0", "text": "Still there?"})[0], 200)
+        d.reap()
+        d.take_inbox(sid)
+        d.reap()
+        self.assertEqual(d.spawns[sp]["status"], "started")
+        self.assertFalse(d.sessions[sid].get("terminate"))
+        self.assertEqual(len(self.nudges()), 2)
+
+    def test_a_standing_agent_is_never_nudged_or_retired_however_long_it_idles(self):
+        standing = d.request_spawn({"by": "s-lead", "dir": self.dirs[0], "purpose": "a lead", "first_prompt": "go", "name": "w0"})[1]["id"]
+        sid = self.register(standing, "w0")
+        for s in (sid, "s-other"):
+            self.idle_for(s, 10 * d.IDLE_RETIRE_S)
+        d.reap()
+        self.assertEqual(self.nudges(), [])
+        self.assertEqual(d.spawns[standing]["status"], "started")
+        self.assertFalse(d.sessions[sid].get("terminate") or d.sessions["s-other"].get("terminate"))
+
+    def test_a_queued_hire_starts_once_an_idle_worker_is_retired(self):
+        d.config["max_live_spawns"] = 1
+        first = self.hire(0)
+        sid = self.register(first, "w0")
+        second = self.hire(1)
+        self.assertEqual(d.spawns[second]["status"], "queued")
+        self.idle_for(sid, d.IDLE_RETIRE_S + 5)
+        d.reap()
+        self.assertEqual(d.spawns[first]["status"], "retired")
+        self.assertEqual(d.spawns[second]["status"], "started")
+        self.assertEqual(self.launched, [first, second])
+
     def repo(self):
         root = tempfile.mkdtemp(prefix="wt-")
         repo = os.path.join(root, "app")
