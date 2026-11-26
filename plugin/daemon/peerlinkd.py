@@ -4908,6 +4908,8 @@ def take_inbox(sid, track=False):
     with lock:
         box = inboxes.pop(sid, [])
         now = time.time()
+        if box and sessions.get(sid):
+            sessions[sid]["last_msg_in"] = now  # a message resets a worker's idle clock
         again = []
         if track:
             mine = handed.setdefault(sid, {})
@@ -7380,25 +7382,105 @@ def retire(sid, body):
         if target is by and still:
             return 409, {"error": "you still own " + ", ".join(f"{t['id']} ({t['title'][:60]})" for t in still)
                                   + ": mark each done or failed with update_task first, then retire"}
-        done = [f"{t['id']} {t['status']}" for t in owned_tasks(target, open_only=False) if t.get("updated", 0) >= sp["created"]]
-        sp["status"], sp["updated"] = "retired", time.time()
-        save_spawns()
-        who = display_name(target)
-        # Links leads made for it end with it: a retired worker never comes back.
-        for key in [k for k in (config.get("link_info") or {}) if target.get("agent") in k.split("|")]:
-            drop_link(key, f"{who} retired")
-        wt = sp.get("worktree") or {}
-        line = (f"{who} retired" + (f", {', '.join(done)}" if done else "") if target is by
-                else f"You retired {who}" + (f"; it still owns {', '.join(t['id'] for t in still)}: reassign or cancel them" if still else ""))
-        if wt.get("created"):
-            # Never removed for you: the branch may hold work not merged yet.
-            line += (f". Its worktree {tilde_path(wt['path'])} (branch {wt['branch']}) stays; once the work is merged, remove it with "
-                     f"git -C {tilde_path(wt['repo'])} worktree remove {tilde_path(wt['path'])}")
-        if target is by and hirer.get("cwd"):
-            asker = sessions.get(hirer.get("id") or "")
-            task_message(None, hirer["cwd"], line + ".", prefer=asker if asker and is_live(asker) else successor(hirer["cwd"]))
+        who, line = end_worker(target, sp, "self" if target is by else "lead")
     terminate(target["id"], f"{who} itself (retired)" if target is by else f"{display_name(by)}, the lead that hired it")
     return 200, {"retired": who, "told": hirer.get("name") if target is by else "", "note": line}
+
+
+def end_worker(target, sp, how):
+    """Mark a worker's spawn retired and say so: how is "self" (it retired itself; its lead is told), "lead" (the lead
+    that hired it did; the line is its answer) or "idle" (peerlink did, after IDLE_RETIRE_S; its lead is told).
+    Returns (name, line); the caller terminates it. Called with the lock held."""
+    still = owned_tasks(target)
+    done = [f"{t['id']} {t['status']}" for t in owned_tasks(target, open_only=False) if t.get("updated", 0) >= sp["created"]]
+    sp["status"], sp["updated"] = "retired", time.time()
+    save_spawns()
+    who, hirer = display_name(target), sp["requester"]
+    # Links leads made for it end with it: a retired worker never comes back.
+    for key in [k for k in (config.get("link_info") or {}) if target.get("agent") in k.split("|")]:
+        drop_link(key, f"{who} retired")
+    wt = sp.get("worktree") or {}
+    owns = f"it still owns {', '.join(t['id'] for t in still)}: reassign or cancel them" if still else ""
+    line = (f"{who} retired" + (f", {', '.join(done)}" if done else "") if how == "self"
+            else f"{who} was idle {idle_text(IDLE_RETIRE_S)}, so peerlink retired it" + (f"; {owns}" if owns else "") if how == "idle"
+            else f"You retired {who}" + (f"; {owns}" if owns else ""))
+    if wt.get("created"):
+        # Never removed for you: the branch may hold work not merged yet.
+        line += (f". Its worktree {tilde_path(wt['path'])} (branch {wt['branch']}) stays; once the work is merged, remove it with "
+                 f"git -C {tilde_path(wt['repo'])} worktree remove {tilde_path(wt['path'])}")
+    if how != "lead" and hirer.get("cwd"):
+        tell_hirer(sp, line + ".")
+    return who, line
+
+
+def tell_hirer(sp, text, wake=False):
+    """A note from peerlink to the agent that hired this worker, or whoever runs in its folder now. Called with the lock held."""
+    hirer = sp["requester"]
+    asker = sessions.get(hirer.get("id") or "")
+    msg = task_message(None, hirer["cwd"], text, prefer=asker if asker and is_live(asker) else successor(hirer["cwd"]))
+    if wake:
+        msg["wake"] = True
+    return msg
+
+
+# A worker idle this long has its lead nudged once, and this long is retired, handing its summary to its open tasks.
+IDLE_NUDGE_S = 15 * 60
+IDLE_RETIRE_S = 30 * 60
+
+
+def idle_text(s):
+    return f"{int(s // 60)}m"
+
+
+def idle_since(rec):
+    """Since when this agent has done nothing: its last turn ended, or a message last came to it, whichever is later;
+    None while a turn runs. Called with the lock held."""
+    if rec.get("busy"):
+        return None
+    sid = rec["id"]
+    waiting = [m["ts"] for m in inboxes.get(sid, [])] + [m["ts"] for m, _ in handed.get(sid, {}).values()]
+    return max([rec.get("busy_since") or 0, rec.get("last_msg_in") or 0] + waiting) or None
+
+
+def sweep_idle_workers(now):
+    """Nudge the lead of a worker idle IDLE_NUDGE_S, once per stretch of idling; return the workers idle
+    IDLE_RETIRE_S, each with its spawn, for the caller to retire outside the lock. Standing agents are never
+    looked at: only spawns started with worker: true are. Called with the lock held."""
+    out = []
+    for sp in live_workers(now):
+        rec = agent_session(spawn_agent(sp))
+        since = idle_since(rec) if rec and not rec.get("terminate") else None
+        if since is None:
+            continue
+        idle = now - since
+        if idle >= IDLE_RETIRE_S:
+            out.append((rec, sp))
+        elif idle >= IDLE_NUDGE_S and rec.get("idle_nudged") != since and sp["requester"].get("cwd"):
+            # Keyed by when the stretch began: a turn or a message starts a new one, and so arms the nudge again.
+            rec["idle_nudged"] = since
+            who = display_name(rec)
+            log("worker", who, "idle", int(idle), "s: lead nudged")
+            tell_hirer(sp, f"{who} has been idle {idle_text(IDLE_NUDGE_S)}: retire it, give it work, or message it if it's waiting.", wake=True)
+    return out
+
+
+def retire_idle(rec, sp):
+    """Retire a worker that sat idle IDLE_RETIRE_S: its last summary goes on each task it still owns as a handoff
+    note, then it ends as a retire would end it."""
+    with lock:
+        if sp["status"] != "started" or rec.get("terminate"):
+            return
+        who = display_name(rec)
+        summary = oneline(rec.get("summary") or "")
+        open_tasks = owned_tasks(rec)
+        for t in open_tasks:
+            if summary:
+                task_log(t, who, "note", f"Handoff from {who}, retired after {idle_text(IDLE_RETIRE_S)} idle: {summary}")
+        if open_tasks and summary:
+            save_tasks()
+        _, line = end_worker(rec, sp, "idle")
+    log("worker", who, "retired after", idle_text(IDLE_RETIRE_S), "idle")
+    terminate(rec["id"], f"peerlink ({who} idle {idle_text(IDLE_RETIRE_S)})")
 
 
 STUCK_TEXT = "can't start turns: needs a prompt typed in its terminal"
@@ -7804,6 +7886,7 @@ def reap():
             save_rules()
         apply_defaults(now)
         nudge_stale_tasks(now)
+        idle = sweep_idle_workers(now)
         queued = any(x["status"] == "queued" for x in spawns.values())
         lapsed = usage_limit and now >= (usage_limit.get("resets_at") or usage_limit["since"] + LIMIT_FALLBACK_S)
         # While the limit holds, a due schedule waits: it runs once the limit lifts.
@@ -7824,6 +7907,8 @@ def reap():
         lift_limit("its reset time came" if usage_limit.get("resets_at") else "agents try again after five hours")
     for c in filter(None, starts):
         start_for_schedule(c)
+    for rec, sp in idle:
+        retire_idle(rec, sp)
     if queued:
         start_queued()
     save_running(now)
