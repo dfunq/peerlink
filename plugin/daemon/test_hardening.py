@@ -1,6 +1,7 @@
 """Tests for the edges a long-running daemon meets: a clock that goes back, a herdr release that changes a line,
 a damaged record, a closed task marked twice. Run: python3 -m unittest discover -s plugin/daemon"""
 import datetime
+import io
 import os
 import sys
 import tempfile
@@ -161,6 +162,35 @@ class DaemonTest(unittest.TestCase):
         kept = [m["id"] for m in d.recent_messages([ask, old] + rest, now)]
         self.assertEqual((kept[0], len(kept)), ("m1", 501))
         self.assertNotIn("m2", kept)
+
+    def test_tidy_drops_the_settings_of_sessions_that_are_gone(self):
+        kept = dict(d.config["sessions"])
+        self.addCleanup(lambda: (d.config["sessions"].clear(), d.config["sessions"].update(kept)))
+        d.config["sessions"].update({"s-lead": {"nickname": "lead"}, "s-long-gone": {"nickname": "old"}})
+        d.tidy()
+        self.assertIn("s-lead", d.config["sessions"])
+        self.assertNotIn("s-long-gone", d.config["sessions"])
+
+    def test_ids_are_not_handed_out_again_after_start_clean(self):
+        was = d.next_msg[0], d.next_task[0]
+        self.addCleanup(lambda: (d.next_msg.__setitem__(0, was[0]), d.next_task.__setitem__(0, was[1])))
+        d.next_msg[0], d.next_task[0] = 41, 7
+        d.start_clean(["history", "tasks"])
+        d.next_msg[0], d.next_task[0] = 1, 1  # as a restart finds them: both files are empty now
+        d.load_messages()
+        d.load_tasks()
+        self.assertEqual((d.next_msg[0], d.next_task[0]), (41, 7))
+
+    def test_a_request_body_is_read_only_when_its_length_makes_sense(self):
+        def body(length, data=b""):
+            h = d.Handler.__new__(d.Handler)
+            h.headers, h.rfile = {"Content-Length": length}, io.BytesIO(data)
+            return h.body()
+        self.assertEqual(body("7", b'{"a":1}'), {"a": 1})
+        self.assertEqual(body("-1", b'{"a":1}'), {})
+        self.assertEqual(body("lots"), {})
+        with self.assertRaises(ValueError):
+            body(str(d.BODY_MAX + 1))
 
     @unittest.skipIf(os.name == "nt", "ps")
     def test_one_ps_gives_every_parent(self):
