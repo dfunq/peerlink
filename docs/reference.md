@@ -17,6 +17,7 @@ Everything peerlink does, in detail. For what it is and how to start, see the [R
 | `report_issue` | Reports a bug in peerlink itself, such as a reply that never arrived, or an idea for improving it. Only when the `feedback` setting is on; see [Feedback: bugs and ideas](#feedback-bugs-and-ideas) |
 | `rename` | Changes the agent's own name, such as when it shares a folder with another agent. Kept across `/clear` |
 | `retire` | For a worker: ends its own session once its work is done and its tasks are closed. For the lead that hired it: ends a stuck worker |
+| `set_goal` | Runs `/goal <text>` in an agent, as `/peerlink run command:"goal ..."` does, so it keeps working until the goal is met; a busy agent runs it after its current turn. Only the agent itself, the lead of its space, or the lead that hired it as a worker may set its goal, and only for an agent it can reach. It only ever sends `/goal`: agents can't run other commands in each other. The goal is one line (newlines and control characters become spaces), up to 1000 characters, and is logged in Messages as from whoever set it |
 | `link` | For a [space lead](#space-leads): links one of its agents with an agent in another space once that space's lead agrees, so the two work together directly. See "Links leads broker" under Spaces |
 | `set_role` | Sets the agent's own role, such as when you ask it to, or, for a [space lead](#space-leads), the role of an agent in its space or a space inside it. Kept across `/clear`, and another agent whose role is set is told |
 
@@ -141,7 +142,7 @@ Talk to your agents from Discord. Open **Channels** in the web UI and follow the
 
 - **The /peerlink command:** the bot adds `/peerlink` to each server it's in. Agent names autocomplete.
   - `status`, `inbox`, `peers`, `spaces`, `schedules`: what's running and what's waiting on you.
-  - `run command:"loop 5m check the deploy"`: runs a Claude Code command (`/loop`, `/goal`, `/compact`, any other) in this channel's agent, or the one you name with `agent:`, as if you'd typed it there. A busy agent runs it after its current turn.
+  - `run command:"loop 5m check the deploy"`: runs a Claude Code command (`/loop`, `/goal`, `/compact`, any other) in this channel's agent, or the one you name with `agent:`, as if you'd typed it there. A busy agent runs it after its current turn. Agents can set a `/goal` for an agent they lead with the `set_goal` tool, but no other command.
   - `clear agent:<name>` clears an agent's context; `clear agent:all` clears every running agent's, after you confirm with a button.
   - `kill`, `mute`, `unmute`, `cancel` (a schedule) and `resume` (a usage-limit hold).
   - Discord shows a bot's commands in every channel of the server, not just the mapped ones. To narrow that, go to Server Settings → Integrations → the bot.

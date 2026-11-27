@@ -41,6 +41,9 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
       : ok({ code: 'c0de', change: `turn off rule ${body.id} for every space: "Never merge on a Friday."` })
     if (path === '/api/rules/lead/confirm') return ok(body.approve ? { rule: { id: 'r1', space: '*', status: 'off' } } : { denied: true })
     if (path === '/api/rules') return body ? ok({ rule: { id: 'r4', space: 'acme', status: 'pending' } }) : ok({ rules: [{ id: 'r1', space: 'acme', status: 'active', text: 'Never merge on a Friday.' }] })
+    if (path.endsWith('/goal'))
+      return body.agent === 'stranger' ? { value: { status: 403, ok: false, headers: {}, text: JSON.stringify({ error: 'only stranger itself, the lead of its space, or the lead that hired it sets its goal' }) } }
+        : ok({ agent: body.agent, id: 'm20', queued: true, note: `${body.agent}'s goal is set, to run after its current turn` })
     if (path.endsWith('/retire')) return ok(body.agent ? { retired: body.agent, told: '', note: `You retired ${body.agent}` } : { retired: 'web', told: 'acme', note: 'web retired' })
     if (path === '/api/spawns' && body?.worker) return ok({ id: 's4', status: 'queued' })
     if (path.endsWith('/link')) return ok(body.theirs === 'pgs' ? { status: 'asked', lead: 'stripe' } : { status: 'linked' })
@@ -853,6 +856,21 @@ test('a lead gets request_spawn up front and retire behind ToolSearch', async ($
   const describe = async (name: string) => ((await $.tool.describe({ tool: `mcp__peerlink__${name}`, description: 'd' } as any)) as any).isDeferred
   expect(await describe('retire')).toBe(true)
   expect(await describe('request_spawn')).toBe(false)
+  expect(await describe('set_goal')).toBe(true)
+})
+
+test('set_goal asks the daemon to run /goal in an agent and passes on a refusal', async ($, on) => {
+  engine(on)
+  const daemon = fakeDaemon(on, 1, null, [], { space: 'acme', leads: 'set' })
+  on('prompt.compose', () => ({ sections: [] }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  await $.session.start(START)
+  expect(await peerGuidance($, (await $.prompt.compose(COMPOSE)) as any)).toContain('give it a goal with set_goal')
+  const set = JSON.stringify(await $.tool.call({ tool: 'mcp__peerlink__set_goal', agent: 'web', goal: 'ship the fix' } as any))
+  expect(set).toContain("web's goal is set, to run after its current turn (m20)")
+  expect(daemon.posted.find(p => p.path.endsWith('/goal'))!.body).toEqual({ agent: 'web', goal: 'ship the fix' })
+  const refused = JSON.stringify(await $.tool.call({ tool: 'mcp__peerlink__set_goal', agent: 'stranger', goal: 'x' } as any))
+  expect(refused).toContain('Goal not set: only stranger itself')
 })
 
 test('the default space adds nothing to the system prompt', async ($, on) => {
