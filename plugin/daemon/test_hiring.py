@@ -374,6 +374,21 @@ class HiringTest(unittest.TestCase):
         self.assertEqual(d.git(mine, "rev-parse", "--abbrev-ref", "HEAD"), (0, "fix/explicit"))
         self.assertFalse(os.path.exists(self.wt_root))
 
+    def test_two_repos_with_the_same_name_never_share_a_worktree(self):
+        first, second = self.repo(), self.repo()  # both named app, in different folders
+        sp = self.hire(dir="", worktree={"repo": first, "branch": "fix"})
+        path = os.path.join(self.wt_root, "app", "fix")
+        self.assertEqual(d.spawns[sp]["dir"], path)
+        # The other app's fix lands on the same folder: refused up front, and again at start if it got that far.
+        status, out = d.request_spawn({"by": "s-lead", "purpose": "p", "first_prompt": "f", "worktree": {"repo": second, "branch": "fix"}})
+        self.assertEqual(status, 400)
+        self.assertIn("already exists for another repo", out["error"])
+        top = d.git(second, "rev-parse", "--show-toplevel")[1]
+        self.assertIn("another repo", d.make_worktree({"id": "s-x", "worktree": {"path": path, "repo": top, "branch": "fix", "base": "HEAD"}}))
+        # The same repo's own worktree on that branch is still taken as it is.
+        wt, why = d.plan_worktree({"repo": first, "branch": "fix"}, "")
+        self.assertEqual((why, wt["path"]), ("", path))
+
     def test_a_session_reloaded_onto_newer_tools_is_told_what_they_take_once(self):
         rec = d.sessions["s-lead"]
         rec["plugin"] = "0.9.65"
@@ -440,6 +455,18 @@ class HiringTest(unittest.TestCase):
         self.assertEqual(d.config_value("night_guard", "25-3")[0], None)
         self.assertEqual(d.config_value("night_guard", " 22-8 "), ("22-8", None))
         self.assertIn("max_live_spawns", d.BROWSER_ONLY_SETTINGS)
+
+
+class WorktreeRootOnlyFromYourBrowser(unittest.TestCase):
+    def test_an_agent_cannot_move_where_worktrees_go(self):
+        from rig import Rig
+        self.assertIn("worktree_root", d.BROWSER_ONLY_SETTINGS)
+        with Rig(env={"PEERLINK_TEST": "1"}) as rig:
+            code, out = rig.call("PUT", "/api/config", {"worktree_root": "/tmp/elsewhere"})
+            self.assertEqual(code, 403)
+            self.assertIn("worktree_root", out["error"])
+            self.assertEqual(rig.user("GET", "/api/config")["worktree_root"], "~/Repos/worktrees")
+            self.assertEqual(rig.user("PUT", "/api/config", {"worktree_root": "/tmp/trees"})["worktree_root"], "/tmp/trees")
 
 
 class HerdrLaunchTest(unittest.TestCase):

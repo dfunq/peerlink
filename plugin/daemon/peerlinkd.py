@@ -232,7 +232,7 @@ DEFAULT_CONFIG = {
     "herdr_mods_source": "",  # a folder (a clone of your mods repo) that Install herdr mods copies from; set only from the web UI
     "start_at_login": False,  # the daemon starts when you log in (a LaunchAgent, or a Run value on Windows); set only from the web UI
     "resume_after_reboot": True,  # after a reboot, ask you whether to resume the agents that were running; set only from the web UI
-    "worktree_root": "~/Repos/worktrees",  # request_spawn's worktrees go in <this>/<repo>/<branch> unless dir names a folder
+    "worktree_root": "~/Repos/worktrees",  # request_spawn's worktrees go in <this>/<repo>/<branch> unless dir names a folder; set only from the web UI
     "use_herdr": True,  # start agents in herdr's terminals when herdr (hc) is installed; off, or without herdr, tmux or Terminal as before
     "task_nudge_h": 24,  # an open task with no update for this many hours is raised with its owner, then with whoever asked; 0 is off
     "ask_defaults": True,  # a question to you may name a default the agent goes with when you haven't answered in time
@@ -703,7 +703,7 @@ CONFIG_MIN_1 = {"poll_interval_ms", "peer_ttl_s", "max_hops", "rate_limit_per_mi
 
 # What no agent changes for itself: who starts agents without asking, and how many workers run when.
 BROWSER_ONLY_SETTINGS = ("auto_approve_all", "auto_approve_folders", "max_live_spawns", "night_guard", "herdr_mods_source", "rules_lead",
-                         "start_at_login", "resume_after_reboot")
+                         "start_at_login", "resume_after_reboot", "worktree_root")
 
 
 def config_value(name, value):
@@ -5724,6 +5724,23 @@ def tool_changes_notice(rec, old, new):
     record(msg)
 
 
+def git_common_dir(path):
+    """The real path of the git dir a checkout or worktree shares with its repo, or "" when it isn't one."""
+    code, out = git(path, "rev-parse", "--git-common-dir")
+    return os.path.normcase(os.path.realpath(os.path.join(path, out))) if code == 0 and out else ""
+
+
+def worktree_in_the_way(path, repo, branch):
+    """'' when the existing folder `path` is already this repo's worktree on `branch`, else why it can't be used.
+    Two repos with the same folder name share <worktree_root>/<name>/<branch>, so the branch alone isn't enough."""
+    if git(path, "rev-parse", "--abbrev-ref", "HEAD") != (0, branch):
+        return f"{path} already exists and isn't a worktree on {branch}"
+    mine = git_common_dir(repo)
+    if not mine or git_common_dir(path) != mine:
+        return f"{path} already exists for another repo; give dir, a new folder, for this one"
+    return ""
+
+
 def plan_worktree(spec, folder):
     """A spawn's worktree from request_spawn's worktree: {repo, branch, base}: (worktree, "") or (None, why not).
     Its folder is `dir` when given, else <worktree_root>/<repo>/<branch> (~/Repos/worktrees by default), the branch
@@ -5744,8 +5761,10 @@ def plan_worktree(spec, folder):
         folder = ""
     root = os.path.abspath(os.path.expanduser(str(config.get("worktree_root") or "").strip() or DEFAULT_CONFIG["worktree_root"]))
     path = folder or os.path.join(root, os.path.basename(top.rstrip(os.sep)), re.sub(r'[^A-Za-z0-9._-]', '-', branch))
-    if os.path.exists(path) and git(path, "rev-parse", "--abbrev-ref", "HEAD") != (0, branch):
-        return None, f"{path} already exists and isn't a worktree on {branch}"
+    if os.path.exists(path):
+        why = worktree_in_the_way(path, top, branch)
+        if why:
+            return None, why
     return {"repo": top, "branch": branch, "base": base, "path": path, "created": False}, ""
 
 
@@ -5824,8 +5843,9 @@ def make_worktree(sp):
         return ""
     path, repo, branch, base = wt["path"], wt["repo"], wt["branch"], wt["base"]
     if os.path.exists(path):
-        if git(path, "rev-parse", "--abbrev-ref", "HEAD") != (0, branch):
-            return f"{path} already exists and isn't a worktree on {branch}"
+        why = worktree_in_the_way(path, repo, branch)
+        if why:
+            return why
     else:
         remote = base.split("/", 1)[0] if "/" in base else ""
         if remote and git(repo, "remote", "get-url", remote)[0] == 0:
@@ -8386,8 +8406,9 @@ class Handler(BaseHTTPRequestHandler):
             if method in ("PUT", "POST"):
                 checked = {k: config_value(k, v) for k, v in self.body().items() if k in DEFAULT_CONFIG}
                 # Only you, in the browser: no agent lets itself start agents without asking.
-                if (not browser or self.key_ok()) and any(k in BROWSER_ONLY_SETTINGS and checked[k][0] != config.get(k) for k in checked):
-                    return self.reply(403, {"error": "auto-approve, the worker cap and the night guard are set only from the web UI"})
+                mine = [k for k in checked if k in BROWSER_ONLY_SETTINGS and checked[k][0] != config.get(k)]
+                if (not browser or self.key_ok()) and mine:
+                    return self.reply(403, {"error": f"{', '.join(mine)} is set only from the web UI"})
                 # An agent may close more spaces to herdr joins, never open one.
                 if (not browser or self.key_ok()) and "herdr_join_never" in checked and isinstance(checked["herdr_join_never"][0], str) \
                         and not join_never(checked["herdr_join_never"][0]) >= join_never(config.get("herdr_join_never")):
