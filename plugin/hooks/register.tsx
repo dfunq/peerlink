@@ -79,6 +79,8 @@ const HELP = `peerlink commands:
   /peerlink [status]       daemon, this agent, its summary
   /peerlink web            open the web UI (one-time sign-in link)
   /peerlink issues         the last problems agents reported with peerlink
+  /peerlink approvals      what waits for your yes: new agents, schedules, rules, resuming after a restart
+  /peerlink approve <id> | deny <id>   answer one, confirmed on your screen
   /peerlink update         install the latest peerlink; every agent reloads itself when idle
   /peerlink restart        restart the daemon
   /peerlink rotate-key     new key; signs out every browser
@@ -1163,7 +1165,7 @@ const RULE_ASK_MS = 180_000
 async function proposeRule($: EngineInterface, rule: string) {
   const res = await call($, 'POST', '/api/rules', { by: sessionId, text: rule })
   if (!res.ok) return `Not added: ${res.data.error ?? res.status}`
-  return `Rule ${res.data.rule.id} for ${res.data.rule.space} waits for your user's approval. You'll get a message when they decide; follow it yourself meanwhile.`
+  return `Rule ${res.data.rule.id} for ${res.data.rule.space} waits for your user's approval.${res.data.note ? ` ${res.data.note}` : ''} You'll get a message when they decide; follow it yourself meanwhile.`
 }
 
 function text(t: string) {
@@ -1417,8 +1419,8 @@ async function findAgent($: EngineInterface, name: string) {
 const COMMANDS: { name: string; description: string; argumentHint: string; args: (a: string) => string }[] = [
   {
     name: 'peerlink',
-    description: 'peerlink: status, web UI, reported issues, restart, rotate-key (help lists every command)',
-    argumentHint: '[status | web | update | issues | restart | rotate-key | help]',
+    description: 'peerlink: status, web UI, reported issues, approvals, restart, rotate-key (help lists every command)',
+    argumentHint: '[status | web | update | issues | approvals | approve <id> | deny <id> | restart | rotate-key | help]',
     args: a => a || 'status',
   },
   {
@@ -1584,6 +1586,23 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
       if (!list.length) return `No issues reported. (${res.data.path})`
       return list.map(i => `${i.id}  ${i.from_name || '?'} (${i.space || '?'}): ${clip(i.text, 140)}`).join('\n') + `\n\nAll reports: ${res.data.path}`
     }
+    case 'approvals': {
+      const res = await call($, 'GET', '/api/decide')
+      if (!res.ok) return `Daemon error: ${res.data.error ?? res.status}`
+      const list = res.data.items as any[]
+      if (!list.length) return 'Nothing waits for your approval.'
+      // The request's own words under each title: what you approve is what it says, not what an agent says it is.
+      return list.map(i => `${i.id}  ${i.who || 'peerlink'}: ${clip(i.title, 160)}` + (i.text ? `\n    ${clip(String(i.text).replace(/\s+/g, ' '), 300)}` : '')).join('\n') + '\n\nAnswer one with /peerlink approve <id> or /peerlink deny <id>; you confirm it on your screen.'
+    }
+    case 'approve':
+    case 'deny': {
+      const id = arg.trim()
+      if (!/^[a-z]\d+$/i.test(id)) return `Usage: /peerlink ${sub} <id>, like /peerlink ${sub} s12. /peerlink approvals lists them.`
+      const res = await call($, 'POST', '/api/decide', { id, approve: sub === 'approve' })
+      if (res.status === 202) return `Asked on your screen: say ${sub === 'approve' ? 'Approve' : 'Deny'} there to ${sub} ${id}. Nothing is decided until you do.`
+      if (!res.ok) return `Not ${sub === 'approve' ? 'approved' : 'denied'}: ${res.data.error ?? res.status}`
+      return `${id}: ${sub === 'approve' ? 'approved' : 'denied'}.`
+    }
     case 'usage':
       return USAGE[arg] ?? HELP
     case 'peers':
@@ -1725,7 +1744,7 @@ export const register: Register = (on, options) => {
           to: {
             type: 'string',
             description:
-              'Peer agent name or id; "space:<name>" for that space\'s lead (or "space" for your own); or "user" for your user (it waits in their Inbox). Leave it out when replying, the reply goes back to the sender',
+              'Peer agent name or id; "space:<name>" for that space\'s lead (or "space" for your own); or "user" for your user (it waits in their Inbox, or with the Inbox off goes to your chat channel). Leave it out when replying, the reply goes back to the sender',
           },
           text: { type: 'string', description: 'The message: what you need and why, briefly' },
           expects_reply: { type: 'boolean', description: 'True if you need an answer. It also starts a turn at once for an idle agent, while a plain message from anyone but its lead waits for its next turn: set it for anything time-boxed' },
@@ -2203,7 +2222,7 @@ export const register: Register = (on, options) => {
     const next = c.next_run ? new Date(c.next_run * 1000).toLocaleString() : ''
     return text(
       c.status === 'pending'
-        ? `Schedule ${c.id} (${c.when_text}) waits for your user's approval, since it may start an agent. You'll get a message when they decide; carry on meanwhile.`
+        ? `Schedule ${c.id} (${c.when_text}) waits for your user's approval, since it may start an agent.${res.data.note ? ` ${res.data.note}` : ''} You'll get a message when they decide; carry on meanwhile.`
         : `Scheduled ${c.id} (${c.when_text}), first run ${next}. It runs whether or not this session is open.`,
     )
   }).catch(daemonDown)

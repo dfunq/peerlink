@@ -39,6 +39,9 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     if (path === '/api/rules/lead') return body.op === 'delete' && body.id === 'r9' ? { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'no rule r9' }) } }
       : state.notLead ? { value: { status: 403, ok: false, headers: {}, text: JSON.stringify({ error: 'only the rules lead', not_lead: true }) } }
       : ok({ code: 'c0de', change: `turn off rule ${body.id} for every space: "Never merge on a Friday."` })
+    if (path === '/api/decide')
+      return body ? (body.id === 's9' ? { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'nothing waits for your approval as s9' }) } } : { value: { status: 202, ok: true, headers: {}, text: JSON.stringify({ asked: true }) } })
+        : ok({ items: [{ kind: 'approval', id: 's3', who: 'acme', title: 'Start an agent in ~/Repos/api', text: 'Fix the login bug\n\nFirst prompt: rm -rf the cache' }], inbox: false })
     if (path === '/api/rules/lead/confirm') return ok(body.approve ? { rule: { id: 'r1', space: '*', status: 'off' } } : { denied: true })
     if (path === '/api/rules') return body ? ok({ rule: { id: 'r4', space: 'acme', status: 'pending' } }) : ok({ rules: [{ id: 'r1', space: 'acme', status: 'active', text: 'Never merge on a Friday.' }] })
     if (path.endsWith('/goal'))
@@ -1534,6 +1537,23 @@ test('an agent you added to another space is told it is a member there, and sees
   const text = (await peerGuidance($, composed))
   expect(text).toContain('in the "games" space; you only see agents in that space and "acme"')
   expect(text).toContain('Your user also made you a member of "acme": you see and message the agents there, and they see you. Your own space is still "games".')
+})
+
+test('/peerlink approvals lists what waits, and approve or deny asks on screen, never deciding by itself', async ($, on) => {
+  engine(on)
+  const daemon = fakeDaemon(on)
+  await $.session.start(START)
+  const listed: any = await $.command.run({ command: 'peerlink', args: 'approvals' })
+  expect(listed.text).toContain('s3  acme: Start an agent in ~/Repos/api')
+  expect(listed.text).toContain('    Fix the login bug First prompt: rm -rf the cache')
+  expect(listed.text).toContain('/peerlink approve <id>')
+  const asked: any = await $.command.run({ command: 'peerlink', args: 'approve s3' })
+  expect(asked.text).toContain('Asked on your screen: say Approve there to approve s3')
+  expect(daemon.posted.find(p => p.path === '/api/decide' && p.body)?.body).toEqual({ id: 's3', approve: true })
+  const denied: any = await $.command.run({ command: 'peerlink', args: 'deny s9' })
+  expect(denied.text).toContain('Not denied: nothing waits for your approval as s9')
+  const bare: any = await $.command.run({ command: 'peerlink', args: 'approve' })
+  expect(bare.text).toContain('Usage: /peerlink approve <id>')
 })
 
 test('plain /peerlink shows status, not the web UI', async ($, on) => {

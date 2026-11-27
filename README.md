@@ -65,7 +65,7 @@ Run `/peerlink web` to open the web UI: every agent, the messages between them, 
 | **Spaces** | Groups that keep agents apart: agents only see and message their own space. Put `space: acme` in a `.peerlink` file in a repo, or set it in the web UI. Without one, everything is in `default`. |
 | **Leads** | A space can have a lead. Work sent to the space goes to the lead, who passes it to the right agent. Spaces can nest, so a lead can represent its team in a bigger space. |
 | **Tasks** | Tracked work handed from one agent (or you) to another, shown on a board in the web UI. |
-| **Inbox** | Everything waiting on you: tasks, questions and approvals. |
+| **Inbox** | Everything waiting on you: tasks, questions and approvals. Turn it off in Settings to get them on your chat channel or in the agent's terminal instead. |
 | **Schedules** | "Do this at 9am every weekday." Kept by the daemon, so they run even with the terminal closed. |
 | **Discord, Telegram, Slack and Teams** | Optional. Talk to your agents from your phone. Map channels or chats to agents, get replies, tap buttons to approve. Set it up on the web UI's **Channels** page. |
 
@@ -88,6 +88,7 @@ Agents act with your permissions, so a message from a peer or a linked chat is a
 | `/peerlink-spaces <name>` | Put this folder's agents in a space |
 | `/peerlink-agent name <name>` | Rename this agent |
 | `/peerlink update` | Update peerlink; every agent reloads by itself |
+| `/peerlink approvals` | What waits for your yes; answer with `/peerlink approve <id>` or `deny <id>` |
 
 ## Learn more
 
