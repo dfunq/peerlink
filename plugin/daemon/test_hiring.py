@@ -132,6 +132,15 @@ class HiringTest(unittest.TestCase):
                                                "first_prompt": "Do the ticket", "space": "kid", "worker": True})
                 self.assertEqual((status, d.spawns[out["id"]]["status"]), (200, "pending"))
 
+    def test_a_parent_an_agent_claims_in_its_peerlink_file_never_auto_approves_a_leads_hire(self):
+        own = d.space_of(d.sessions["s-lead"])[0]
+        with unittest.mock.patch.dict(d.config, {"space_parents": {}, "space_leads": {own: {"cwd": "/x/lead", "how": "set"}}}):
+            # A live agent whose .peerlink says "space: claimed, parent: <the lead's space>".
+            d.sessions["s-claim"] = {"id": "s-claim", "name": "claim", "cwd": "/x/claim", "agent": "a-claim", "last_seen": time.time(),
+                                     "_space": (time.time(), ("claimed", "file", "/x/claim/.peerlink"), own)}
+            self.assertEqual(d.space_parent("claimed"), own)  # messaging still goes by the claim
+            self.assertEqual(d.spawns[self.hire(0, space="claimed")]["status"], "pending")
+
     def test_a_leads_hires_under_its_space_keep_the_cap_night_guard_and_your_switch(self):
         own = d.space_of(d.sessions["s-lead"])[0]
         tree = {"space_parents": {"kid": own}, "space_leads": {own: {"cwd": "/x/lead", "how": "set"}}}

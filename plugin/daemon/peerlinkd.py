@@ -959,10 +959,12 @@ def space_parent(space):
 
 
 def nested_in(space, top):
-    """Whether `space` sits inside `top`, at any depth (a space isn't inside itself)."""
-    seen = {space}
+    """Whether `space` sits inside `top`, at any depth (a space isn't inside itself), going only by the parents you set
+    on the Spaces page. A parent: line an agent's .peerlink claims doesn't count: it would let any agent put its space
+    under a lead's and have that lead's hires there skip your approval."""
+    parents, seen = config.get("space_parents") or {}, {space}
     while True:
-        space = space_parent(space)
+        space = parents.get(space, "")
         if not space or space in seen:
             return False
         if space == top:
