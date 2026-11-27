@@ -138,6 +138,26 @@ class HiringTest(unittest.TestCase):
             os.mkdir(os.path.join(repo, "pkg", ".git"))  # a repo of its own below it: the walk stops at its root
             self.assertFalse(d.claude_config_in(sub))
 
+    @unittest.skipIf(os.name == "nt", "symlinks need privileges on Windows")
+    def test_a_symlink_into_a_repo_counts_that_repos_settings_and_never_trusts_home(self):
+        home = tempfile.mkdtemp(prefix="home-")
+        repo = os.path.join(home, "repo")
+        os.makedirs(os.path.join(repo, ".git"))
+        os.makedirs(os.path.join(repo, "pkg"))
+        open(os.path.join(repo, ".mcp.json"), "w").close()
+        elsewhere = tempfile.mkdtemp(prefix="links-")
+        link, to_home = os.path.join(elsewhere, "pkg"), os.path.join(elsewhere, "home")
+        os.symlink(os.path.join(repo, "pkg"), link)
+        os.symlink(home, to_home)
+        conf = os.path.join(home, ".claude.json")
+        with open(conf, "w") as f:
+            json.dump({"projects": {}}, f)
+        with unittest.mock.patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}):
+            self.assertTrue(d.claude_config_in(link))  # the link's own path holds no settings; the repo it points into does
+            self.real_trust(to_home)
+            with open(conf) as f:
+                self.assertEqual(json.load(f)["projects"], {})
+
     def test_trusting_never_covers_the_home_folder(self):
         home = tempfile.mkdtemp(prefix="home-")
         conf = os.path.join(home, ".claude.json")
