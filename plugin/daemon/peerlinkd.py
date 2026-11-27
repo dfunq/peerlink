@@ -232,6 +232,7 @@ DEFAULT_CONFIG = {
     "herdr_mods_source": "",  # a folder (a clone of your mods repo) that Install herdr mods copies from; set only from the web UI
     "start_at_login": False,  # the daemon starts when you log in (a LaunchAgent, or a Run value on Windows); set only from the web UI
     "resume_after_reboot": True,  # after a reboot, ask you whether to resume the agents that were running; set only from the web UI
+    "worktree_root": "~/Repos/worktrees",  # request_spawn's worktrees go in <this>/<repo>/<branch> unless dir names a folder
     "use_herdr": True,  # start agents in herdr's terminals when herdr (hc) is installed; off, or without herdr, tmux or Terminal as before
     "task_nudge_h": 24,  # an open task with no update for this many hours is raised with its owner, then with whoever asked; 0 is off
     "ask_defaults": True,  # a question to you may name a default the agent goes with when you haven't answered in time
@@ -809,7 +810,7 @@ def find_space_file(cwd):
         path = os.path.join(d, SPACE_FILE)
         if os.path.isfile(path) and read_space_file(path):
             return path
-        # A git worktree (often beside its repo, as <repo>-wt-<branch>) sits where its repo does: the .peerlink of
+        # A git worktree (wherever it is, like <worktree_root>/<repo>/<branch>) sits where its repo does: the .peerlink of
         # its main checkout, not whatever folder it happens to be in.
         main = worktree_main(d)
         if main:
@@ -5702,7 +5703,7 @@ def git(repo, *args, timeout=60):
 TOOL_CHANGES = [
     ("0.9.73", "request_spawn takes model (like opus or sonnet) and effort (low, medium, high, xhigh or max) for the agent it starts."),
     ("0.9.66", "request_spawn takes worker (true to hire a worker for one piece of work) and worktree ({repo, branch, "
-               "base}: a new git worktree made when it starts; leave dir out, or give the repo, for <repo>-wt-<branch>)."),
+               "base}: a new git worktree made when it starts; leave dir out, or give the repo, for the default folder)."),
 ]
 
 
@@ -5725,8 +5726,9 @@ def tool_changes_notice(rec, old, new):
 
 def plan_worktree(spec, folder):
     """A spawn's worktree from request_spawn's worktree: {repo, branch, base}: (worktree, "") or (None, why not).
-    Its folder is `dir` when given, else beside the repo as <repo>-wt-<branch>. `dir` naming the repo itself (or a
-    worktree with no repo given) means that repo, with the worktree in the default folder beside it.
+    Its folder is `dir` when given, else <worktree_root>/<repo>/<branch> (~/Repos/worktrees by default), the branch
+    made safe as a folder name. `dir` naming the repo itself (or a worktree with no repo given) means that repo, with
+    the worktree in the default folder.
     Nothing is created until it starts."""
     if not isinstance(spec, dict):
         return None, "worktree is {repo, branch, base}"
@@ -5740,7 +5742,8 @@ def plan_worktree(spec, folder):
         return None, f"'{branch}' isn't a branch name git takes"
     if folder and os.path.realpath(folder) in (os.path.realpath(repo), os.path.realpath(top)):
         folder = ""
-    path = folder or f"{top.rstrip(os.sep)}-wt-{re.sub(r'[^A-Za-z0-9._-]', '-', branch)}"
+    root = os.path.abspath(os.path.expanduser(str(config.get("worktree_root") or "").strip() or DEFAULT_CONFIG["worktree_root"]))
+    path = folder or os.path.join(root, os.path.basename(top.rstrip(os.sep)), re.sub(r'[^A-Za-z0-9._-]', '-', branch))
     if os.path.exists(path) and git(path, "rev-parse", "--abbrev-ref", "HEAD") != (0, branch):
         return None, f"{path} already exists and isn't a worktree on {branch}"
     return {"repo": top, "branch": branch, "base": base, "path": path, "created": False}, ""
@@ -5828,6 +5831,10 @@ def make_worktree(sp):
         if remote and git(repo, "remote", "get-url", remote)[0] == 0:
             git(repo, "fetch", "--quiet", remote, timeout=120)
         exists = git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}")[0] == 0
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)  # <worktree_root>/<repo>, the first time
+        except OSError as err:
+            return f"couldn't make {os.path.dirname(path)}: {err}"
         code, out = git(repo, "worktree", "add", path, branch) if exists else git(repo, "worktree", "add", "-b", branch, path, base)
         if code != 0:
             return f"git couldn't add the worktree: {out[:300]}"
