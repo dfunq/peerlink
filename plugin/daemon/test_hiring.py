@@ -132,6 +132,22 @@ class HiringTest(unittest.TestCase):
                                                "first_prompt": "Do the ticket", "space": "kid", "worker": True})
                 self.assertEqual((status, d.spawns[out["id"]]["status"]), (200, "pending"))
 
+    def test_a_lead_only_space_stops_a_lead_above_from_auto_approving_hires_in_it(self):
+        self.assertEqual(d.DEFAULT_CONFIG["lead_only_spaces"], "ops")  # on for ops out of the box
+        own = d.space_of(d.sessions["s-lead"])[0]
+        parents = {"ops": own, "ops-db": "ops", "kid": own}
+        with unittest.mock.patch.dict(d.config, {"space_parents": parents, "space_leads": {own: {"cwd": "/x/lead", "how": "set"}},
+                                                 "lead_only_spaces": "ops"}):
+            self.assertEqual(d.spawns[self.hire(0, space="ops")]["status"], "pending")
+            self.assertEqual(d.spawns[self.hire(1, space="ops-db")]["status"], "pending")  # nor any space inside it
+            self.assertEqual(d.spawns[self.hire(2, space="kid")]["status"], "started")
+            self.assertTrue(d.nested_in("ops-db", "ops"))  # ops's own lead still reaches the spaces inside it
+            d.spawns.clear()
+            d.config["lead_only_spaces"] = ""  # switched off: ops is an ordinary space under the lead's again
+            self.assertEqual(d.spawns[self.hire(0, space="ops")]["status"], "started")
+            d.config["lead_only_spaces"] = " Ops , ledger"
+            self.assertEqual(d.spawns[self.hire(1, space="ops-db")]["status"], "pending")
+
     def test_a_parent_an_agent_claims_in_its_peerlink_file_never_auto_approves_a_leads_hire(self):
         own = d.space_of(d.sessions["s-lead"])[0]
         with unittest.mock.patch.dict(d.config, {"space_parents": {}, "space_leads": {own: {"cwd": "/x/lead", "how": "set"}}}):
