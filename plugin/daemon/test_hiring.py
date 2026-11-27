@@ -117,6 +117,21 @@ class HiringTest(unittest.TestCase):
         self.assertEqual(len([t for t in self.told("other") if "hasn't joined" in t]), 1)
         self.assertEqual(len([t for t in self.told("lead") if f"other asked for an agent in {self.dirs[0]}" in t]), 1)
 
+    def test_a_lead_hiring_into_a_space_under_its_own_is_auto_approved(self):
+        own = d.space_of(d.sessions["s-lead"])[0]
+        parents = {"kid": own, "grandkid": "kid", "loop-a": "loop-b", "loop-b": "loop-a"}
+        leads = {own: {"cwd": "/x/lead", "how": "set"}}
+        with unittest.mock.patch.dict(d.config, {"space_parents": parents, "space_leads": leads}):
+            for i, (space, status) in enumerate((("kid", "started"), ("grandkid", "started"), ("loop-a", "pending"))):
+                with self.subTest(space):
+                    self.assertEqual(d.spawns[self.hire(i, space=space)]["status"], status)
+            # An agent that doesn't lead its space gets no such reach: its hire into a nested space waits for you.
+            d.config["auto_approve_folders"] = ["/x/lead", "/x/other"]
+            with unittest.mock.patch.dict(d.config, {"space_leads": {}}):
+                status, out = d.request_spawn({"by": "s-other", "dir": tempfile.mkdtemp(prefix="hire-"), "purpose": "one ticket",
+                                               "first_prompt": "Do the ticket", "space": "kid", "worker": True})
+                self.assertEqual((status, d.spawns[out["id"]]["status"]), (200, "pending"))
+
     def test_every_hire_folder_is_trusted_before_its_agent_starts(self):
         # A folder Claude Code hasn't been told to trust stops the new agent at a question nobody is there to answer.
         sp = self.hire()

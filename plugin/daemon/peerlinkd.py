@@ -958,6 +958,18 @@ def space_parent(space):
     return ""
 
 
+def nested_in(space, top):
+    """Whether `space` sits inside `top`, at any depth (a space isn't inside itself)."""
+    seen = {space}
+    while True:
+        space = space_parent(space)
+        if not space or space in seen:
+            return False
+        if space == top:
+            return True
+        seen.add(space)
+
+
 def parent_of(rec):
     """The parent space this agent speaks for, if it leads a space nested in another; else ''."""
     return space_parent(space_of(rec)[0]) if leads(rec) else ""
@@ -5992,9 +6004,10 @@ def request_spawn(body):
         spawns[sp["id"]] = sp
         save_spawns()
         channel = approval_channel(by)
-        # Auto-approve covers the spaces the asker can already message. A space it can't reach is yours to open to it:
-        # that request waits for you like any other.
-        auto = auto_approved(by) and (sp["space"] == space_of(by)[0] or sp["space"] in reach(by))
+        # Auto-approve covers the spaces the asker can already message, and a lead's hires into the spaces nested under
+        # the one it leads. Any other space is yours to open to it: that request waits for you like any other.
+        own = space_of(by)[0]
+        auto = auto_approved(by) and (sp["space"] == own or sp["space"] in reach(by) or (bool(leads(by)) and nested_in(sp["space"], own)))
     log("spawn asked", sp["id"], sp["requester"]["name"], folder)
     if auto:
         decide_spawn(sp["id"], True, "auto-approve")
