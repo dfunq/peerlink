@@ -2278,6 +2278,8 @@ export const register: Register = (on, options) => {
       const done = await call($, 'POST', '/api/rules/lead/confirm', { by: sessionId, code: ask.data.code, approve: ok })
       if (!done.ok) return text(`Not changed: ${done.data.error ?? done.status}`)
       if (!ok) return text('Your user said no in the terminal; nothing changed.')
+      // The daemon applies it only on your user's Yes in a dialog on this machine's screen, which no agent answers.
+      if (done.data.asked) return text("Your user said yes in the terminal. It is now asked once more on this machine's screen, and it changes only if they say Allow there: list the rules in a minute or two to see whether it did.")
       return text(done.data.deleted ? `Deleted ${done.data.deleted}.` : `Done: rule ${done.data.rule.id} is ${done.data.rule.status} for ${done.data.rule.space === '*' ? 'every space' : done.data.rule.space}. Every agent there has it from its next prompt.`)
     }
     const res = await call($, 'GET', `/api/rules?by=${encodeURIComponent(sessionId)}`)

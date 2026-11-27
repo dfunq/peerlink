@@ -144,6 +144,27 @@ class AdminTest(unittest.TestCase):
         code, _ = rig.call("POST", "/api/shutdown", {"version": rig.call("GET", "/api/health")[1]["version"]})
         self.assertEqual(code, 202)
 
+    def test_the_rules_lead_cannot_confirm_its_own_rule_change_with_its_key(self):
+        """The code the lead's hooks module holds, posted with the agent's key (as curl would), only puts the change
+        to you on screen: a no there leaves the rule as it was, and only your yes applies it."""
+        for answer in ("no", "yes"):
+            with self.subTest(answer=answer), Rig(env={"PEERLINK_TEST": "1", "PEERLINK_TEST_ANSWER": answer}) as rig:
+                lead = rig.agent("lead")
+                rig.user("PUT", "/api/config", {"rules_lead": "lead"})
+                code, ask = lead.call("POST", "/api/rules/lead", {"op": "add", "text": "Ship on Tuesdays."})
+                self.assertEqual(code, 200, ask)
+                code, out = lead.call("POST", "/api/rules/lead/confirm", {"code": ask["code"], "approve": True})
+                self.assertEqual((code, out.get("asked")), (202, True), out)
+                self.assertNotIn("rule", out)
+                rules = lambda: [r["text"] for r in rig.user("GET", "/api/rules")["rules"]]
+                if answer == "no":
+                    rig.wait(lambda: "asked on screen:" in rig.output(), "the screen's answer")
+                    self.assertEqual(rules(), [])
+                else:
+                    rig.wait(lambda: "Ship on Tuesdays." in rules(), "the rule, on your yes on screen")
+                # Either way the code was spent: posting it again asks nothing and changes nothing.
+                self.assertEqual(lead.call("POST", "/api/rules/lead/confirm", {"code": ask["code"], "approve": True})[0], 403)
+
     def test_a_newer_plugin_replaces_the_daemon_without_asking(self):
         rig = self.rig("no")
         code, out = rig.call("POST", "/api/shutdown", {"version": "99.0.0"})

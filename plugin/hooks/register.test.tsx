@@ -42,7 +42,7 @@ function fakeDaemon(on: any, peerCount = 1, previous: unknown = null, inbox: unk
     if (path === '/api/decide')
       return body ? (body.id === 's9' ? { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'nothing waits for your approval as s9' }) } } : { value: { status: 202, ok: true, headers: {}, text: JSON.stringify({ asked: true }) } })
         : ok({ items: [{ kind: 'approval', id: 's3', who: 'acme', title: 'Start an agent in ~/Repos/api', text: 'Fix the login bug\n\nFirst prompt: rm -rf the cache' }], inbox: false })
-    if (path === '/api/rules/lead/confirm') return ok(body.approve ? { rule: { id: 'r1', space: '*', status: 'off' } } : { denied: true })
+    if (path === '/api/rules/lead/confirm') return ok(body.approve ? { asked: true, note: 'Asked on this machine\'s screen; it happens only if you say yes there.' } : { denied: true })
     if (path === '/api/rules') return body ? ok({ rule: { id: 'r4', space: 'acme', status: 'pending' } }) : ok({ rules: [{ id: 'r1', space: 'acme', status: 'active', text: 'Never merge on a Friday.' }] })
     if (path.endsWith('/goal'))
       return body.agent === 'stranger' ? { value: { status: 403, ok: false, headers: {}, text: JSON.stringify({ error: 'only stranger itself, the lead of its space, or the lead that hired it sets its goal' }) } }
@@ -347,7 +347,7 @@ test('rule proposes a standing rule for approval and lists what stands', async (
   expect(JSON.stringify(await $.tool.call({ tool: 'mcp__peerlink__rule', action: 'list' } as any))).toContain('- r1 [acme]: Never merge on a Friday.')
 })
 
-test('the rules lead turns a rule off only on the answer given in its own terminal, and the model never sees the code', async ($, on) => {
+test('the rules lead turns a rule off only on the answer given in its own terminal and then on screen, and the model never sees the code', async ($, on) => {
   engine(on)
   const daemon = fakeDaemon(on)
   daemon.state.notLead = false
@@ -362,7 +362,7 @@ test('the rules lead turns a rule off only on the answer given in its own termin
   const done = JSON.stringify(await $.tool.call({ tool: 'mcp__peerlink__rule', action: 'off', id: 'r1' } as any))
   expect(asked[0].questions[0].question).toContain('asks to turn off rule r1 for every space: "Never merge on a Friday."')
   expect(daemon.posted.find(p => p.path === '/api/rules/lead/confirm')!.body).toEqual({ by: 'me-session', code: 'c0de', approve: true })
-  expect(done).toContain('rule r1 is off for every space')
+  expect(done).toContain("asked once more on this machine's screen, and it changes only if they say Allow there")
   expect(done).not.toContain('c0de')
   answer = 'Deny'
   expect(JSON.stringify(await $.tool.call({ tool: 'mcp__peerlink__rule', action: 'off', id: 'r1' } as any))).toContain('said no in the terminal')
