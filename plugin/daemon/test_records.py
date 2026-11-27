@@ -149,6 +149,17 @@ class RecordsTest(unittest.TestCase):
 
     def test_the_rules_lead_changes_any_rule_only_with_the_code_your_terminal_answer_sends_back(self):
         lead, other = peerlinkd.sessions["s-lead"], peerlinkd.sessions["s-other"]
+        # The code only asks you on screen; "the screen" here answers as `screen` says, at once.
+        screen, asked = ["yes"], []
+
+        def ask_then(question, ok, do):
+            asked.append(question)
+            if screen[0] == "yes":
+                do()
+            return 202, {"asked": True}
+        patch = unittest.mock.patch.object(peerlinkd, "ask_then", ask_then)
+        patch.start()
+        self.addCleanup(patch.stop)
         self.addCleanup(peerlinkd.config.update, {"rules_lead": "", "rules_lead_agent": ""})
         lead["agent"], other["agent"] = "a-lead", "a-other"
         peerlinkd.agents.update({"a-lead": {"id": "a-lead", "name": "lead", "seen": 1}, "a-other": {"id": "a-other", "name": "other", "seen": 1}})
@@ -167,23 +178,33 @@ class RecordsTest(unittest.TestCase):
         self.assertEqual(peerlinkd.confirm_lead_change(other, {"code": ask["code"], "approve": True})[0], 403)
         status, ask = peerlinkd.propose_lead_change(lead, {"op": "add", "text": "Ship on Tuesdays."})
         self.assertEqual(peerlinkd.confirm_lead_change(lead, {"code": "nope", "approve": True})[0], 403)
-        status, out = peerlinkd.confirm_lead_change(lead, {"code": ask["code"], "approve": True})
-        rid = out["rule"]["id"]
-        self.assertEqual((status, out["rule"]["status"], out["rule"]["space"], out["rule"]["by"]), (200, "active", "*", "lead"))
-        self.assertEqual(peerlinkd.rules[rid]["via"], "terminal")
+        # Your No on screen leaves it undone, and the code is spent.
+        screen[0] = "no"
+        self.assertEqual(peerlinkd.confirm_lead_change(lead, {"code": ask["code"], "approve": True}), (202, {"asked": True}))
+        self.assertEqual(asked[-1], 'Rules lead lead asks to add this standing rule for every space: "Ship on Tuesdays."\n\nAllow it?')
+        self.assertFalse([r for r in peerlinkd.rules.values() if r["text"] == "Ship on Tuesdays."])
+        self.assertEqual(peerlinkd.confirm_lead_change(lead, {"code": ask["code"], "approve": True})[0], 403)
+        screen[0] = "yes"
+        ask = peerlinkd.propose_lead_change(lead, {"op": "add", "text": "Ship on Tuesdays."})[1]
+        self.assertEqual(peerlinkd.confirm_lead_change(lead, {"code": ask["code"], "approve": True})[0], 202)
+        r = next(r for r in peerlinkd.rules.values() if r["text"] == "Ship on Tuesdays.")
+        rid = r["id"]
+        self.assertEqual((r["status"], r["space"], r["requester"]["name"], r["via"]), ("active", "*", "lead", "terminal"))
         self.assertEqual(peerlinkd.confirm_lead_change(lead, {"code": ask["code"], "approve": True})[0], 403)
         self.assertIn("Ship on Tuesdays.", [r["text"] for r in peerlinkd.client_config("s-other")["rules"]])
         # A No drops it; edit, off and delete reach any rule, yours included.
         mine = peerlinkd.add_rule({"text": "Answer in English.", "space": "*"})[1]["rule"]["id"]
         ask = peerlinkd.propose_lead_change(lead, {"op": "off", "id": mine})[1]
         self.assertIn(f'turn off rule {mine} for every space: "Answer in English."', ask["change"])
+        n = len(asked)
         self.assertEqual(peerlinkd.confirm_lead_change(lead, {"code": ask["code"], "approve": False})[1], {"denied": True})
-        self.assertEqual(peerlinkd.rules[mine]["status"], "active")
+        self.assertEqual((peerlinkd.rules[mine]["status"], len(asked)), ("active", n))  # a terminal No asks nothing on screen
         ask = peerlinkd.propose_lead_change(lead, {"op": "edit", "id": mine, "text": "Answer in plain English.", "space": "elsewhere"})[1]
-        self.assertEqual(peerlinkd.confirm_lead_change(lead, {"code": ask["code"], "approve": True})[0], 200)
+        self.assertEqual(peerlinkd.confirm_lead_change(lead, {"code": ask["code"], "approve": True})[0], 202)
         self.assertEqual((peerlinkd.rules[mine]["text"], peerlinkd.rules[mine]["space"]), ("Answer in plain English.", "elsewhere"))
         ask = peerlinkd.propose_lead_change(lead, {"op": "delete", "id": rid})[1]
-        self.assertEqual(peerlinkd.confirm_lead_change(lead, {"code": ask["code"], "approve": True})[1], {"deleted": rid})
+        self.assertEqual(peerlinkd.confirm_lead_change(lead, {"code": ask["code"], "approve": True})[0], 202)
+        self.assertNotIn(rid, peerlinkd.rules)
         # A code older than ten minutes is gone; renaming the lead in Settings takes the right away at once.
         ask = peerlinkd.propose_lead_change(lead, {"op": "on", "id": mine})[1]
         peerlinkd.lead_changes[ask["code"]]["expires"] = 0

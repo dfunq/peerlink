@@ -234,7 +234,7 @@ DEFAULT_CONFIG = {
     "herdr_spaces": {},  # peerlink space -> the herdr space id herdr sync shows it in
     "herdr_tab_names": {},  # herdr tab id -> the name herdr sync last left it showing: a tab renamed since renames its agent
     "herdr_join_never": "",  # spaces a tab you open in herdr never joins on its own, comma separated (a space others nest in never does either); agents can add to it, only the web UI removes
-    "rules_lead": "",  # the one agent, by name, that may add, change and remove any standing rule, each change on your Yes in its own terminal; set only from the web UI
+    "rules_lead": "",  # the one agent, by name, that may add, change and remove any standing rule, each change on your Yes in its own terminal and then on this screen; set only from the web UI
     "herdr_mods_source": "",  # a folder (a clone of your mods repo) that Install herdr mods copies from; set only from the web UI
     "start_at_login": False,  # the daemon starts when you log in (a LaunchAgent, or a Run value on Windows); set only from the web UI
     "resume_after_reboot": True,  # after a reboot, ask you whether to resume the agents that were running; set only from the web UI
@@ -5484,8 +5484,9 @@ def edit_rule(rid, body):
 
 # The rules lead (Settings > Approvals, only from the web UI) is one agent, by name, that may add a rule for any space
 # and change, turn off or delete any rule. It asks here first and gets back a single-use code its hooks module holds
-# while it puts the change to you in that agent's own terminal; your Yes there sends the code back and applies it.
-# The model never sees the code. It is a guard, not a lock: an agent with a shell on this machine could ask for one.
+# while it puts the change to you in that agent's own terminal; your Yes there sends the code back, and the daemon
+# then asks you once more on this machine's screen. Only a Yes in that dialog applies it: anything holding the
+# agent's key (the hooks module, or the agent itself with curl) can ask, never confirm.
 lead_changes = {}  # code -> the change, who asked and until when
 LEAD_CHANGE_TTL = 600
 LEAD_OPS = ("add", "edit", "off", "on", "delete")
@@ -5547,33 +5548,47 @@ def propose_lead_change(by, body):
         now = time.time()
         for c in [c for c, x in lead_changes.items() if x["expires"] < now]:
             lead_changes.pop(c)
-        lead_changes[code] = {**change, "by": by["id"], "expires": now + LEAD_CHANGE_TTL}
+        lead_changes[code] = {**change, "words": words, "by": by["id"], "expires": now + LEAD_CHANGE_TTL}
     log("rule", "lead asks", display_name(by), op, change.get("id", ""))
     return 200, {"code": code, "change": words}
 
 
 def confirm_lead_change(by, body):
-    """Your answer in the rules lead's terminal: approve applies the change its code stands for, anything else drops it."""
+    """Your answer in the rules lead's terminal. No drops the change its code stands for. Yes only puts it to you on
+    this machine's screen, in the dialog no agent answers, and it is applied on your Yes there: the code and the
+    agent's key are enough to ask, never to apply, so the lead can't confirm its own change with curl."""
     with lock:
-        change = lead_changes.pop(str(body.get("code") or ""), None)
-    if not change or change["by"] != (by or {}).get("id") or change["expires"] < time.time() or not is_rules_lead(by):
-        return 403, {"error": "that change has expired or isn't this agent's: ask again"}
+        code = str(body.get("code") or "")
+        change = lead_changes.get(code)
+        if not change or change["by"] != (by or {}).get("id") or change["expires"] < time.time() or not is_rules_lead(by):
+            return 403, {"error": "that change has expired or isn't this agent's: ask again"}
+        if body.get("approve") and _asking.locked():
+            return 409, {"error": "a question is already on this machine's screen: answer it, then ask again"}
+        lead_changes.pop(code)
     name = display_name(by)
     if not body.get("approve"):
         log("rule", "lead change denied in the terminal", name, change["op"], change.get("id", ""))
         return 200, {"denied": True}
+
+    def apply():
+        if not is_rules_lead(by):  # renamed away in Settings while the dialog was up
+            log("rule", "lead change dropped: no longer the rules lead", name, change["op"], change.get("id", ""))
+            return
+        status, out = apply_lead_change(change, by)
+        log("rule", out.get("rule", {}).get("id") or out.get("deleted") or out.get("error", ""), change["op"],
+            "approved on screen for" if status == 200 else "failed for", name)
+    return ask_then(f"Rules lead {name} asks to {change['words']}\n\nAllow it?", "Allow", apply)
+
+
+def apply_lead_change(change, by):
     op = change["op"]
     if op == "add":
-        status, out = add_rule({"text": change["text"], "space": change["space"]}, by, lead=True)
-    elif op == "delete":
-        status, out = edit_rule(change["id"], {"delete": True})
-    elif op == "edit":
-        status, out = edit_rule(change["id"], {"text": change["text"], "space": change["space"]})
-    else:
-        status, out = edit_rule(change["id"], {"status": "active" if op == "on" else "off"})
-    if status == 200:
-        log("rule", out.get("rule", {}).get("id") or out.get("deleted"), op, "approved in the terminal of", name)
-    return status, out
+        return add_rule({"text": change["text"], "space": change["space"]}, by, lead=True)
+    if op == "delete":
+        return edit_rule(change["id"], {"delete": True})
+    if op == "edit":
+        return edit_rule(change["id"], {"text": change["text"], "space": change["space"]})
+    return edit_rule(change["id"], {"status": "active" if op == "on" else "off"})
 
 
 # A question to you may carry a default: what the agent goes with when you haven't answered in time. You can turn
