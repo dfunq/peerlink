@@ -132,6 +132,28 @@ class HiringTest(unittest.TestCase):
                                                "first_prompt": "Do the ticket", "space": "kid", "worker": True})
                 self.assertEqual((status, d.spawns[out["id"]]["status"]), (200, "pending"))
 
+    def test_a_leads_hires_under_its_space_keep_the_cap_night_guard_and_your_switch(self):
+        own = d.space_of(d.sessions["s-lead"])[0]
+        tree = {"space_parents": {"kid": own}, "space_leads": {own: {"cwd": "/x/lead", "how": "set"}}}
+        with unittest.mock.patch.dict(d.config, tree):
+            # Auto-approve switched off for this lead: its hire into a space under its own waits for you.
+            with unittest.mock.patch.dict(d.config, {"auto_approve_all": False, "auto_approve_folders": []}):
+                self.assertEqual(d.spawns[self.hire(0, space="kid")]["status"], "pending")
+            d.spawns.clear()
+            # The night guard refuses it in its hours.
+            with unittest.mock.patch.object(d, "night_guard_on", lambda now=None: True):
+                status, out = d.request_spawn({"by": "s-lead", "dir": self.dirs[0], "purpose": "one ticket",
+                                               "first_prompt": "Do the ticket", "worker": True, "space": "kid"})
+                self.assertEqual(status, 409)
+                self.assertIn("night guard", out["error"])
+            # Past the worker cap it queues instead of starting.
+            d.config["max_live_spawns"] = 1
+            first = self.hire(0, space="kid")
+            self.register(first, "w0")
+            second = self.hire(1, space="kid")
+            self.assertEqual((d.spawns[first]["status"], d.spawns[second]["status"]), ("started", "queued"))
+            self.assertEqual(self.launched, [first])
+
     def test_every_hire_folder_is_trusted_before_its_agent_starts(self):
         # A folder Claude Code hasn't been told to trust stops the new agent at a question nobody is there to answer.
         sp = self.hire()
