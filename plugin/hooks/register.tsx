@@ -1391,7 +1391,7 @@ function hierarchyGuidance() {
     )
   if (cfg.parent || cfg.leads)
     lines.push(
-      `When one of your agents needs to work directly with an agent in another space, ask that space's lead for the agent's name, then link the two with the link tool (load it with ToolSearch, "select:mcp__peerlink__link"); the other lead agrees from its side.`,
+      `When one of your agents needs to work directly with an agent in another space, ask that space's lead for the agent's name, then link the two with the link tool (load it with ToolSearch, "select:mcp__peerlink__link"); the other lead agrees from its side. To have one of your agents keep at something until it's done, give it a goal with set_goal (also behind ToolSearch).`,
     )
   const kids = cfg.children ?? []
   if (kids.length)
@@ -1694,10 +1694,12 @@ export const register: Register = (on, options) => {
 
   // Tool schemas are read on every request, so a tool an agent's role rarely or never uses waits behind ToolSearch:
   // a worker gets retire up front and request_spawn and rule behind it; only a lead gets request_spawn up front.
+  // set_goal is rare for everyone.
   const deferred: Record<string, () => boolean> = {
     retire: () => !cfg?.hired_by,
     request_spawn: () => !!cfg?.hired_by || !(cfg?.leads || cfg?.parent),
     rule: () => true,
+    set_goal: () => true,
   }
   for (const [name, isDeferred] of Object.entries(deferred))
     on('tool.describe', { tool: `mcp__peerlink__${name}` }, async ($, e, next) => ({ ...(await next(e)), isDeferred: isDeferred() }))
@@ -1817,6 +1819,20 @@ export const register: Register = (on, options) => {
       inputSchema: {
         type: 'object',
         properties: { agent: { type: 'string', description: 'Leave out to retire yourself; as a lead, the worker you hired' } },
+      },
+      isDeferred: true,
+    })
+    await $.tool.register({
+      name: 'set_goal',
+      description:
+        "Run /goal in an agent, so it keeps working until the goal is met: as the lead of its space or the lead that hired it, or for yourself. A busy agent runs it after its current turn. It sends /goal only, and the goal shows in your user's message log as set by you.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          agent: { type: 'string', description: 'The agent, by name; leave out for yourself' },
+          goal: { type: 'string', description: 'What it should get done, in one line (newlines become spaces), up to 1000 characters' },
+        },
+        required: ['goal'],
       },
       isDeferred: true,
     })
@@ -2153,6 +2169,13 @@ export const register: Register = (on, options) => {
     const res = await call($, 'POST', `/api/sessions/${sessionId}/retire`, { agent: input.agent ?? '' })
     if (!res.ok) return text(`Not retired: ${res.data.error ?? res.status}`)
     return text(input.agent ? `${res.data.note}.` : `You retire when this turn ends${res.data.told ? `; ${res.data.told} is told` : ''}. End the turn now with one line.`)
+  }).catch(daemonDown)
+
+  on('tool.call', { tool: 'mcp__peerlink__set_goal' }, async ($, e) => {
+    const input = e as any
+    const res = await call($, 'POST', `/api/sessions/${sessionId}/goal`, { agent: input.agent ?? '', goal: input.goal ?? '' })
+    if (!res.ok) return text(`Goal not set: ${res.data.error ?? res.status}`)
+    return text(`${res.data.note} (${res.data.id}).`)
   }).catch(daemonDown)
 
   on('tool.call', { tool: 'mcp__peerlink__schedule' }, async ($, e) => {

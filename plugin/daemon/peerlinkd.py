@@ -7416,6 +7416,65 @@ def retire(sid, body):
     return 200, {"retired": who, "told": hirer.get("name") if target is by else "", "note": line}
 
 
+# The longest goal an agent may set for another: /goal takes one line, so a longer one is refused, never cut.
+GOAL_MAX_CHARS = 1000
+
+
+def clean_goal(text):
+    """A goal as one line: every control, format or line/paragraph separator character (a newline that could start a
+    second command among them) becomes a space, and runs of whitespace one space."""
+    text = "".join(" " if unicodedata.category(c)[0] == "C" or unicodedata.category(c) in ("Zl", "Zp") else c for c in str(text or ""))
+    return " ".join(text.split())
+
+
+def set_goal(sid, body):
+    """Run /goal <text> in an agent, the way /peerlink run does: after its current turn when it's busy. Only the
+    agent itself, its space's lead, or the lead that hired it as a worker may, and only an agent it can reach. This
+    only ever sends /goal: agents never run other commands in each other."""
+    with lock:
+        by = sessions.get(sid)
+        if by is None:
+            return 404, {"error": "unknown agent; register again"}
+        # An MCP client outside Claude Code (a voice bot, peerlink_mcp.py) never sets a goal, whatever role or link it
+        # holds: /goal steers a Claude Code agent, and only Claude Code agents steer each other. Agents-channel clients
+        # have no session at all, so they never get this far.
+        if is_client(by):
+            return 403, {"error": "an outside MCP client can't set an agent's goal: send it a message instead"}
+    goal = clean_goal(body.get("goal"))
+    if not goal:
+        return 400, {"error": "goal is required: one line saying what the agent should get done"}
+    if len(goal) > GOAL_MAX_CHARS:
+        return 413, {"error": f"goal is {len(goal)} characters, over the {GOAL_MAX_CHARS} limit: put the details in a file or a task and give the goal in one line"}
+    name = str(body.get("agent") or "").strip()
+    target = by
+    if name and name.lower() not in (display_name(by).lower(), by["id"]):
+        target, err = resolve(name, reach(by), by)
+        if not target:
+            return 404, {"error": err or f"no running agent is called {name}"}
+    with lock:
+        # Looked up outside the lock: it may have ended since.
+        if sessions.get(target["id"]) is not target or not is_live(target):
+            return 404, {"error": f"{display_name(target)} isn't running any more"}
+        if is_client(target):
+            return 400, {"error": f"{display_name(target)} is an outside MCP client, which has no /goal: send it a message instead"}
+        if target is not by and not is_boss(by, target):
+            return 403, {"error": f"only {display_name(target)} itself, the lead of its space, or the lead that hired it sets its goal"}
+        target.setdefault("run", []).append({"command": "goal", "args": goal, "by": display_name(by), "by_agent": by.get("agent") or by["id"]})
+        # In the message log, from the one who set it to the agent, so you and it can see who set which goal. It's
+        # recorded, not queued: the /goal itself is what reaches the agent.
+        msg = {"id": f"m{next_msg[0]}", "ts": time.time(), "from": by["id"], "from_name": display_name(by), "from_agent": by.get("agent") or "", "from_host": HOSTNAME,
+               "to": target["id"], "to_name": display_name(target), "from_cwd": by.get("cwd", ""), "to_cwd": target.get("cwd", ""),
+               "from_space": space_of(by)[0], "to_space": space_of(target)[0], "kind": "goal",
+               "text": f"/goal {goal}", "expects_reply": False, "reply_to": None, "hops": 0, "status": "delivered", "v": 2}
+        next_msg[0] += 1
+        record(msg)
+        who, busy = display_name(target), bool(target.get("busy"))
+    log("goal", msg["id"], who, "by", display_name(by), by.get("agent") or by["id"], repr(goal[:200]))
+    whose = "Your" if target is by else who + "'s"
+    return 200, {"agent": who, "id": msg["id"], "queued": busy,
+                 "note": whose + " goal is set" + (", to run after its current turn" if busy else "")}
+
+
 def end_worker(target, sp, how):
     """Mark a worker's spawn retired and say so: how is "self" (it retired itself; its lead is told), "lead" (the lead
     that hired it did; the line is its answer) or "idle" (peerlink did, after IDLE_RETIRE_S; its lead is told).
@@ -8674,6 +8733,9 @@ class Handler(BaseHTTPRequestHandler):
 
         if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "retire" and method == "POST":
             return self.reply(*retire(rest[1], self.body()))
+
+        if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "goal" and method == "POST":
+            return self.reply(*set_goal(rest[1], self.body()))
 
         if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "link" and method == "POST":
             return self.reply(*broker_link(rest[1], self.body()))
