@@ -238,6 +238,7 @@ DEFAULT_CONFIG = {
     "herdr_mods_source": "",  # a folder (a clone of your mods repo) that Install herdr mods copies from; set only from the web UI
     "start_at_login": False,  # the daemon starts when you log in (a LaunchAgent, or a Run value on Windows); set only from the web UI
     "resume_after_reboot": True,  # after a reboot, ask you whether to resume the agents that were running; set only from the web UI
+    "lead_only_spaces": "ops",  # spaces whose hires only their own lead's auto-approve covers, never a lead above, comma separated; set only from the web UI
     "worktree_root": "~/Repos/worktrees",  # request_spawn's worktrees go in <this>/<repo>/<branch> unless dir names a folder; set only from the web UI
     "use_herdr": True,  # start agents in herdr's terminals when herdr (hc) is installed; off, or without herdr, tmux or Terminal as before
     "task_nudge_h": 24,  # an open task with no update for this many hours is raised with its owner, then with whoever asked; 0 is off
@@ -709,7 +710,7 @@ CONFIG_MIN_1 = {"poll_interval_ms", "peer_ttl_s", "max_hops", "rate_limit_per_mi
 
 # What no agent changes for itself: who starts agents without asking, and how many workers run when.
 BROWSER_ONLY_SETTINGS = ("inbox_enabled", "auto_approve_all", "auto_approve_folders", "max_live_spawns", "night_guard", "herdr_mods_source", "rules_lead",
-                         "start_at_login", "resume_after_reboot", "worktree_root")
+                         "start_at_login", "resume_after_reboot", "worktree_root", "lead_only_spaces")
 
 
 def config_value(name, value):
@@ -956,6 +957,24 @@ def space_parent(space):
         if is_live(r) and space_of(r)[0] == space and r["_space"][2]:
             return r["_space"][2]
     return ""
+
+
+def nested_in(space, top):
+    """Whether `space` sits inside `top`, at any depth (a space isn't inside itself), going only by the parents you set
+    on the Spaces page. A parent: line an agent's .peerlink claims doesn't count: it would let any agent put its space
+    under a lead's and have that lead's hires there skip your approval. A space you list in lead_only_spaces ends the
+    walk: it and the spaces inside it aren't inside any space above it here."""
+    parents, seen = config.get("space_parents") or {}, {space}
+    walled = {clean_space(x) for x in str(config.get("lead_only_spaces") or "").split(",")} - {""}
+    while True:
+        if space in walled:  # its hires are its own lead's to auto-approve, not a lead's above
+            return False
+        space = parents.get(space, "")
+        if not space or space in seen:
+            return False
+        if space == top:
+            return True
+        seen.add(space)
 
 
 def parent_of(rec):
@@ -5992,9 +6011,10 @@ def request_spawn(body):
         spawns[sp["id"]] = sp
         save_spawns()
         channel = approval_channel(by)
-        # Auto-approve covers the spaces the asker can already message. A space it can't reach is yours to open to it:
-        # that request waits for you like any other.
-        auto = auto_approved(by) and (sp["space"] == space_of(by)[0] or sp["space"] in reach(by))
+        # Auto-approve covers the spaces the asker can already message, and a lead's hires into the spaces nested under
+        # the one it leads. Any other space is yours to open to it: that request waits for you like any other.
+        own = space_of(by)[0]
+        auto = auto_approved(by) and (sp["space"] == own or sp["space"] in reach(by) or (bool(leads(by)) and nested_in(sp["space"], own)))
     log("spawn asked", sp["id"], sp["requester"]["name"], folder)
     if auto:
         decide_spawn(sp["id"], True, "auto-approve")

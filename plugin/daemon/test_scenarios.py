@@ -202,6 +202,15 @@ class ScenarioTest(unittest.TestCase):
         self.assertEqual((code, out["error"]), (403, "only the web UI takes a space off herdr_join_never"))
         self.assertEqual(rig.user("PUT", "/api/config", {"herdr_join_never": ""})["herdr_join_never"], "")
 
+    def test_only_you_set_which_spaces_a_lead_above_cant_auto_approve_hires_in(self):
+        rig = self.rig()
+        self.assertEqual(rig.user("GET", "/api/config")["lead_only_spaces"], "ops")  # on for ops out of the box
+        for value in ("", "ops, ledger"):
+            code, out = rig.call("PUT", "/api/config", {"lead_only_spaces": value})
+            self.assertEqual(code, 403)
+            self.assertIn("lead_only_spaces is set only from the web UI", out["error"])
+        self.assertEqual(rig.user("PUT", "/api/config", {"lead_only_spaces": ""})["lead_only_spaces"], "")
+
     def test_work_goes_down_a_tree_of_tasks_and_word_comes_back_without_a_relay(self):
         rig = self.rig()
         chief, core, loop = self.team(rig)
