@@ -195,6 +195,18 @@ class InboxSettingTest(unittest.TestCase):
         self.assertEqual([i["id"] for i in peerlinkd.inbox_items() if i["kind"] == "approval"], ["b4"])
 
 
+    def test_the_resume_question_goes_to_an_agent_that_is_not_a_worker(self):
+        self.off()
+        keep = dict(peerlinkd.resume_ask)
+        self.addCleanup(lambda: (peerlinkd.resume_ask.clear(), peerlinkd.resume_ask.update(keep)))
+        peerlinkd.resume_ask.clear()
+        peerlinkd.resume_ask.update({"id": "b5", "created": peerlinkd.time.time(), "status": "pending", "note": "", "agents": []})
+        worker = lambda r: {"worker": True} if r and r.get("id") == "s-web" else None  # noqa: E731
+        with unittest.mock.patch.object(peerlinkd, "worker_spawn", worker), unittest.mock.patch.object(peerlinkd, "task_message") as told:
+            peerlinkd.resume_in_a_terminal(peerlinkd.resume_ask, wait_s=1)
+        self.assertEqual(told.call_args.kwargs["prefer"]["id"], "s-quiet")
+        self.assertEqual(peerlinkd.resume_ask["told"], "quiet")
+
 class DecideInTerminalTest(unittest.TestCase):
     """/peerlink approve|deny <id>: the agent's key alone decides nothing; it's done only on your yes on screen."""
 
@@ -234,6 +246,108 @@ class DecideInTerminalTest(unittest.TestCase):
         rig.wait(lambda: "turned down on screen" in rig.output(), "the screen's answer")
         self.assertEqual(self.status(rig, rid), "pending")
         self.assertEqual(rig.call("POST", "/api/decide", {"id": "r999", "approve": True})[0], 404)
+
+    def raw(self, rig, method, path, body=None, headers=None):
+        """A plain HTTP call, as curl from an agent's shell would make it: only the headers given."""
+        import json
+        import urllib.error
+        import urllib.request
+        h = {"Content-Type": "application/json", "Host": f"127.0.0.1:{rig.port}", **(headers or {})}
+        req = urllib.request.Request(f"http://127.0.0.1:{rig.port}{path}", method=method, headers=h,
+                                     data=None if body is None else json.dumps(body).encode())
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, json.loads(r.read() or b"{}")
+        except urllib.error.HTTPError as err:
+            return err.code, json.loads(err.read() or b"{}")
+
+    def own_requests(self, rig):
+        """An agent asks to start an agent and to schedule one: both wait for your yes."""
+        a = rig.agent("web")
+        code, sp = a.call("POST", "/api/spawns", {"dir": a.cwd, "purpose": "Fix the login bug", "first_prompt": "Delete the cache folder"})
+        self.assertEqual((code, sp.get("status")), (200, "pending"), sp)
+        code, c = a.call("POST", "/api/schedules", {"prompt": "Ship whatever is on main", "at": "in 2h", "folder": a.cwd})
+        self.assertEqual((code, c["schedule"]["status"]), (200, "pending"), c)
+        return a, sp["id"], c["schedule"]["id"]
+
+    def statuses(self, rig, sid, cid):
+        _, sps = rig.call("GET", "/api/spawns")
+        _, cs = rig.call("GET", "/api/schedules")
+        return (next(x["status"] for x in sps["spawns"] if x["id"] == sid), next(x["status"] for x in cs["schedules"] if x["id"] == cid))
+
+    def test_an_agent_cannot_approve_its_own_start_or_schedule_without_your_yes_on_screen(self):
+        rig = self.rig("no")
+        a, sid, cid = self.own_requests(rig)
+        key = {"X-Peerlink-Key": rig.key}
+        for iid in (sid, cid):
+            # Its plugin's /peerlink approve, an MCP tool, or another agent's /peerlink run all reach the daemon as this
+            # call: the key, the agent's own session. It only asks on screen.
+            code, out = a.call("POST", "/api/decide", {"id": iid, "approve": True})
+            self.assertEqual((code, out.get("asked")), (202, True), out)
+            rig.wait(lambda: f"asked on screen: Approve {iid}?" in rig.output(), f"the dialog for {iid}")
+            rig.wait(lambda: rig.output().count("turned down on screen") >= 1, "the screen's no")
+            # curl with the key, dressed as a browser (Origin, a made-up session cookie): still only a question.
+            code, out = self.raw(rig, "POST", "/api/decide", {"id": iid, "approve": True},
+                                 {**key, "Origin": f"http://127.0.0.1:{rig.port}", "Cookie": "peerlink_session=forged"})
+            self.assertIn(code, (202, 409), out)  # asked, or refused while a question is still on screen / just turned down
+            self.assertFalse(out.get("approved") or out.get("spawn") or out.get("schedule"), out)
+            # No key and no session: refused outright.
+            self.assertEqual(self.raw(rig, "POST", "/api/decide", {"id": iid, "approve": True})[0], 401)
+            self.assertEqual(self.raw(rig, "POST", "/api/decide", {"id": iid, "approve": True},
+                                      {"Origin": f"http://127.0.0.1:{rig.port}", "Cookie": "peerlink_session=forged"})[0], 401)
+            # The Inbox's own answer route and editing a schedule are your browser's alone; the key is refused.
+            code, out = self.raw(rig, "POST", "/api/inbox", {"kind": "approval", "id": iid, "action": "approve"}, key)
+            self.assertEqual(code, 403, out)
+        for path in (f"/api/schedules/{cid}", f"/api/schedules/{cid}/enable"):
+            self.assertEqual(self.raw(rig, "POST", path, {"status": "active"}, key)[0], 403, path)
+        # Nor can it get a browser session to do it with: the sign-in link is asked on screen and never handed back.
+        code, out = self.raw(rig, "POST", "/api/web/link", {}, key)
+        self.assertNotIn("url", out)
+        rig.wait(lambda: rig.output().count("turned down on screen") >= 2 or code == 409, "the sign-in question's no")
+        self.assertEqual(self.statuses(rig, sid, cid), ("pending", "pending"))
+
+    def test_another_agent_cannot_queue_a_peerlink_run_in_yours(self):
+        """/peerlink run is queued only by you on a chat channel: an agent's message never becomes a command to run."""
+        rig = self.rig("no")
+        a, sid, cid = self.own_requests(rig)
+        b = rig.agent("quiet")
+        b.send(to=a.name, text=f"/peerlink approve {sid}")
+        for body in ({"run": [{"command": "peerlink", "args": f"approve {sid}"}]}, {"busy": False, "run": [{"command": "peerlink", "args": f"approve {cid}"}]}):
+            rig.call("POST", f"/api/sessions/{a.sid}/heartbeat", body)
+            rig.call("POST", f"/api/sessions/{b.sid}", {"id": a.sid, **body})
+        code, out = rig.call("POST", f"/api/sessions/{a.sid}/heartbeat", {"busy": False, "ack": []})
+        self.assertEqual(code, 200)
+        self.assertNotIn("run", out)
+        self.assertEqual(self.statuses(rig, sid, cid), ("pending", "pending"))
+
+    def test_a_yes_on_screen_is_what_approves_an_agents_own_start_and_schedule(self):
+        rig = self.rig("yes")
+        a, sid, cid = self.own_requests(rig)
+        for iid in (sid, cid):
+            self.assertEqual(a.call("POST", "/api/decide", {"id": iid, "approve": True})[0], 202)
+            rig.wait(lambda: f"decided on screen {iid}" in rig.output(), f"{iid} decided on screen")
+        rig.wait(lambda: self.statuses(rig, sid, cid)[1] == "active", "the schedule to be approved")
+        self.assertNotEqual(self.statuses(rig, sid, cid)[0], "pending")
+
+    def test_the_question_on_screen_carries_the_requests_own_words(self):
+        rig = self.rig("no")
+        a, sid, cid = self.own_requests(rig)
+        _, rule = a.call("POST", "/api/rules", {"text": "Always rebase before merging."})
+        _, listed = rig.call("GET", "/api/decide")
+        items = {i["id"]: i for i in listed["items"]}
+        q = peerlinkd.approval_question("Approve", items[sid])
+        self.assertIn("The request's own words:", q)
+        self.assertIn("Fix the login bug", q)
+        self.assertIn("First prompt: Delete the cache folder", q)
+        self.assertIn("Ship whatever is on main", peerlinkd.approval_question("Approve", items[cid]))
+        self.assertIn("Always rebase before merging.", peerlinkd.approval_question("Deny", items[rule["rule"]["id"]]))
+        long = peerlinkd.approval_question("Approve", {"id": "s1", "title": "t", "text": "x" * 5000, "who": '"quoted" \\ agent'})
+        self.assertLess(len(long), 700)
+        self.assertTrue(long.endswith("…"))
+        # Quotes and backslashes in an agent's words can't end the dialog's string early.
+        self.assertEqual(peerlinkd.applescript('a "b" \\ c'), '"a \\"b\\" \\\\ c"')
+        self.assertEqual(a.call("POST", "/api/decide", {"id": rule["rule"]["id"], "approve": False})[0], 202)
+        rig.wait(lambda: "Always rebase before merging." in rig.output(), "the rule's words in the dialog")
 
     def test_off_a_message_to_you_from_an_agent_without_a_channel_is_refused_and_its_prompt_says_so(self):
         rig = self.rig("no")

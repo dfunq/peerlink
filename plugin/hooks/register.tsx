@@ -1591,7 +1591,8 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
       if (!res.ok) return `Daemon error: ${res.data.error ?? res.status}`
       const list = res.data.items as any[]
       if (!list.length) return 'Nothing waits for your approval.'
-      return list.map(i => `${i.id}  ${i.who || 'peerlink'}: ${clip(i.title, 160)}`).join('\n') + '\n\nAnswer one with /peerlink approve <id> or /peerlink deny <id>; you confirm it on your screen.'
+      // The request's own words under each title: what you approve is what it says, not what an agent says it is.
+      return list.map(i => `${i.id}  ${i.who || 'peerlink'}: ${clip(i.title, 160)}` + (i.text ? `\n    ${clip(String(i.text).replace(/\s+/g, ' '), 300)}` : '')).join('\n') + '\n\nAnswer one with /peerlink approve <id> or /peerlink deny <id>; you confirm it on your screen.'
     }
     case 'approve':
     case 'deny': {

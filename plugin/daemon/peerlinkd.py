@@ -3626,6 +3626,16 @@ def inbox_items():
     return sorted(out, key=lambda x: (order[x["kind"]], x["since"]))
 
 
+def approval_question(verb, item, words=300):
+    """The on-screen question for /peerlink approve|deny: the title, and the request's own words (the purpose and first
+    prompt, the schedule's prompt, the rule itself), so you never approve on an agent's description of it."""
+    head = f"{verb} {item['id']}? {item['title']}" + (f" (asked by {item['who']})" if item.get("who") else "")
+    text = str(item.get("text") or "").strip()
+    if len(text) > words:
+        text = text[:words - 1].rstrip() + "…"
+    return head[:300] + (f"\n\nThe request's own words:\n{text}" if text else "")
+
+
 def inbox_act(body, discord_from=None, via=None):
     """Done or failed for your task, an answer or dismissal for a question, accept or dismiss for feedback."""
     kind, iid, action, text = body.get("kind"), body.get("id", ""), body.get("action", ""), (body.get("text") or "").strip()
@@ -6733,7 +6743,10 @@ def resume_in_a_terminal(ask, wait_s=90):
         with lock:
             if resume_ask.get("id") != ask["id"] or resume_ask.get("status") != "pending":
                 return
-            live = [r for r in sessions.values() if is_live(r)]
+            # Never a worker (it retires when its job is done): a space lead first, else any other agent.
+            live = [r for r in sessions.values() if is_live(r) and not worker_spawn(r)]
+            leads = {id(lead_rec(space_of(r)[0])) for r in live}
+            live.sort(key=lambda r: id(r) not in leads)
             if live:
                 rec = live[0]
                 task_message(None, rec.get("cwd", ""), "Ask your user, in your reply here: " + ask_view(ask)
@@ -8893,8 +8906,8 @@ class Handler(BaseHTTPRequestHandler):
             if browser and not self.key_ok():
                 return self.reply(*inbox_act({"kind": "approval", "id": iid, "action": "approve" if approve else "deny"}))
             verb = "Approve" if approve else "Deny"
-            question = f"{verb} {iid}? {item['title']}" + (f" (asked by {item['who']})" if item.get("who") else "")
-            return self.reply(*ask_then(question[:400], verb, lambda: log(
+            question = approval_question(verb, item)
+            return self.reply(*ask_then(question, verb, lambda: log(
                 "decided on screen", iid, *inbox_act({"kind": "approval", "id": iid, "action": "approve" if approve else "deny"}, via="your terminal (confirmed on screen)")[1:])))
         if len(rest) == 2 and rest[0] == "approvals" and method == "GET":
             # An agent says which message it came on and who it is; only your browser may look one up bare.
