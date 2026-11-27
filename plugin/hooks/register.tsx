@@ -1787,7 +1787,7 @@ export const register: Register = (on, options) => {
       inputSchema: {
         type: 'object',
         properties: {
-          dir: { type: 'string', description: 'The folder to start it in; it must exist already. With worktree: leave it out (or give the repo) for <repo>-wt-<branch> beside the repo, or give the new folder, which must not exist yet' },
+          dir: { type: 'string', description: 'The folder to start it in; it must exist already. With worktree: leave it out (or give the repo) for <worktree_root>/<repo>/<branch>, ~/Repos/worktrees unless your user set another in Settings, or give the new folder, which must not exist yet' },
           worktree: {
             type: 'object',
             description: 'A new git worktree to start it in, made when it starts: repo (the repository), branch (new, or an existing one), base (what a new branch starts from, like origin/staging; the repo\'s HEAD by default). It stays after the agent ends: remove it once the work is merged',

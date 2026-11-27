@@ -24,10 +24,13 @@ class HiringTest(unittest.TestCase):
     def setUp(self):
         d.load_config()
         d.load_discord()
-        self.kept = copy.deepcopy(({k: d.config.get(k) for k in ("max_live_spawns", "night_guard", "auto_approve_folders")}, d.spawns, d.tasks, d.messages))
+        self.kept = copy.deepcopy(({k: d.config.get(k) for k in ("max_live_spawns", "night_guard", "auto_approve_folders", "worktree_root")}, d.spawns, d.tasks, d.messages))
         self.addCleanup(self.restore)
         self.dirs = [tempfile.mkdtemp(prefix="hire-") for _ in range(3)]
-        d.config.update({"rate_limit_per_min": 100, "auto_approve_folders": ["/x/lead"], "max_live_spawns": 0, "night_guard": ""})
+        # Worktrees go under a scratch root, never the real ~/Repos/worktrees.
+        self.wt_root = os.path.join(tempfile.mkdtemp(prefix="wt-root-"), "worktrees")
+        d.config.update({"rate_limit_per_min": 100, "auto_approve_folders": ["/x/lead"], "max_live_spawns": 0, "night_guard": "",
+                         "worktree_root": self.wt_root})
         now = time.time()
         for n in ("lead", "other"):
             d.sessions["s-" + n] = {"id": "s-" + n, "name": n, "cwd": "/x/" + n, "agent": "a-" + n, "last_seen": now}
@@ -315,7 +318,7 @@ class HiringTest(unittest.TestCase):
     def test_a_worker_starts_in_a_new_worktree_made_when_it_starts_and_kept_when_it_retires(self):
         repo = self.repo()
         sp = self.hire(dir="", worktree={"repo": repo, "branch": "fix/login-copy", "base": "main"})
-        path = repo + "-wt-fix-login-copy"
+        path = os.path.join(self.wt_root, "app", "fix-login-copy")  # the slash made safe, and the folders above it made
         self.assertEqual(os.path.normcase(os.path.realpath(d.spawns[sp]["dir"])), os.path.normcase(os.path.realpath(path)))
         wt = d.spawns[sp]["worktree"]
         self.assertTrue(wt["created"] and os.path.isdir(wt["path"]))
@@ -339,13 +342,52 @@ class HiringTest(unittest.TestCase):
         self.assertIn("isn't a worktree on x", out["error"])
         self.assertEqual(d.request_spawn({"by": "s-lead", "purpose": "p", "first_prompt": "f", "worktree": {"repo": busy, "branch": "x"}})[0], 400)
 
-    def test_dir_naming_the_repo_puts_the_worktree_beside_it(self):
+    def test_dir_naming_the_repo_puts_the_worktree_in_the_default_folder(self):
         repo = self.repo()
         sp = self.hire(dir=repo, worktree={"repo": repo, "branch": "fix-relay"})
-        self.assertEqual(os.path.basename(d.spawns[sp]["dir"]), "app-wt-fix-relay")
+        self.assertEqual(d.spawns[sp]["dir"], os.path.join(self.wt_root, "app", "fix-relay"))
         # The repo can come from dir alone.
         other = self.hire(1, dir=repo, worktree={"branch": "fix-copy"})
         self.assertEqual(d.git(d.spawns[other]["dir"], "rev-parse", "--abbrev-ref", "HEAD"), (0, "fix-copy"))
+
+    def test_the_worktree_root_defaults_to_repos_worktrees_and_can_be_set(self):
+        repo = self.repo()
+        home = tempfile.mkdtemp()
+        with unittest.mock.patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}):
+            for unset in (None, "", "  "):  # never set, or emptied in Settings: the default
+                if unset is None:
+                    d.config.pop("worktree_root", None)
+                else:
+                    d.config["worktree_root"] = unset
+                wt, why = d.plan_worktree({"repo": repo, "branch": "feature/new-login"}, "")
+                self.assertEqual(why, "")
+                self.assertEqual(wt["path"], os.path.join(home, "Repos", "worktrees", "app", "feature-new-login"))
+            self.assertFalse(os.path.exists(os.path.join(home, "Repos")))  # nothing is made until it starts
+            d.config["worktree_root"] = "~/src/trees"
+            wt, _ = d.plan_worktree({"repo": repo, "branch": "fix"}, "")
+            self.assertEqual(wt["path"], os.path.join(home, "src", "trees", "app", "fix"))
+        # An explicit dir still wins over the root.
+        d.config["worktree_root"] = self.wt_root
+        mine = os.path.join(tempfile.mkdtemp(), "my-tree")
+        sp = self.hire(dir=mine, worktree={"repo": repo, "branch": "fix/explicit"})
+        self.assertEqual(d.spawns[sp]["dir"], mine)
+        self.assertEqual(d.git(mine, "rev-parse", "--abbrev-ref", "HEAD"), (0, "fix/explicit"))
+        self.assertFalse(os.path.exists(self.wt_root))
+
+    def test_two_repos_with_the_same_name_never_share_a_worktree(self):
+        first, second = self.repo(), self.repo()  # both named app, in different folders
+        sp = self.hire(dir="", worktree={"repo": first, "branch": "fix"})
+        path = os.path.join(self.wt_root, "app", "fix")
+        self.assertEqual(d.spawns[sp]["dir"], path)
+        # The other app's fix lands on the same folder: refused up front, and again at start if it got that far.
+        status, out = d.request_spawn({"by": "s-lead", "purpose": "p", "first_prompt": "f", "worktree": {"repo": second, "branch": "fix"}})
+        self.assertEqual(status, 400)
+        self.assertIn("already exists for another repo", out["error"])
+        top = d.git(second, "rev-parse", "--show-toplevel")[1]
+        self.assertIn("another repo", d.make_worktree({"id": "s-x", "worktree": {"path": path, "repo": top, "branch": "fix", "base": "HEAD"}}))
+        # The same repo's own worktree on that branch is still taken as it is.
+        wt, why = d.plan_worktree({"repo": first, "branch": "fix"}, "")
+        self.assertEqual((why, wt["path"]), ("", path))
 
     def test_a_session_reloaded_onto_newer_tools_is_told_what_they_take_once(self):
         rec = d.sessions["s-lead"]
@@ -359,12 +401,12 @@ class HiringTest(unittest.TestCase):
         self.assertEqual(told[0]["kind"], "announcement")  # read at its next turn, never starts one
         self.assertIn("worktree", told[0]["text"])
 
-    def test_a_worktree_beside_its_repo_sits_in_its_repos_space(self):
+    def test_a_worktree_sits_in_its_repos_space(self):
         repo = self.repo()
         for folder, text in ((os.path.dirname(repo), "space: hq\n"), (repo, "space: shopfront\nparent: hq\nrole: the lead\n")):
             with open(os.path.join(folder, ".peerlink"), "w") as f:
                 f.write(text)
-        wt = repo + "-wt-fix"
+        wt = os.path.join(self.wt_root, "app", "fix")
         d.git(repo, "worktree", "add", "-q", "-b", "fix", wt)
         self.assertEqual(os.path.realpath(d.find_space_file(wt)), os.path.realpath(os.path.join(repo, ".peerlink")))
         rec = {"id": "s-x", "cwd": wt}
@@ -413,6 +455,18 @@ class HiringTest(unittest.TestCase):
         self.assertEqual(d.config_value("night_guard", "25-3")[0], None)
         self.assertEqual(d.config_value("night_guard", " 22-8 "), ("22-8", None))
         self.assertIn("max_live_spawns", d.BROWSER_ONLY_SETTINGS)
+
+
+class WorktreeRootOnlyFromYourBrowser(unittest.TestCase):
+    def test_an_agent_cannot_move_where_worktrees_go(self):
+        from rig import Rig
+        self.assertIn("worktree_root", d.BROWSER_ONLY_SETTINGS)
+        with Rig(env={"PEERLINK_TEST": "1"}) as rig:
+            code, out = rig.call("PUT", "/api/config", {"worktree_root": "/tmp/elsewhere"})
+            self.assertEqual(code, 403)
+            self.assertIn("worktree_root", out["error"])
+            self.assertEqual(rig.user("GET", "/api/config")["worktree_root"], "~/Repos/worktrees")
+            self.assertEqual(rig.user("PUT", "/api/config", {"worktree_root": "/tmp/trees"})["worktree_root"], "/tmp/trees")
 
 
 class HerdrLaunchTest(unittest.TestCase):
