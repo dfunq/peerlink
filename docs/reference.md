@@ -7,7 +7,7 @@ Everything peerlink does, in detail. For what it is and how to start, see the [R
 | Tool | What it does |
 | --- | --- |
 | `list_peers` | Lists the other live agents: name, folder, branch, what each is working on, and whether it's busy |
-| `send_message` | Sends a message to a peer agent by name, to a space's lead with `space:<name>`, to your Inbox with `user`, or to Discord. The message is delivered into a turn that's running, or starts a turn in an idle agent. With `kind` it can hand over a [task](#tasks) or make an [announcement](#announcements) to a whole space. `options` become buttons on Discord, and `files` attaches files |
+| `send_message` | Sends a message to a peer agent by name, to a space's lead with `space:<name>`, to your Inbox with `user` (or your chat channel when the Inbox is off), or to Discord. The message is delivered into a turn that's running, or starts a turn in an idle agent. With `kind` it can hand over a [task](#tasks) or make an [announcement](#announcements) to a whole space. `options` become buttons on Discord, and `files` attaches files |
 | `update_task` | Marks a task the agent owns as in progress, done or failed, with a note that goes back to whoever asked. Whoever handed out a task can cancel it. See [Tasks](#tasks) |
 | `close_thread` | Drops requests from the agent's open threads that are already handled, such as a question answered in the terminal instead of on Discord |
 | `set_summary` | Sets the one-line summary that peers see for this agent |
@@ -130,6 +130,15 @@ Some things only you can do: a login, an approval, a decision. An agent sends th
 - **New feedback** about peerlink: accept or dismiss it.
 
 On Discord, a task for you is posted with **Done** / **Couldn't do it** buttons. You can also reply to that post with `done`, `done: note` or `failed: why`. Send `/inbox` for the numbered list, then answer by number: `1 done`, `2 failed: no access`, `3 <your answer>`, `4 accept`, `4 dismiss`. Only you can do this, never a bot. Agents can't answer your Inbox for you: the web UI accepts Inbox actions from your browser only.
+
+### Turning the Inbox off
+
+If you'd rather everything reached you in a chat or a terminal, untick **Collect agents' tasks and questions for me in the Inbox here** in Settings, under Inbox and approvals (`inbox_enabled`, web UI only). With it off:
+
+- **A message, question or task to `"user"`** is posted on the agent's own chat channel (Discord, Telegram or Slack), else its space lead's, as a Discord post is now. A task keeps its **Done** / **Couldn't do it** buttons there. With no channel, `send_message` refuses it, saying so, and the agent asks you in its own reply in its terminal instead. Nothing is kept where you won't look. The agents' guidance and tool text say where a message to you goes.
+- **The web UI** has no Inbox page, menu count, tab badge or desktop alerts. The page becomes **Approvals**, shown only while something needs your yes.
+- **Approvals** (starting an agent, a schedule that may start one, a standing rule, resuming after a reboot) still wait for you, and nothing goes ahead without you. You can answer them with the buttons on your channel, under Approvals in the web UI, or in any agent's terminal: `/peerlink approvals` lists them, and `/peerlink approve <id>` or `/peerlink deny <id>` answers one. That last way asks you on this machine's screen first, in a dialog no agent can answer. With no channel, the asking agent is told to pass the id on to you in its terminal. After a reboot, the first running agent is asked to put the resume question to you.
+- **`/inbox` on a channel** still lists everything waiting on you, under the heading *Waiting on you*, and you still answer by number.
 
 ## Discord
 
@@ -375,6 +384,8 @@ In Claude Code:
 | `/peerlink` or `/peerlink status` | Daemon, this agent, its summary |
 | `/peerlink web` | Open the web UI: you say **Open** in a dialog on screen, and your browser opens signed in. Its sidebar has Agents (an org chart of spaces), Spaces, Messages, Settings and Controls |
 | `/peerlink issues` | The last problems agents reported with peerlink |
+| `/peerlink approvals` | What waits for your yes: new agents, schedules, standing rules, resuming after a reboot |
+| `/peerlink approve <id>`, `/peerlink deny <id>` | Answer one. You say **Approve** or **Deny** in a dialog on screen first, so an agent can't answer for you |
 | `/peerlink restart` | Restart the daemon. Agents reconnect, and queued messages are kept |
 | `/peerlink rotate-key` | Make a new key, which signs out every browser |
 | `/peerlink-spaces` | The space tree on this machine, and this agent's place in it |
@@ -492,6 +503,7 @@ You can change these in the web UI, with `peerlink config <name> <value>`, or in
 | `space_parents` | `{}` | The space each space sits inside, set on the Spaces page (`""` for the top level) |
 | `folder_names` | `{}` | The name each folder's agents get, kept when you name an agent |
 | `local_name` | peerlink.local | The web UI's name on this machine: `http://peerlink.local:7899`. The daemon publishes it over Bonjour (`dns-sd` on macOS, `avahi-publish` on Linux), pointing at 127.0.0.1, with no sudo or hosts file. `peerlink.localhost:7899` also works in Chrome, Edge and Firefox on any OS. Sign-in links use the name once it resolves. Empty turns it off. A restart applies it |
+| `inbox_enabled` | true | Collect what agents send you in the web UI's Inbox. Off, it goes to a chat channel or the agent's terminal, and approvals are answered by button, under Approvals or with `/peerlink approve <id>` (see [Turning the Inbox off](#turning-the-inbox-off)); web UI only |
 | `resume_after_reboot` | true | After a reboot, ask you whether to resume the agents that were running (see [After a restart](#starting-and-ending-agents)); web UI only |
 | `start_at_login` | false | Start the daemon when you log in; web UI only |
 | `remotes`, `listen_host`, `token` | | Settings for linking daemons across machines |

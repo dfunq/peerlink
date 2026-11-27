@@ -155,6 +155,12 @@ keeping, such as decisions, gotchas and where things are, to your memory \
 or the project's notes, then call clear_context with a short handoff.
 """
 
+# Where a message to your user goes, said in the default guidance: the Inbox, or (with the Inbox off) a chat channel
+# or the agent's own terminal.
+INBOX_ON_RULE = "It waits in their Inbox, and on Discord when you have a channel there;"
+INBOX_OFF_RULE = ("It goes to your chat channel (or your space lead's); with no channel, send_message says so, and "
+                  "you ask them in your own reply in this terminal instead;")
+
 DEFAULT_GUIDANCE = """\
 Other Claude agents working for this user are your peers: colleagues in \
 other repos and folders on the same machine. Talk to them the way you would \
@@ -193,14 +199,14 @@ CronCreate or /loop: the daemon keeps it after your session or terminal \
 closes, and starts an agent in the folder if none is running.
 - When you need your user to do something only they can (a login, an \
 approval, a decision), send_message to "user": kind "task" for something to \
-do, expects_reply for a question. It waits in their Inbox, and on Discord \
-when you have a channel there; their answer comes back to you. Name the \
+do, expects_reply for a question. {inbox_where} their answer comes back to you. Name the \
 task a question is about (task): the answer is kept on it and sent to \
 everyone working under it. A question about something easy to undo can \
 carry a default you go with if they don't answer in time.
-{feedback_rule}""".replace("{clear_rule}", CLEAR_RULE).replace("{feedback_rule}", FEEDBACK_RULE)
+{feedback_rule}""".replace("{clear_rule}", CLEAR_RULE).replace("{feedback_rule}", FEEDBACK_RULE).replace("{inbox_where}", INBOX_ON_RULE)
 
 DEFAULT_CONFIG = {
+    "inbox_enabled": True,  # what agents send you waits in the web UI's Inbox; off, it goes to a chat channel or the agent's own terminal; set only from the web UI
     "poll_interval_ms": 3000,
     "peer_ttl_s": 30,
     "auto_wake_idle": True,
@@ -702,7 +708,7 @@ CONFIG_MIN_1 = {"poll_interval_ms", "peer_ttl_s", "max_hops", "rate_limit_per_mi
 
 
 # What no agent changes for itself: who starts agents without asking, and how many workers run when.
-BROWSER_ONLY_SETTINGS = ("auto_approve_all", "auto_approve_folders", "max_live_spawns", "night_guard", "herdr_mods_source", "rules_lead",
+BROWSER_ONLY_SETTINGS = ("inbox_enabled", "auto_approve_all", "auto_approve_folders", "max_live_spawns", "night_guard", "herdr_mods_source", "rules_lead",
                          "start_at_login", "resume_after_reboot", "worktree_root")
 
 
@@ -756,8 +762,16 @@ def session_cfg(sid):
     return {"nickname": "", "muted": False, "auto_wake": None, **config["sessions"].get(sid, {})}
 
 
+def inbox_on():
+    """Whether what agents send you waits in the web UI's Inbox (the default). Off, it goes to a chat channel, or the
+    agent asks you in its own terminal; approvals still wait for you, answered by button, /peerlink or the web UI."""
+    return config.get("inbox_enabled", True) is not False
+
+
 def default_guidance():
     text = DEFAULT_GUIDANCE if config.get("clear_between_tasks", True) else DEFAULT_GUIDANCE.replace(CLEAR_RULE, "")
+    if not inbox_on():
+        text = text.replace(INBOX_ON_RULE, INBOX_OFF_RULE)
     return text if config.get("feedback") else text.replace(FEEDBACK_RULE, "")
 
 
@@ -1605,7 +1619,7 @@ def snapshot():
         status["limit"] = limit_view()
         offline = offline_agents()
     return {"schedules": {"schedules": [sched_view(c) for c in sched]},"status": status, "peers": {"host": HOSTNAME, "peers": peers, "leads": leads_view(), "offline": offline}, "messages": {"messages": msgs},
-            "tasks": {"tasks": task_list}, "issues": {"issues": issues, "path": ISSUES_PATH}, "inbox": {"items": inbox_items(), "user": USER_NAME}}
+            "tasks": {"tasks": task_list}, "issues": {"issues": issues, "path": ISSUES_PATH}, "inbox": {"items": inbox_items(), "user": USER_NAME, "enabled": inbox_on()}}
 
 
 # What the web UI is sent of what's done: the page is pushed whole on every change, and 500 finished tasks with their
@@ -2912,6 +2926,16 @@ def approval_channel(rec):
     return ""
 
 
+def terminal_approval_note(item_id, channel):
+    """For the agent whose request waits for you: with the Inbox off and no chat channel to ask you in, how you answer
+    it, for the agent to tell you in its terminal. '' otherwise."""
+    if inbox_on() or (channel and chat_ready(channel)):
+        return ""
+    return (f" Your user turned the Inbox off and no chat channel reaches you: tell them in your reply here that {item_id} waits for them."
+            f" They answer it in a terminal with /peerlink approve {item_id} or /peerlink deny {item_id} (each confirmed on their screen),"
+            " or in the web UI under Approvals. Nothing goes ahead until they do.")
+
+
 KINDS = ("message", "task", "announcement")
 
 
@@ -3508,12 +3532,19 @@ def user_send(sender_rec, word, text, kind, parent_task, expects_reply, hops, op
     if target:
         chans = chats_matching(chans, target)
     if target and not chans:
-        return 404, {"error": f"this agent isn't mapped to that {target[0] or 'chat'} channel; send it to \"user\" to put it in their Inbox, or map a channel under Channels"}
+        instead = "put it in their Inbox" if inbox_on() else "reach them on another channel, or ask in your own terminal"
+        return 404, {"error": f"this agent isn't mapped to that {target[0] or 'chat'} channel; send it to \"user\" to {instead}, or map a channel under Channels"}
     channel = chans[0]["channel_id"] if chans else ""
     # A question from an agent with no channel of its own goes where its approvals do, its space lead's channel, so it's
-    # answered (and leaves the Inbox) on Discord too.
-    if not channel and kind != "task" and expects_reply and word in USER_ALIASES and chat_ready():
+    # answered (and leaves the Inbox) on Discord too. With the Inbox off, everything for you does: there's nowhere else.
+    if not channel and (expects_reply and kind != "task" or not inbox_on()) and word in USER_ALIASES and chat_ready():
         channel = approval_channel(sender_rec)
+    if not channel and not inbox_on():
+        # Nothing is kept where you won't look: the agent asks you in its own terminal instead.
+        log("to user", "not sent: the Inbox is off and", display_name(sender_rec), "has no chat channel")
+        return 409, {"error": "your user turned the Inbox off, and no chat channel reaches you. Ask them in your own reply here, "
+                              "in this terminal: write the " + ("task" if kind == "task" else "question" if expects_reply else "message")
+                              + " out in full and end your turn, and their answer comes as your next prompt", "terminal": True}
     if kind != "task" and channel:
         return post_to_discord(sender_rec, channel, text, None, None, hops, options, files, expects_reply)
     if options:
@@ -3542,7 +3573,7 @@ def user_send(sender_rec, word, text, kind, parent_task, expects_reply, hops, op
         except ChatError as err:
             log("discord", "task post failed:", err)
     log("to user", msg["id"], msg["from_name"], task["id"] if task else "")
-    out = {"id": msg["id"], "to": USER_NAME, "status": "waiting in their Inbox"}
+    out = {"id": msg["id"], "to": USER_NAME, "status": "waiting in their Inbox" if inbox_on() else f"posted on {chatlink.name(channel)}"}
     if task:
         out["task"] = task["id"]
     return 200, out
@@ -3595,7 +3626,7 @@ def inbox_items():
     return sorted(out, key=lambda x: (order[x["kind"]], x["since"]))
 
 
-def inbox_act(body, discord_from=None):
+def inbox_act(body, discord_from=None, via=None):
     """Done or failed for your task, an answer or dismissal for a question, accept or dismiss for feedback."""
     kind, iid, action, text = body.get("kind"), body.get("id", ""), body.get("action", ""), (body.get("text") or "").strip()
     if kind == "task":
@@ -3613,7 +3644,7 @@ def inbox_act(body, discord_from=None):
             return 400, {"error": "a request to start an agent is approved or denied"}
         decide = (decide_schedule if iid in schedules else decide_rule if iid in rules
                   else decide_resume if iid and iid == resume_ask.get("id") else decide_spawn)
-        return decide(iid, action == "approve", chatlink.name(discord_from["channel_id"]) if discord_from else "the web UI")
+        return decide(iid, action == "approve", via or (chatlink.name(discord_from["channel_id"]) if discord_from else "the web UI"))
     if kind == "feedback":
         if action not in ("accepted", "dismissed"):
             return 400, {"error": "feedback is accepted or dismissed"}
@@ -3681,10 +3712,11 @@ def inbox_text(channel):
     """Your Inbox as a numbered list; "1 done" and the like in this channel then refer to it."""
     items = inbox_items()
     inbox_lists[channel] = (time.time(), [(i["kind"], i["id"]) for i in items])
+    off = "" if inbox_on() else " The Inbox is off in the web UI, so this is the only list of them."
     if not items:
-        return "Your Inbox is empty."
+        return "Nothing waits on you." + off if off else "Your Inbox is empty."
     icon = {"approval": "🚀", "task": "☑️", "question": "❓", "feedback": "💡"}
-    lines = [f"**Inbox** ({len(items)})"] + [
+    lines = [f"**Inbox** ({len(items)})" if not off else f"**Waiting on you** ({len(items)}).{off}"] + [
         f"{n}. {icon[i['kind']]} {i['id']} · {i['who']} · {ago_text(time.time() - i['since'])}: {i['title']}" for n, i in enumerate(items[:20], 1)]
     lines.append('Answer with the number: "1 approve" or "1 deny", "2 done" or "2 failed: why", "3 <your answer>", "4 accept" or "4 dismiss".')
     return "\n".join(lines)
@@ -5391,7 +5423,8 @@ def add_rule(body, by=None, lead=False):
                 save_rules()
         except ChatError as err:
             log("discord", "rule post failed:", err)
-    return 200, {"rule": rule_view(r)}
+    note = terminal_approval_note(r["id"], channel).strip() if r["status"] == "pending" else ""
+    return 200, {"rule": rule_view(r), **({"note": note} if note else {})}
 
 
 def rule_told(r, text):
@@ -5953,7 +5986,7 @@ def request_spawn(body):
                 save_spawns()
         except ChatError as err:
             log("discord", "spawn post failed:", err)
-    note = (f" An agent is already running there ({display_name(running)})." if running else "") + launch_note(sp)
+    note = (f" An agent is already running there ({display_name(running)})." if running else "") + launch_note(sp) + terminal_approval_note(sp["id"], channel)
     return 200, {"id": sp["id"], "status": "pending", "note": note, **launch_opts(sp)}
 
 
@@ -6671,6 +6704,7 @@ def post_resume_ask(wait_s=90):
             break
     chans = chans or [r for r in discord.get("routes", []) if not external(r["channel_id"])]
     if not chans:
+        resume_in_a_terminal(ask, wait_s)
         return
     channel = chans[0]["channel_id"]
     for _ in range(wait_s):
@@ -6679,6 +6713,7 @@ def post_resume_ask(wait_s=90):
         time.sleep(1)
     else:
         log("reboot", "the chat isn't connected: the question waits in the Inbox")
+        resume_in_a_terminal(ask, wait_s)
         return
     try:
         sent = chat_post(channel, "🔁 **" + ask_view(ask).replace("\n", "**\n", 1), None, choices(["Resume all", "Don't resume"], f"pb:{ask['id']}"))
@@ -6687,6 +6722,28 @@ def post_resume_ask(wait_s=90):
                 resume_ask["discord_out"] = {"channel_id": channel, "message_id": sent}
     except ChatError as err:
         log("discord", "resume post failed:", err)
+
+
+def resume_in_a_terminal(ask, wait_s=90):
+    """With the Inbox off and no chat to ask in: once an agent is running (the one you opened after the reboot, say),
+    it's told to ask you in its terminal. The question stays pending until you answer it."""
+    if inbox_on():
+        return
+    for _ in range(max(1, wait_s)):
+        with lock:
+            if resume_ask.get("id") != ask["id"] or resume_ask.get("status") != "pending":
+                return
+            live = [r for r in sessions.values() if is_live(r)]
+            if live:
+                rec = live[0]
+                task_message(None, rec.get("cwd", ""), "Ask your user, in your reply here: " + ask_view(ask)
+                             + f"\n\nThey answer in a terminal with /peerlink approve {ask['id']} (resume them all) or /peerlink deny {ask['id']},"
+                             " each confirmed on their screen, or in the web UI under Approvals. No answer within a day is a no.", prefer=rec)
+                resume_ask["told"] = display_name(rec)
+                log("reboot", "the Inbox is off: asked", display_name(rec), "to ask in its terminal")
+                return
+        time.sleep(1)
+    log("reboot", "the Inbox is off and no agent is running yet: the question waits under Approvals and /peerlink approvals")
 
 
 def decide_resume(bid, approve, via):
@@ -6850,7 +6907,8 @@ def start_queued():
 
 
 def decide_spawn(sid, approve, via):
-    """Your answer to a spawn request. Only the web UI (your browser) and your own Discord presses call this."""
+    """Your answer to a spawn request. Only the web UI (your browser), your own chat presses and /peerlink approve
+    (confirmed on screen) call this."""
     with lock:
         sp = spawns.get(sid)
         if sp is None:
@@ -7085,7 +7143,8 @@ def create_schedule(body, by=None):
                 save_schedules()
         except ChatError as err:
             log("discord", "schedule post failed:", err)
-    return 200, {"schedule": {**c, "when_text": when_text(c)}}
+    note = terminal_approval_note(c["id"], channel).strip() if c["status"] == "pending" else ""
+    return 200, {"schedule": {**c, "when_text": when_text(c)}, **({"note": note} if note else {})}
 
 
 def decide_schedule(cid, approve, via):
@@ -8408,7 +8467,7 @@ class Handler(BaseHTTPRequestHandler):
                 # Only you, in the browser: no agent lets itself start agents without asking.
                 mine = [k for k in checked if k in BROWSER_ONLY_SETTINGS and checked[k][0] != config.get(k)]
                 if (not browser or self.key_ok()) and mine:
-                    return self.reply(403, {"error": f"{', '.join(mine)} is set only from the web UI"})
+                    return self.reply(403, {"error": f"{', '.join(mine)} is set only from the web UI, by your user (like auto-approve, the worker cap and the night guard)"})
                 # An agent may close more spaces to herdr joins, never open one.
                 if (not browser or self.key_ok()) and "herdr_join_never" in checked and isinstance(checked["herdr_join_never"][0], str) \
                         and not join_never(checked["herdr_join_never"][0]) >= join_never(config.get("herdr_join_never")):
@@ -8813,13 +8872,30 @@ class Handler(BaseHTTPRequestHandler):
             code, out = web_send(self.body())
             return self.reply(code, out)
         if rest == ["inbox"] and method == "GET":
-            return self.reply(200, {"items": inbox_items(), "user": USER_NAME})
+            return self.reply(200, {"items": inbox_items(), "user": USER_NAME, "enabled": inbox_on()})
         if rest == ["inbox"] and method == "POST":
             # Only you, in the browser: an agent holding the key must not close your tasks or answer for you.
             if not browser:
                 return self.reply(403, {"error": "the Inbox is answered from the web UI or Discord"})
             code, out = inbox_act(self.body())
             return self.reply(code, out)
+        if rest == ["decide"] and method == "GET":
+            # What waits for your yes (starts, schedules, rules, resuming after a reboot), for /peerlink approvals.
+            return self.reply(200, {"items": [i for i in inbox_items() if i["kind"] == "approval"], "inbox": inbox_on()})
+        if rest == ["decide"] and method == "POST":
+            # /peerlink approve|deny <id> in your terminal: a key holder never decides by itself. You're asked on screen,
+            # in a dialog no agent answers, and it's decided only on your yes there.
+            b = self.body()
+            iid, approve = str(b.get("id") or "").strip(), bool(b.get("approve"))
+            item = next((i for i in inbox_items() if i["kind"] == "approval" and i["id"] == iid), None)
+            if not item:
+                return self.reply(404, {"error": f"nothing waits for your approval as {iid}" if iid else "id is required, like s12"})
+            if browser and not self.key_ok():
+                return self.reply(*inbox_act({"kind": "approval", "id": iid, "action": "approve" if approve else "deny"}))
+            verb = "Approve" if approve else "Deny"
+            question = f"{verb} {iid}? {item['title']}" + (f" (asked by {item['who']})" if item.get("who") else "")
+            return self.reply(*ask_then(question[:400], verb, lambda: log(
+                "decided on screen", iid, *inbox_act({"kind": "approval", "id": iid, "action": "approve" if approve else "deny"}, via="your terminal (confirmed on screen)")[1:])))
         if len(rest) == 2 and rest[0] == "approvals" and method == "GET":
             # An agent says which message it came on and who it is; only your browser may look one up bare.
             web = browser and not self.key_ok()
