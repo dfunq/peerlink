@@ -21,7 +21,7 @@ class GoalTest(unittest.TestCase):
 
     def setUp(self):
         d.load_config()
-        self.kept = copy.deepcopy(({k: d.config.get(k) for k in ("space_leads", "agent_spaces")}, d.spawns, d.messages))
+        self.kept = copy.deepcopy(({k: d.config.get(k) for k in ("space_leads", "agent_spaces", "agent_links")}, d.spawns, d.messages))
         self.addCleanup(self.restore)
         now = time.time()
         spaces = {"lead": "acme", "dev": "acme", "peer": "acme", "hirer": "acme", "worker": "acme", "outsider": "beta"}
@@ -53,8 +53,9 @@ class GoalTest(unittest.TestCase):
     def test_the_space_lead_sets_a_members_goal_and_it_is_logged_as_from_the_lead(self):
         status, out = self.goal("lead", "dev")
         self.assertEqual(status, 200, out)
-        self.assertEqual(self.runs("dev"), [{"command": "goal", "args": "ship the fix", "by": "lead"}])
+        self.assertEqual(self.runs("dev"), [{"command": "goal", "args": "ship the fix", "by": "lead", "by_agent": "a-lead"}])
         logged = d.messages[-1]
+        self.assertEqual(logged["from_agent"], "a-lead")
         self.assertEqual((logged["id"], logged["kind"], logged["from_name"], logged["to_name"], logged["text"]),
                          (out["id"], "goal", "lead", "dev", "/goal ship the fix"))
         self.assertNotIn(logged, d.inboxes.get("s-dev", []))  # logged, not a message that starts a turn of its own
@@ -123,6 +124,70 @@ class GoalTest(unittest.TestCase):
         status, out = d.set_goal("s-lead", {"agent": "dev", "goal": "ship", "command": "exit"})
         self.assertEqual(status, 200, out)
         self.assertEqual([r["command"] for r in self.runs("dev")], ["goal"])
+
+    def voice(self, space="acme"):
+        """An outside MCP client (peerlink_mcp.py, a voice bot) registered as a session, the way it really registers."""
+        d.sessions["s-voice"] = {"id": "s-voice", "name": "voice", "cwd": "/x/voice", "agent": "a-voice", "last_seen": time.time(),
+                                 "plugin": "peerlink-mcp 0.9.114"}
+        d.agent_of["s-voice"] = "a-voice"
+        d.config["agent_spaces"]["a-voice"] = space
+        self.assertTrue(d.is_client(d.sessions["s-voice"]))
+
+    def test_an_outside_mcp_client_is_refused_whatever_its_role_or_reach(self):
+        self.voice()
+        cases = {
+            "member": lambda: None,
+            "space lead": lambda: d.config["space_leads"].__setitem__("acme", {"cwd": "/x/voice", "how": "set", "agent": "a-voice"}),
+            "hirer": lambda: d.spawns["sp1"].__setitem__("requester", {"id": "s-voice", "agent": "a-voice", "name": "voice", "cwd": "/x/voice"}),
+            "linked from another space": lambda: (d.config["agent_spaces"].__setitem__("a-voice", "beta"),
+                                                  d.config.__setitem__("agent_links", [["a-voice", "a-dev"]])),
+        }
+        for role, grant in cases.items():
+            with self.subTest(role=role):
+                self.setUp()
+                self.voice()
+                grant()
+                for s in d.sessions.values():
+                    s.pop("_space", None)
+                if role in ("space lead", "hirer"):  # the role really holds: is_boss alone would let it through
+                    self.assertTrue(d.is_boss(d.sessions["s-voice"], d.sessions["s-worker" if role == "hirer" else "s-dev"]))
+                if role == "linked from another space":  # the link really gives it reach
+                    self.assertIs(d.resolve("dev", d.reach(d.sessions["s-voice"]), d.sessions["s-voice"])[0], d.sessions["s-dev"])
+                for target in ("dev", "worker", "voice", ""):
+                    status, out = self.goal("voice", target)
+                    self.assertEqual(status, 403, out)
+                    self.assertIn("outside MCP client", out["error"])
+                self.assertEqual((self.runs("dev"), self.runs("worker"), self.runs("voice")), ([], [], []))
+                self.assertFalse(any(m.get("kind") == "goal" for m in d.messages))
+
+    def test_an_outside_mcp_client_is_never_given_a_goal(self):
+        self.voice()
+        status, out = self.goal("lead", "voice")
+        self.assertEqual(status, 400, out)
+        self.assertEqual(self.runs("voice"), [])
+
+    def test_an_agents_channel_client_has_no_way_to_set_a_goal(self):
+        # It talks over the Agents channel's own MCP server, whose tools are posting and reading only, and it has no
+        # session: set_goal looks the caller up by session, so its name or channel id is an unknown caller.
+        import agentslink
+        names = {t["name"] for t in agentslink.TOOLS} | {agentslink.POST_TO_CLIENT["name"]}
+        self.assertFalse(any("goal" in n or "run" in n for n in names), names)
+        for caller in ("grok-x", "agents:grok-x"):
+            self.assertEqual(d.set_goal(caller, {"agent": "dev", "goal": "x"})[0], 404)
+        self.assertEqual(self.runs("dev"), [])
+
+    def test_a_target_that_ended_after_lookup_is_refused(self):
+        real = d.resolve
+        def ended(*a, **k):
+            rec, err = real(*a, **k)
+            rec["last_seen"] = 0  # it drops between the lookup and the lock
+            return rec, err
+        d.resolve = ended
+        self.addCleanup(setattr, d, "resolve", real)
+        status, out = self.goal("lead", "dev")
+        self.assertEqual(status, 404, out)
+        self.assertIn("isn't running", out["error"])
+        self.assertEqual(self.runs("dev"), [])
 
     def test_an_unknown_caller_or_target_is_refused(self):
         self.assertEqual(d.set_goal("s-nobody", {"agent": "dev", "goal": "x"})[0], 404)

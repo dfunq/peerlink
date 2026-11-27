@@ -7408,6 +7408,11 @@ def set_goal(sid, body):
         by = sessions.get(sid)
         if by is None:
             return 404, {"error": "unknown agent; register again"}
+        # An MCP client outside Claude Code (a voice bot, peerlink_mcp.py) never sets a goal, whatever role or link it
+        # holds: /goal steers a Claude Code agent, and only Claude Code agents steer each other. Agents-channel clients
+        # have no session at all, so they never get this far.
+        if is_client(by):
+            return 403, {"error": "an outside MCP client can't set an agent's goal: send it a message instead"}
     goal = clean_goal(body.get("goal"))
     if not goal:
         return 400, {"error": "goal is required: one line saying what the agent should get done"}
@@ -7420,19 +7425,24 @@ def set_goal(sid, body):
         if not target:
             return 404, {"error": err or f"no running agent is called {name}"}
     with lock:
+        # Looked up outside the lock: it may have ended since.
+        if sessions.get(target["id"]) is not target or not is_live(target):
+            return 404, {"error": f"{display_name(target)} isn't running any more"}
+        if is_client(target):
+            return 400, {"error": f"{display_name(target)} is an outside MCP client, which has no /goal: send it a message instead"}
         if target is not by and not is_boss(by, target):
             return 403, {"error": f"only {display_name(target)} itself, the lead of its space, or the lead that hired it sets its goal"}
-        target.setdefault("run", []).append({"command": "goal", "args": goal, "by": display_name(by)})
+        target.setdefault("run", []).append({"command": "goal", "args": goal, "by": display_name(by), "by_agent": by.get("agent") or by["id"]})
         # In the message log, from the one who set it to the agent, so you and it can see who set which goal. It's
         # recorded, not queued: the /goal itself is what reaches the agent.
-        msg = {"id": f"m{next_msg[0]}", "ts": time.time(), "from": by["id"], "from_name": display_name(by), "from_host": HOSTNAME,
+        msg = {"id": f"m{next_msg[0]}", "ts": time.time(), "from": by["id"], "from_name": display_name(by), "from_agent": by.get("agent") or "", "from_host": HOSTNAME,
                "to": target["id"], "to_name": display_name(target), "from_cwd": by.get("cwd", ""), "to_cwd": target.get("cwd", ""),
                "from_space": space_of(by)[0], "to_space": space_of(target)[0], "kind": "goal",
                "text": f"/goal {goal}", "expects_reply": False, "reply_to": None, "hops": 0, "status": "delivered", "v": 2}
         next_msg[0] += 1
         record(msg)
         who, busy = display_name(target), bool(target.get("busy"))
-    log("goal", msg["id"], who, "by", display_name(by), repr(goal[:200]))
+    log("goal", msg["id"], who, "by", display_name(by), by.get("agent") or by["id"], repr(goal[:200]))
     whose = "Your" if target is by else who + "'s"
     return 200, {"agent": who, "id": msg["id"], "queued": busy,
                  "note": whose + " goal is set" + (", to run after its current turn" if busy else "")}
