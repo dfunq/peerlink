@@ -69,6 +69,39 @@ class ScenarioTest(unittest.TestCase):
             self.assertEqual((code, out.get("inbox", [])), (200, []))
         self.assertEqual([m["text"] for m in core.poll()], ["Your first prompt."])
 
+    def test_a_same_name_rehire_right_after_a_retire_is_a_new_agent_with_none_of_the_old_ones_mail(self):
+        """i78: a worker hired under the name of one that just retired in the same folder took its agent and its mail."""
+        sink = os.path.join(os.environ.get("TMPDIR", "/tmp"), f"launch-{uuid.uuid4()}.jsonl")
+        self.addCleanup(lambda: os.path.exists(sink) and os.remove(sink))
+        rig = self.rig(env={"PEERLINK_TEST_LAUNCH": sink})
+        lead = rig.agent("lead", space="qa")
+        rig.call("POST", "/api/config", {"auto_approve_folders": [lead.cwd], "night_guard": "", "max_live_spawns": 0}, user=True)
+        shared = rig.folder("shared", space="qa")
+        other = rig.agent("services", space="qa")
+
+        def hire(text):
+            code, out = lead.call("POST", "/api/spawns", {"dir": shared, "purpose": "smoke", "first_prompt": text, "name": "qa", "worker": True})
+            self.assertEqual((code, out.get("status")), (200, "started"), out)
+            worker = Agent(rig, "qa", shared)
+            worker.register()
+            rig.agents.append(worker)
+            return out["id"], worker
+
+        first_spawn, first = hire("First smoke.")
+        first.expect("First smoke.")
+        self.assertEqual(first.call("POST", f"/api/sessions/{first.sid}/retire", {})[0], 200)
+        # A reply to the worker that just retired, by its session, comes in before its process has exited, then it does.
+        other.send(to=first.sid, text="For the old qa only.")
+        first.quit()
+        second_spawn, second = hire("Second smoke.")
+        second.expect("Second smoke.")
+        _, out = rig.call("GET", "/api/spawns", user=True)
+        agent = {sp["id"]: sp.get("agent") for sp in out["spawns"]}
+        self.assertTrue(agent[first_spawn] and agent[second_spawn])
+        self.assertNotEqual(agent[first_spawn], agent[second_spawn])
+        second.poll()
+        self.assertNotIn("For the old qa only.", [m["text"] for m in second.seen])
+
     def test_an_answer_from_another_machine_threads_onto_the_question(self):
         """Alice on host a asks bob on host b; bob answers with reply_to alone, and the answer comes back
         to alice as the answer to her question, which no longer reads as waiting."""

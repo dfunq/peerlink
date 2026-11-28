@@ -4522,7 +4522,10 @@ def agent_for(rec, old=None):
             # never one renamed since, whose name-2 was only the stand-in it registered under.
             if not known and not term:
                 known = [a for a in free if a["name"].lower() in stand_ins]
-        if known:
+        # A worker a spawn just started is new each time: a hire under the name of one that just retired here is
+        # another agent, and never takes that one's id, its identity or its unread mail.
+        hire = any(sp.get("worker") and sp.get("agent_id") == rec["id"] and not sp.get("agent") for sp in spawns.values())
+        if known and not hire:
             aid = max(known, key=lambda a: a.get("seen", 0))["id"]
         else:
             aid = new_agent_id()
