@@ -1017,9 +1017,18 @@ def note_lone_leads():
                 save_config()
         if folder == cwd or how == "set" or entry.get("how") == "none":
             continue
-        moved = any(is_live(r) and r.get("cwd") == folder for r in sessions.values())
-        if folder and not moved and now - folder_seen.get(folder, DAEMON_START) < LEAD_GRACE_S:
-            continue
+        pinned = entry.get("agent") or ""
+        if pinned:
+            # Go by the lead's own agent: another agent sharing its folder running (or not) says nothing about it.
+            # Right after a restart agents check back in one by one, so a lead not back yet keeps the grace too.
+            running = agent_session(pinned)
+            moved = bool(running) and space_of(running)[0] != space
+            if not moved and (running or now - max((agents.get(pinned) or {}).get("seen") or 0, DAEMON_START) < LEAD_GRACE_S):
+                continue
+        else:
+            moved = any(is_live(r) and r.get("cwd") == folder for r in sessions.values())
+            if folder and not moved and now - folder_seen.get(folder, DAEMON_START) < LEAD_GRACE_S:
+                continue
         # Pinned to its agent too, as a lead you pick is, so another agent opened in the same folder can't pass for it.
         config.setdefault("space_leads", {})[space] = {"cwd": cwd, "how": "only", "ts": time.time()}
         pick = lead_to_pin(space, cwd)
@@ -1027,7 +1036,10 @@ def note_lone_leads():
             config["space_leads"][space]["agent"] = pick
         save_config()
         # Told, as a lead you pick is: else it learns it leads only when it's told it no longer does.
-        task_message(None, cwd, f"You now lead the {space} space, as the only agent in it. Work sent to the space comes to you: decide which agent owns it, delegate with send_message, and report the outcome to whoever asked.")
+        # To the agent in this space, not whichever agent its folder's name picks: a folder can hold agents of other spaces.
+        here = [r for r in sessions.values() if is_live(r) and r.get("cwd") == cwd and space_of(r)[0] == space]
+        task_message(None, cwd, f"You now lead the {space} space, as the only agent in it. Work sent to the space comes to you: decide which agent owns it, delegate with send_message, and report the outcome to whoever asked.",
+                     prefer=agent_session(pick) if pick else (max(here, key=lambda r: r["last_seen"]) if here else None))
         log("lead", space, "->", cwd, "(only agent)")
 
 
