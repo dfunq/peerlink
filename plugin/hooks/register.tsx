@@ -715,13 +715,15 @@ async function deliverOnce($: EngineInterface) {
   busy = true
   $.ui.toast(`Message from ${batch.map(m => m.from_name).join(', ')}`)
   submitted = { batch, at: now }
-  const res: any = await $.prompt.submit({ text: framed(batch) }).catch(err => ({ drop: String(err) }))
+  const text = await withContext($, framed(batch))
+  const res: any = await $.prompt.submit({ text }).catch(err => ({ drop: String(err) }))
   if (res && 'drop' in res) {
     // No turn started (a hook dropped it, or the session wasn't taking prompts): don't sit "busy" with the messages
-    // gone. Put them in the transcript instead, so they're read with the next turn, and say so.
+    // gone. Put them in the transcript instead, so they're read with the next turn, and say so. With the context
+    // they came with, which counts as sent now.
     busy = false
     submitted = undefined
-    const put = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: framed(batch) }] } }).catch(() => ({ deny: true }))
+    const put = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] } }).catch(() => ({ deny: true }))
     if ('deny' in put && put.deny) {
       pending = [...batch, ...pending]
       return
@@ -869,9 +871,8 @@ async function clearNow($: EngineInterface) {
   // them here means a host that does run those hooks doesn't show them twice.
   if (own && !limit && cfg?.auto_wake_idle !== false) {
     const notes = handoffBlock() || 'You cleared your context after your last task.'
-    await $.prompt
-      .submit({ text: `${notes}\n\nCarry on from the notes you left yourself: start what they name as next, or, if nothing is, end the turn in one line.` })
-      .catch(() => undefined)
+    const text = await withContext($, `${notes}\n\nCarry on from the notes you left yourself: start what they name as next, or, if nothing is, end the turn in one line.`)
+    await $.prompt.submit({ text }).catch(() => undefined)
   }
 }
 
@@ -1333,6 +1334,20 @@ async function skippedContext($: EngineInterface) {
     }
   }
   return out
+}
+
+// What a prompt carries from peerlink: the roster, the place and guidance a conversation hasn't had yet, a nudge.
+// Each part keeps track of what it already sent, so asking twice for the same prompt adds nothing the second time.
+async function promptContext($: EngineInterface) {
+  return [await rosterContext($), ...(await skippedContext($)), nudgeBlock()].filter((t): t is string => !!t)
+}
+
+// The text of a prompt peerlink submits itself. Its own prompt hooks don't run for that prompt, so what they would
+// add goes in the text; without it, a hire's first turn (its lead's brief) came with no name or lead, and a hire in a
+// shared folder took the identity the folder's CLAUDE.md describes (i78).
+async function withContext($: EngineInterface, text: string) {
+  const add = await promptContext($).catch(() => [] as string[])
+  return add.length ? `${add.join('\n\n')}\n\n${text}` : text
 }
 
 // What a place in a nested space asks of this agent; the daemon enforces who can reach whom.
@@ -2110,7 +2125,7 @@ export const register: Register = (on, options) => {
     }
     if (!sessionId || e.command) return next(e)
     if (useCompose) await composeBypassed($).catch(() => undefined)
-    const add = [await rosterContext($), ...(await skippedContext($)), nudgeBlock()].filter((t): t is string => !!t)
+    const add = await promptContext($)
     return next(add.length ? { ...e, context: [...(e.context ?? []), ...add] } : e)
   }).catch(($, e, next) => next(e))
 

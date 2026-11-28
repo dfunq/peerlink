@@ -272,6 +272,16 @@ class HiringTest(unittest.TestCase):
         self.assertEqual(d.spawns[sp]["status"], "retired")
         self.assertIn(f"w0 retired, {tid} done.", self.told("lead"))
 
+    def test_a_hire_takes_its_first_prompt_but_not_mail_left_for_a_gone_agent_in_its_folder(self):
+        sp = self.hire()
+        # An agent that worked in the same folder retired; a message to it came in after.
+        d.inboxes["s-gone"] = [{"id": "m-old", "to": "s-gone", "to_name": "gone", "to_cwd": self.dirs[0], "text": "for gone"}]
+        d.inboxes[f"spawn:{sp}"] = [{"id": "m-first", "to": f"spawn:{sp}", "to_cwd": self.dirs[0], "text": "Do the ticket"}]
+        sid = self.register(sp, "w0")
+        d.adopt(d.sessions[sid], spawn=d.spawns[sp])
+        self.assertEqual([m["id"] for m in d.inboxes[sid]], ["m-first"])
+        self.assertEqual([m["id"] for m in d.inboxes["s-gone"]], ["m-old"])
+
     def test_only_the_lead_that_hired_a_worker_retires_it_and_a_standing_agent_never_is(self):
         sp = self.hire()
         sid = self.register(sp, "w0")
