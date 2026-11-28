@@ -229,6 +229,25 @@ test("when an org plugin skips peerlink's compose and context hooks, the role, g
   expect(third.context.join('\n')).toContain('Deploy freeze until 5pm')
 })
 
+test("a hire's first turn, a message peerlink submits, carries its name, space and lead in the prompt's own text", async ($, on) => {
+  const { clock, woke } = engine(on)
+  const inbox: any[] = []
+  fakeDaemon(on, 1, null, inbox, { space: 'qa', space_source: 'started', space_from: '', lead: 'quality', hired_by: 'quality', guidance: 'Be brief.', wake_delay_s: 0 })
+  await $.session.start(START)
+  await settle()
+  inbox.push({ id: 'm9', from: 'q-id', from_name: 'quality', from_host: 'Mac', text: 'Run the smoke on dev.', expects_reply: true, reply_to: null, hops: 0 })
+  await clock.advance(600000)
+  for (let i = 0; i < 10; i++) await settle()
+  expect(woke.length).toBe(1)
+  expect(woke[0]).toContain('Peers know you as "web" in the "qa" space')
+  expect(woke[0]).toContain('quality hired you as a worker')
+  expect(woke[0]).toContain('Be brief.')
+  expect(woke[0]).toContain('↘ quality · m9 · reply expected\nRun the smoke on dev.')
+  // Sent once: the next prompt doesn't carry it again.
+  const next: any = await $.prompt.submit({ text: 'and then' })
+  expect(next.context?.join('\n') ?? '').not.toContain('Peers know you as')
+})
+
 test("when the skipped hooks' guidance rode on a prompt, it is sent again once the conversation is compacted", async ($, on) => {
   const { usage } = engine(on, { percent: 60 })
   fakeDaemon(on, 1, null, [], { space: 'acme', space_source: 'set', space_from: '', role: 'Owns the web app.' })

@@ -4539,7 +4539,10 @@ def agent_for(rec, old=None):
             # never one renamed since, whose name-2 was only the stand-in it registered under.
             if not known and not term:
                 known = [a for a in free if a["name"].lower() in stand_ins]
-        if known:
+        # A worker a spawn just started is new each time: a hire under the name of one that just retired here is
+        # another agent, and never takes that one's id, its identity or its unread mail.
+        hire = any(sp.get("worker") and sp.get("agent_id") == rec["id"] and not sp.get("agent") for sp in spawns.values())
+        if known and not hire:
             aid = max(known, key=lambda a: a.get("seen", 0))["id"]
         else:
             aid = new_agent_id()
@@ -4756,6 +4759,7 @@ def adopt(rec, old=None, spawn=None):
     """Give rec the messages still queued for sessions that are gone: `old` (one it replaces), or any in its folder.
     `spawn`: the spawn rec is the agent for, whose first prompt waits for it alone."""
     moved = 0
+    worker = (spawn or {}).get("worker") or worker_spawn(rec)
     for sid in list(inboxes):
         if sid == rec["id"]:
             continue
@@ -4769,6 +4773,11 @@ def adopt(rec, old=None, spawn=None):
             # A first prompt for the agent a spawn started: that one takes it, found by its tmux pane, else the first
             # new one in that folder.
             box = list(inboxes[sid]) if spawn and sid == f"spawn:{spawn['id']}" else []
+        elif worker and sid != old and not (rec.get("agent") and agent_of.get(sid) == rec["agent"]):
+            # A worker is an agent of its own, hired for one piece of work: what's left queued for another agent in its
+            # folder (one that just retired, say) isn't its to read, on its first registration or after a /clear or a
+            # daemon restart (i78). Its own agent's queue is still its own.
+            box = []
         elif sid != old and agent_of.get(sid) in agents and agent_of[sid] != rec.get("agent") and other_agent_stays(agent_of[sid], rec):
             # Queued for another agent that shares this folder: it waits for that agent, not for whoever starts first.
             box = []
