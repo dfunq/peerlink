@@ -256,6 +256,18 @@ class HiringTest(unittest.TestCase):
         self.assertEqual(d.spawns[second]["status"], "started")
         self.assertIn(f"{second} left the queue", self.told("lead")[-1])
 
+    def test_workers_that_waited_long_in_the_queue_still_start_one_slot_at_a_time(self):
+        d.config["max_live_spawns"] = 1
+        first = self.hire(0)
+        sid = self.register(first, "w0")
+        waiting = [self.hire(i) for i in (1, 2, 1)]
+        for sp in waiting:
+            d.spawns[sp]["updated"] -= 3600  # queued an hour ago, far past the grace for an unregistered worker
+        d.sessions.pop(sid)  # one slot frees
+        d.start_queued()
+        self.assertEqual([d.spawns[sp]["status"] for sp in waiting], ["started", "queued", "queued"])
+        self.assertEqual(len(d.live_workers()), 1)
+
     def test_a_worker_retires_once_its_tasks_are_closed_and_its_lead_hears_how_they_ended(self):
         sp = self.hire()
         sid = self.register(sp, "w0")

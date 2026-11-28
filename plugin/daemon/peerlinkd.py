@@ -48,7 +48,7 @@ if os.name == "nt":
 
     subprocess.Popen.__init__ = _no_window_init
 
-VERSION = "0.9.119"
+VERSION = "0.9.120"
 # A fingerprint of this file: an agent whose plugin ships different code at the same version replaces the daemon.
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
@@ -5792,7 +5792,8 @@ def worker_live(sp, now):
 
 def live_workers(now=None):
     now = now or time.time()
-    return [sp for sp in spawns.values() if sp.get("worker") and sp["status"] == "started" and worker_live(sp, now)]
+    # An approved one is launching right now and takes its slot already.
+    return [sp for sp in spawns.values() if sp.get("worker") and sp["status"] in ("started", "approved") and worker_live(sp, now)]
 
 
 def night_guard_on(now=None):
@@ -6933,7 +6934,7 @@ def start_spawn(sp, via):
     """Start an approved spawn, or queue a worker while the cap is reached; a queued one starts when a slot frees."""
     cap = int(config.get("max_live_spawns") or 0)
     with lock:
-        busy = len(live_workers()) if sp.get("worker") and cap else 0
+        busy = len([x for x in live_workers() if x is not sp]) if sp.get("worker") and cap else 0  # never itself
         if cap and busy >= cap:
             sid = sp["id"]
             if sp["status"] != "queued":
@@ -6961,7 +6962,9 @@ def start_spawn(sp, via):
             sp["status"], sp["note"] = "failed", err
             spawn_told(sp, f"Your user approved {sid}, but the agent in {sp['dir']} didn't start: {err}")
         else:
-            sp["status"], sp["note"] = "started", how
+            # Stamped now: a worker that sat in the queue longer than the grace window would otherwise take no slot
+            # until it registers, and every queued one would start at once.
+            sp["status"], sp["note"], sp["updated"] = "started", how, time.time()
             # The first prompt waits for the new agent's folder, as a message from whoever asked, so replies go back.
             req = sessions.get(sp["requester"]["id"]) or successor(sp["requester"]["cwd"])
             msg = {"id": f"m{next_msg[0]}", "ts": time.time(), "from": req["id"] if req else "peerlink",
@@ -6988,7 +6991,7 @@ def start_queued():
             if not queued or (cap and len(live_workers()) >= cap):
                 return
             sp = queued[0]
-            sp["status"] = "approved"
+            sp["status"], sp["updated"] = "approved", time.time()
         start_spawn(sp, "queue")
         log("spawn", sp["id"], sp["status"], "from the queue", sp["note"])
 
