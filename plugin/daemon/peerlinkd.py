@@ -921,18 +921,18 @@ def space_lead(space):
 
 
 def lead_rec(space):
-    """The live session leading a space: the agent you picked, while it runs in the lead's folder, else the folder's
-    successor (the one going by the folder's name). None when the space has no lead or nobody runs there."""
+    """The live session leading a space: the agent you picked, while it runs in the lead's folder in that space, else
+    the space's agent there going by the folder's name, else its most recently seen one there. None when the space has
+    no lead or none of its agents runs there: an agent of another space sharing the folder never stands in for it."""
     folder = space_lead(space)[0]
     if not folder:
         return None
     picked = agent_session((config.get("space_leads") or {}).get(space, {}).get("agent") or "")
-    if picked and picked.get("cwd") == folder:
+    if picked and picked.get("cwd") == folder and space_of(picked)[0] == space:
         return picked
-    # Agents sharing the folder may sit in other spaces: the lead is one of those in this one.
     here = [r for r in sessions.values() if r.get("cwd") == folder and is_live(r) and space_of(r)[0] == space]
     named = [r for r in here if display_name(r).lower() == folder_name(folder).lower()]
-    return max(named or here, key=lambda r: r["last_seen"]) if here else successor(folder)
+    return max(named or here, key=lambda r: r["last_seen"]) if here else None
 
 
 def leads(rec):
@@ -1023,7 +1023,13 @@ def note_lone_leads():
             # Right after a restart agents check back in one by one, so a lead not back yet keeps the grace too.
             running = agent_session(pinned)
             moved = bool(running) and space_of(running)[0] != space
-            if not moved and (running or now - max((agents.get(pinned) or {}).get("seen") or 0, DAEMON_START) < LEAD_GRACE_S):
+            if running and not moved:
+                # Back in the space under another spelling of its folder (a symlink, a trailing slash): the entry
+                # follows it, so the space keeps a lead it can reach.
+                entry["cwd"] = cwd
+                save_config()
+                continue
+            if not moved and now - max((agents.get(pinned) or {}).get("seen") or 0, DAEMON_START) < LEAD_GRACE_S:
                 continue
         else:
             moved = any(is_live(r) and r.get("cwd") == folder for r in sessions.values())
@@ -1035,11 +1041,10 @@ def note_lone_leads():
         if pick:
             config["space_leads"][space]["agent"] = pick
         save_config()
-        # Told, as a lead you pick is: else it learns it leads only when it's told it no longer does.
-        # To the agent in this space, not whichever agent its folder's name picks: a folder can hold agents of other spaces.
-        here = [r for r in sessions.values() if is_live(r) and r.get("cwd") == cwd and space_of(r)[0] == space]
+        # Told, as a lead you pick is: else it learns it leads only when it's told it no longer does. To the agent that
+        # now leads, in this space, not whichever agent its folder's name picks: a folder can hold agents of other spaces.
         task_message(None, cwd, f"You now lead the {space} space, as the only agent in it. Work sent to the space comes to you: decide which agent owns it, delegate with send_message, and report the outcome to whoever asked.",
-                     prefer=agent_session(pick) if pick else (max(here, key=lambda r: r["last_seen"]) if here else None))
+                     prefer=lead_rec(space))
         log("lead", space, "->", cwd, "(only agent)")
 
 
