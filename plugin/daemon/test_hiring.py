@@ -272,15 +272,58 @@ class HiringTest(unittest.TestCase):
         self.assertEqual(d.spawns[sp]["status"], "retired")
         self.assertIn(f"w0 retired, {tid} done.", self.told("lead"))
 
+    def gone_agents_mail(self, i=0):
+        """An agent that worked in folder i retired, and a message to it came in after."""
+        d.agent_of["s-gone"] = "a-gone"
+        d.inboxes["s-gone"] = [{"id": "m-old", "to": "s-gone", "to_name": "gone", "to_cwd": self.dirs[i], "text": "for gone"}]
+        self.addCleanup(d.agent_of.pop, "s-gone", None)
+
+    def ids(self, sid):
+        return [m["id"] for m in d.inboxes.get(sid, [])]
+
     def test_a_hire_takes_its_first_prompt_but_not_mail_left_for_a_gone_agent_in_its_folder(self):
         sp = self.hire()
-        # An agent that worked in the same folder retired; a message to it came in after.
-        d.inboxes["s-gone"] = [{"id": "m-old", "to": "s-gone", "to_name": "gone", "to_cwd": self.dirs[0], "text": "for gone"}]
+        self.gone_agents_mail()
         d.inboxes[f"spawn:{sp}"] = [{"id": "m-first", "to": f"spawn:{sp}", "to_cwd": self.dirs[0], "text": "Do the ticket"}]
         sid = self.register(sp, "w0")
         d.adopt(d.sessions[sid], spawn=d.spawns[sp])
-        self.assertEqual([m["id"] for m in d.inboxes[sid]], ["m-first"])
-        self.assertEqual([m["id"] for m in d.inboxes["s-gone"]], ["m-old"])
+        self.assertEqual(self.ids(sid), ["m-first"])
+        self.assertEqual(self.ids("s-gone"), ["m-old"])
+
+    def test_after_a_clear_a_hire_keeps_its_own_mail_and_still_takes_no_gone_agents(self):
+        sid = self.register(self.hire(), "w0")
+        d.sessions.pop(sid)
+        d.inboxes[sid] = [{"id": "m-mine", "to": sid, "to_cwd": self.dirs[0], "text": "for w0"}]
+        self.gone_agents_mail()
+        # The same agent in a new session, succeeding the old one, as a /clear registers it: no spawn this time.
+        new = {"id": "s-w0b", "name": "w0", "cwd": self.dirs[0], "agent": "a-w0", "last_seen": time.time()}
+        d.sessions["s-w0b"], d.agent_of["s-w0b"] = new, "a-w0"
+        self.addCleanup(d.agent_of.pop, "s-w0b", None)
+        d.adopt(new, old=sid)
+        self.assertEqual(self.ids("s-w0b"), ["m-mine"])
+        self.assertEqual(self.ids("s-gone"), ["m-old"])
+
+    def test_after_a_daemon_restart_a_hire_registering_again_takes_no_gone_agents_mail(self):
+        sid = self.register(self.hire(), "w0")
+        self.gone_agents_mail()
+        # Back under its own session id, with no spawn and nothing it succeeds.
+        d.adopt(d.sessions[sid])
+        self.assertEqual(self.ids(sid), [])
+        self.assertEqual(self.ids("s-gone"), ["m-old"])
+
+    def test_a_standing_agent_a_spawn_restarts_keeps_the_mail_queued_for_it(self):
+        status, out = d.request_spawn({"by": "s-lead", "dir": self.dirs[1], "purpose": "restart", "first_prompt": "Carry on", "name": "notes"})
+        self.assertEqual(status, 200, out)
+        sp = out["id"]
+        # Its last session ended with a message still queued for it.
+        d.agent_of["s-notes-old"] = "a-notes"
+        self.addCleanup(d.agent_of.pop, "s-notes-old", None)
+        d.inboxes["s-notes-old"] = [{"id": "m-own", "to": "s-notes-old", "to_cwd": self.dirs[1], "text": "for notes"}]
+        sid = self.register(sp, "notes")
+        d.adopt(d.sessions[sid], spawn=d.spawns[sp])
+        # Its own mail, beside the first prompt the spawn queued for it.
+        self.assertIn("m-own", self.ids(sid))
+        self.assertNotIn("s-notes-old", d.inboxes)
 
     def test_only_the_lead_that_hired_a_worker_retires_it_and_a_standing_agent_never_is(self):
         sp = self.hire()
