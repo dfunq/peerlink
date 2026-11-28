@@ -928,18 +928,25 @@ def lead_rec(space):
     if not folder:
         return None
     picked = agent_session((config.get("space_leads") or {}).get(space, {}).get("agent") or "")
-    if picked and picked.get("cwd") == folder and space_of(picked)[0] == space:
+    # A worker pinned by an older version never leads: the standing agent there does (i79).
+    if picked and picked.get("cwd") == folder and space_of(picked)[0] == space and not worker_spawn(picked):
         return picked
-    here = [r for r in sessions.values() if r.get("cwd") == folder and is_live(r) and space_of(r)[0] == space]
+    here = standing_here(space, folder)
     named = [r for r in here if display_name(r).lower() == folder_name(folder).lower()]
     return max(named or here, key=lambda r: r["last_seen"]) if here else None
+
+
+def standing_here(space, folder):
+    """The space's live agents in a folder that could lead it: never a worker, hired for one piece of work (i79)."""
+    return [r for r in sessions.values() if r.get("cwd") == folder and is_live(r) and space_of(r)[0] == space and not worker_spawn(r)]
 
 
 def leads(rec):
     """How rec leads its space ('set' or 'only'), or '' when it doesn't."""
     space = space_of(rec)[0]
     folder, how = space_lead(space)
-    if not (folder and rec.get("cwd") == folder):
+    # A worker never leads, even with no standing agent left in the lead's folder to lead instead (i79).
+    if not (folder and rec.get("cwd") == folder) or worker_spawn(rec):
         return ""
     # Agents sharing the lead's folder (ones it started) aren't leads too: the one you picked is, else the one
     # going by the folder's name.
@@ -988,16 +995,17 @@ def lead_to_pin(space, cwd):
     lead = lead_rec(space)
     if not lead or lead.get("cwd") != cwd or not lead.get("agent") or worker_spawn(lead):
         return ""
-    here = [r for r in sessions.values() if is_live(r) and r.get("cwd") == cwd and space_of(r)[0] == space]
-    return lead["agent"] if display_name(lead).lower() == folder_name(cwd).lower() or len(here) == 1 else ""
+    # Workers beside it don't make it ambiguous: only a standing agent could lead instead (i79).
+    return lead["agent"] if display_name(lead).lower() == folder_name(cwd).lower() or len(standing_here(space, cwd)) == 1 else ""
 
 
 def note_lone_leads():
     """An agent alone in its space leads it, and keeps leading when others join, until you pick another.
     The default space is where unsorted agents land, not a team, so it has no lead. Called with the lock held."""
+    # Workers never lead, so they neither make a space look shared nor keep its lead's folder looking occupied (i79).
     folders, now = {}, time.time()
     for r in sessions.values():
-        if is_live(r):
+        if is_live(r) and not worker_spawn(r):
             folders.setdefault(space_of(r)[0], set()).add(r.get("cwd", ""))
             folder_seen[r.get("cwd", "")] = now
     for space, cwds in folders.items():
@@ -1009,7 +1017,10 @@ def note_lone_leads():
         # A lead you cleared stays cleared until you pick one: the space's last agent doesn't take it back.
         folder, how = space_lead(space)
         entry = (config.get("space_leads") or {}).get(space) or {}
-        if folder == cwd and how == "only" and not entry.get("agent"):
+        pinned = entry.get("agent") or ""
+        # A worker pinned as lead (older versions did, i79) counts as no pin: it doesn't lead, and the lead moves on.
+        pinned_worker = bool(pinned) and bool(worker_spawn(agent_session(pinned) or {"agent": pinned}))
+        if folder == cwd and how == "only" and (not pinned or pinned_worker):
             # A default lead set before its agent was known (it's noted as the session registers) gets pinned to it.
             pick = lead_to_pin(space, cwd)
             if pick:
@@ -1017,8 +1028,7 @@ def note_lone_leads():
                 save_config()
         if folder == cwd or how == "set" or entry.get("how") == "none":
             continue
-        pinned = entry.get("agent") or ""
-        if pinned:
+        if pinned and not pinned_worker:
             # Go by the lead's own agent: another agent sharing its folder running (or not) says nothing about it.
             # Right after a restart agents check back in one by one, so a lead not back yet keeps the grace too.
             running = agent_session(pinned)
@@ -1031,10 +1041,13 @@ def note_lone_leads():
                 continue
             if not moved and now - max((agents.get(pinned) or {}).get("seen") or 0, DAEMON_START) < LEAD_GRACE_S:
                 continue
-        else:
-            moved = any(is_live(r) and r.get("cwd") == folder for r in sessions.values())
+        else:  # no pin, or a worker's: the folder's own standing agents get the grace
+            moved = any(is_live(r) and r.get("cwd") == folder and not worker_spawn(r) for r in sessions.values())
             if folder and not moved and now - folder_seen.get(folder, DAEMON_START) < LEAD_GRACE_S:
                 continue
+        # Only workers there: none of them leads, so the lead stays where it is until a standing agent turns up (i79).
+        if not standing_here(space, cwd):
+            continue
         # Pinned to its agent too, as a lead you pick is, so another agent opened in the same folder can't pass for it.
         config.setdefault("space_leads", {})[space] = {"cwd": cwd, "how": "only", "ts": time.time()}
         pick = lead_to_pin(space, cwd)
@@ -8713,7 +8726,6 @@ class Handler(BaseHTTPRequestHandler):
                 set_busy(rec, b.get("busy", False))
                 rec["last_seen"] = time.time()
                 sessions[sid] = rec
-                note_lone_leads()
                 old = b.get("succeeds")
                 # A session resumed while the one it continues still runs in another terminal doesn't take its place.
                 if old and sessions.get(old) and running_elsewhere(sessions[old], rec):
@@ -8739,6 +8751,9 @@ class Handler(BaseHTTPRequestHandler):
                 if not rec.get("summary") and agent.get("summary"):
                     rec.update(summary=agent["summary"], headline=agent.get("headline", ""), summary_ts=agent.get("summary_ts") or time.time())
                 save_agents()
+                # Only now that it has its agent: a worker back from /clear is known by its agent, and must not pass
+                # for a standing agent that could take the lead (i79).
+                note_lone_leads()
                 # A nickname you gave this agent is its name: another live one that took it first (registering
                 # sooner after a daemon restart) moves aside.
                 nick = session_cfg(sid)["nickname"]

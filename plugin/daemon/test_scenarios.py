@@ -105,6 +105,28 @@ class ScenarioTest(unittest.TestCase):
         second.poll()
         self.assertNotIn("For the old qa only.", [m["text"] for m in second.seen])
 
+    def test_a_worker_back_from_a_clear_never_takes_the_lead_of_a_space_whose_lead_left(self):
+        """i79: a worker's /clear registered before it was known as a worker, so it passed for a standing agent and
+        took the lead of a space whose lead had just moved away."""
+        folder = tempfile.mkdtemp(prefix="peerlink-launch-")
+        self.addCleanup(shutil.rmtree, folder, True)
+        rig = self.rig(env={"PEERLINK_TEST_LAUNCH": os.path.join(folder, "launched.jsonl")})
+        boss = rig.agent("boss", space="qa")
+        rig.call("POST", "/api/config", {"auto_approve_folders": [boss.cwd], "night_guard": "", "max_live_spawns": 0}, user=True)
+        wt = rig.folder("wt", space="qa")
+        code, out = boss.call("POST", "/api/spawns", {"dir": wt, "purpose": "smoke", "first_prompt": "Run the smoke.", "name": "smoke", "worker": True})
+        self.assertEqual((code, out.get("status")), (200, "started"), out)
+        worker = Agent(rig, "smoke", wt)
+        worker.register()
+        rig.agents.append(worker)
+        worker.expect("Run the smoke.")
+        rig.user("POST", "/api/folders/space", {"cwd": boss.cwd, "space": "elsewhere"})
+        worker.clear()
+        worker.poll()
+        self.assertFalse([m["text"] for m in worker.seen if "lead the qa space" in m["text"]])
+        leads = rig.call("GET", "/api/config", user=True)[1].get("space_leads", {})
+        self.assertEqual(leads.get("qa", {}).get("cwd"), boss.cwd)
+
     def test_an_answer_from_another_machine_threads_onto_the_question(self):
         """Alice on host a asks bob on host b; bob answers with reply_to alone, and the answer comes back
         to alice as the answer to her question, which no longer reads as waiting."""
