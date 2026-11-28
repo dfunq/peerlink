@@ -23,7 +23,8 @@ class LoneLead(unittest.TestCase):
                    unittest.mock.patch.object(d, "save_config", lambda: None),
                    unittest.mock.patch.object(d, "DAEMON_START", now),
                    unittest.mock.patch.object(d, "messages", []),
-                   unittest.mock.patch.object(d, "folder_seen", {})]
+                   unittest.mock.patch.object(d, "folder_seen", {}),
+                   unittest.mock.patch.object(d, "spawns", {})]
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
@@ -85,6 +86,33 @@ class LoneLead(unittest.TestCase):
         self.assertEqual(d.config["space_leads"]["apps"], {"cwd": "/x/hub/", "how": "only", "agent": "a-apps"})
         self.assertEqual(d.lead_rec("apps")["id"], "apps")
         self.assertFalse(self.told("apps"))
+
+    def hired(self, sid, name, cwd, space):
+        """A worker a spawn started, live in cwd."""
+        self.live(sid, name, cwd, space)
+        d.spawns["sp-" + sid] = {"id": "sp-" + sid, "worker": True, "status": "started", "agent_id": sid, "agent": "a-" + sid, "dir": cwd}
+
+    def test_workers_beside_the_lead_never_lead_and_the_lead_is_pinned_to_the_standing_agent(self):
+        """i79/i80: the lead's folder isn't named after it, and workers it hired share the folder."""
+        d.config["space_leads"]["apps"] = {"cwd": "/x/site", "how": "only"}  # handed over before it could be pinned
+        self.live("apps", "apps", "/x/site", "apps")
+        self.hired("w1", "w-1", "/x/site", "apps")
+        self.hired("w2", "w-2", "/x/site", "apps")
+        d.sessions["w2"]["last_seen"] += 5  # seen last, as a worker's heartbeat often is
+        with d.lock:
+            d.note_lone_leads()
+        self.assertEqual(d.config["space_leads"]["apps"].get("agent"), "a-apps")
+        self.assertEqual(d.lead_rec("apps")["id"], "apps")
+        self.assertEqual([d.leads(d.sessions[s]) for s in ("apps", "w1", "w2")], ["only", "", ""])
+        self.assertFalse(self.told("w1") + self.told("w2"))
+
+    def test_a_space_with_only_workers_left_keeps_its_lead_and_tells_no_worker_it_leads(self):
+        self.hired("w1", "w-1", "/x/site", "apps")
+        with unittest.mock.patch.object(d, "DAEMON_START", time.time() - d.LEAD_GRACE_S - 5), d.lock:
+            d.note_lone_leads()
+        self.assertEqual(d.config["space_leads"]["apps"]["cwd"], "/x/hub")
+        self.assertIsNone(d.lead_rec("apps"))
+        self.assertFalse(self.told("w1"))
 
 
 if __name__ == "__main__":

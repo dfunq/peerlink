@@ -930,9 +930,14 @@ def lead_rec(space):
     picked = agent_session((config.get("space_leads") or {}).get(space, {}).get("agent") or "")
     if picked and picked.get("cwd") == folder and space_of(picked)[0] == space:
         return picked
-    here = [r for r in sessions.values() if r.get("cwd") == folder and is_live(r) and space_of(r)[0] == space]
+    here = standing_here(space, folder)
     named = [r for r in here if display_name(r).lower() == folder_name(folder).lower()]
     return max(named or here, key=lambda r: r["last_seen"]) if here else None
+
+
+def standing_here(space, folder):
+    """The space's live agents in a folder that could lead it: never a worker, hired for one piece of work (i79)."""
+    return [r for r in sessions.values() if r.get("cwd") == folder and is_live(r) and space_of(r)[0] == space and not worker_spawn(r)]
 
 
 def leads(rec):
@@ -988,8 +993,8 @@ def lead_to_pin(space, cwd):
     lead = lead_rec(space)
     if not lead or lead.get("cwd") != cwd or not lead.get("agent") or worker_spawn(lead):
         return ""
-    here = [r for r in sessions.values() if is_live(r) and r.get("cwd") == cwd and space_of(r)[0] == space]
-    return lead["agent"] if display_name(lead).lower() == folder_name(cwd).lower() or len(here) == 1 else ""
+    # Workers beside it don't make it ambiguous: only a standing agent could lead instead (i79).
+    return lead["agent"] if display_name(lead).lower() == folder_name(cwd).lower() or len(standing_here(space, cwd)) == 1 else ""
 
 
 def note_lone_leads():
@@ -1035,6 +1040,9 @@ def note_lone_leads():
             moved = any(is_live(r) and r.get("cwd") == folder for r in sessions.values())
             if folder and not moved and now - folder_seen.get(folder, DAEMON_START) < LEAD_GRACE_S:
                 continue
+        # Only workers there: none of them leads, so the lead stays where it is until a standing agent turns up (i79).
+        if not standing_here(space, cwd):
+            continue
         # Pinned to its agent too, as a lead you pick is, so another agent opened in the same folder can't pass for it.
         config.setdefault("space_leads", {})[space] = {"cwd": cwd, "how": "only", "ts": time.time()}
         pick = lead_to_pin(space, cwd)
