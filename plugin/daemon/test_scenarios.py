@@ -2,8 +2,10 @@
 restart. Run: python3 -m unittest discover -s plugin/daemon"""
 import os
 import json
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -71,8 +73,9 @@ class ScenarioTest(unittest.TestCase):
 
     def test_a_same_name_rehire_right_after_a_retire_is_a_new_agent_with_none_of_the_old_ones_mail(self):
         """i78: a worker hired under the name of one that just retired in the same folder took its agent and its mail."""
-        sink = os.path.join(os.environ.get("TMPDIR", "/tmp"), f"launch-{uuid.uuid4()}.jsonl")
-        self.addCleanup(lambda: os.path.exists(sink) and os.remove(sink))
+        folder = tempfile.mkdtemp(prefix="peerlink-launch-")
+        self.addCleanup(shutil.rmtree, folder, True)
+        sink = os.path.join(folder, "launched.jsonl")
         rig = self.rig(env={"PEERLINK_TEST_LAUNCH": sink})
         lead = rig.agent("lead", space="qa")
         rig.call("POST", "/api/config", {"auto_approve_folders": [lead.cwd], "night_guard": "", "max_live_spawns": 0}, user=True)
